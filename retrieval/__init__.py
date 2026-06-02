@@ -1,0 +1,2 @@
+from .criterios_client import CriteriosSearchClient
+from .estadistica_client import EstadisticaSearchClient
