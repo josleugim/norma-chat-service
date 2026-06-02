@@ -153,7 +153,7 @@ class CitationBuilder:
 
         return ReferenceItem(
             id_expediente=id_exp,
-            nombre_expediente=meta.get("nombre_expediente", ""),
+            nombre_expediente=meta.get("nombre_expediente") or "",
             source_type="criterio",
             relevance_score=item.get("score", 0) if isinstance(item, dict) else 0,
             url=self._build_url(id_exp),
