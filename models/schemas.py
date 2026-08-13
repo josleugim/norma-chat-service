@@ -46,6 +46,11 @@ class ChatRequest(BaseModel):
     chat_history: list[dict] = Field(default_factory=list)
     is_first_message: bool = False
 
+    # --- Trazabilidad (opcionales, para corridas de prueba) ---
+    turn_index: Optional[int] = None      # si no viene, se infiere del historial
+    question_set_id: Optional[str] = None  # id de la pregunta en la batería
+    client: str = "frontend"               # "frontend" | "test_harness" | "curl"
+
 
 class ModelInfo(BaseModel):
     provider: str

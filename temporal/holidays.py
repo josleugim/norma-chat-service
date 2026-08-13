@@ -9,6 +9,7 @@ Carga desde un archivo XLSX con las columnas:
 El archivo ya incluye fines de semana como registros, por lo que
 is_business_day() solo necesita verificar si la fecha está en el set.
 """
+import hashlib
 import logging
 from datetime import date, timedelta
 from pathlib import Path
@@ -26,11 +27,20 @@ class HolidayCalendar:
         self.cna_holidays: set[date] = set()
         # Metadata por fecha: {date: [{tipo, institucion, fundamento}]}
         self.metadata: dict[date, list[dict]] = {}
+        # Trazabilidad: hash del catálogo cargado, para versionar la corrida
+        self.source_sha256: str | None = None
 
         self._load(holidays_path)
 
     def _load(self, path: str):
         file_path = Path(path)
+        if file_path.exists():
+            try:
+                self.source_sha256 = hashlib.sha256(
+                    file_path.read_bytes()
+                ).hexdigest()[:12]
+            except OSError as e:
+                logger.warning(f"No se pudo hashear {path}: {e}")
         if not file_path.exists():
             logger.warning(
                 f"Archivo de días inhábiles no encontrado: {path}. "
@@ -156,3 +166,43 @@ class HolidayCalendar:
     def get_holiday_info(self, d: date) -> list[dict] | None:
         """Retorna metadata del día inhábil, o None si es hábil."""
         return self.metadata.get(d)
+
+    # ── Cobertura del catálogo (para trazabilidad) ──────────────
+
+    def _holidays_for(self, institucion: str | None) -> set[date]:
+        if institucion:
+            inst = institucion.strip().upper()
+            if inst == "COFECE":
+                return self.cofece_holidays
+            if inst == "CNA":
+                return self.cna_holidays
+        return self.all_holidays
+
+    def coverage_ranges(self) -> dict[str, list[str]]:
+        """
+        Rango de fechas cubierto por el catálogo, por institución.
+
+        Importa porque la cobertura es desigual (COFECE y CNA no cubren los
+        mismos años) y fuera de rango el cálculo de días hábiles degrada.
+        """
+        ranges: dict[str, list[str]] = {}
+        for name, dates in (
+            ("COFECE", self.cofece_holidays),
+            ("CNA", self.cna_holidays),
+            ("ALL", self.all_holidays),
+        ):
+            if dates:
+                ranges[name] = [min(dates).isoformat(), max(dates).isoformat()]
+        return ranges
+
+    def is_covered(self, d: date, institucion: str | None = None) -> bool:
+        """
+        True si la fecha cae dentro del rango del catálogo para esa institución.
+
+        Fuera de rango, `is_business_day` no tiene datos y los fines de semana
+        pueden contarse como hábiles: el plazo resultante no es confiable.
+        """
+        dates = self._holidays_for(institucion)
+        if not dates:
+            return False
+        return min(dates) <= d <= max(dates)

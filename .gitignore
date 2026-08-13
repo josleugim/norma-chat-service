@@ -47,3 +47,6 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# Trazas de corridas (se exportan, no se versionan)
+traces/

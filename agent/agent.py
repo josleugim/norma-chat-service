@@ -6,7 +6,7 @@ Cada tool call emite un evento SSE de razonamiento para el frontend.
 """
 import json
 import logging
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 from llm.registry import LLMRegistry
 from retrieval.criterios_client import CriteriosSearchClient
@@ -14,6 +14,11 @@ from retrieval.estadistica_client import EstadisticaSearchClient
 from temporal.analyzer import TemporalAnalyzer
 from core.citation_builder import CitationBuilder
 from core.evidence_cache import EvidenceCache
+from core.tracing import (
+    NullSink, Request as TraceRequest, TraceCollector, analyze_answer,
+    build_versions, interpret,
+)
+from core.tracing.versioning import sha256_short
 from agent.tools import TOOLS
 from prompts.system import AGENT_SYSTEM_PROMPT, TITLE_GENERATION_PROMPT
 from models.schemas import (
@@ -21,6 +26,11 @@ from models.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Truncado del texto de criterios al serializarlos para el LLM.
+# Es una de las tres etapas de retrieval: lo que entra al contexto no es lo
+# mismo que lo que devolvió el buscador.
+CRITERIO_CONTEXT_CHARS = 700
 
 
 class NormaPlusAgent:
@@ -34,6 +44,9 @@ class NormaPlusAgent:
         citation_builder: CitationBuilder,
         evidence_cache: EvidenceCache,
         max_tool_calls: int = 6,
+        trace_sink=None,
+        manifest_store=None,
+        settings=None,
     ):
         self.llm_registry = llm_registry
         self.criterios = criterios_client
@@ -42,6 +55,12 @@ class NormaPlusAgent:
         self.citations = citation_builder
         self.evidence_cache = evidence_cache
         self.max_tool_calls = max_tool_calls
+
+        # ── Trazabilidad ────────────────────────────────────
+        # Observa; nunca altera el comportamiento del agente.
+        self.trace_sink = trace_sink or NullSink()
+        self.manifest_store = manifest_store
+        self.settings = settings
 
         self.tool_executors = {
             "buscar_criterios": self._exec_buscar_criterios,
@@ -57,14 +76,56 @@ class NormaPlusAgent:
         model: str,
         chat_history: list[dict],
         is_first_message: bool = False,
+        turn_index: int = 0,
+        question_set_id: Optional[str] = None,
+        client: str = "frontend",
     ) -> AsyncIterator[StreamEvent]:
         """
         Ejecuta el agente. Yields StreamEvents para el frontend.
         """
         adapter = self.llm_registry.get_adapter(provider)
 
+        collector = self._new_collector(
+            session_id=session_id,
+            user_query=user_query,
+            provider=provider,
+            model=model,
+            chat_history=chat_history,
+            is_first_message=is_first_message,
+            turn_index=turn_index,
+            question_set_id=question_set_id,
+            client=client,
+        )
+
+        try:
+            async for event in self._run_traced(
+                collector, adapter, session_id, user_query, provider, model,
+                chat_history, is_first_message,
+            ):
+                if collector is not None:
+                    collector.count_sse_event(event.type)
+                yield event
+        finally:
+            # La traza se escribe también si la petición falla o el cliente
+            # corta la conexión — que son justo los casos del comentario #5,
+            # los más valiosos de conservar.
+            self._flush_trace(collector)
+
+    async def _run_traced(
+        self,
+        collector,
+        adapter,
+        session_id: str,
+        user_query: str,
+        provider: str,
+        model: str,
+        chat_history: list[dict],
+        is_first_message: bool,
+    ) -> AsyncIterator[StreamEvent]:
         # Construir mensajes para el LLM en formato nativo
-        messages = self._build_messages(user_query, chat_history, provider, session_id)
+        messages = self._build_messages(
+            user_query, chat_history, provider, session_id, collector
+        )
 
         all_criterios_results: list[list] = []
         all_expedientes_results: list[list] = []
@@ -76,6 +137,8 @@ class NormaPlusAgent:
         # ── Agent loop ──────────────────────────────────────
         exhausted_tools = False
         while tool_call_count < self.max_tool_calls:
+            if collector is not None:
+                collector.begin_step("llm_call")
             response = await adapter.completion_with_tools(
                 messages=messages,
                 model=model,
@@ -83,6 +146,11 @@ class NormaPlusAgent:
             )
             total_input_tokens += response.input_tokens
             total_output_tokens += response.output_tokens
+            if collector is not None:
+                collector.end_step(tokens={
+                    "input": response.input_tokens,
+                    "output": response.output_tokens,
+                })
 
             if response.tool_calls:
                 # El LLM quiere usar herramientas
@@ -100,11 +168,21 @@ class NormaPlusAgent:
                     )
 
                     # Ejecutar herramienta
+                    if collector is not None:
+                        collector.begin_step("tool_call", tool=tc.name,
+                                             arguments=tc.arguments)
                     try:
-                        result = await self.tool_executors[tc.name](tc.arguments)
+                        result = await self.tool_executors[tc.name](
+                            tc.arguments, collector
+                        )
+                        if collector is not None:
+                            collector.end_step("ok")
                     except Exception as e:
                         logger.error(f"Error ejecutando {tc.name}: {e}")
                         result = {"error": str(e)}
+                        if collector is not None:
+                            collector.end_step("error", error=str(e))
+                            collector.add_error(f"tool:{tc.name}", str(e))
 
                     # Rastrear resultados para citation_builder
                     if tc.name == "buscar_criterios":
@@ -130,14 +208,19 @@ class NormaPlusAgent:
                 # El LLM tiene la respuesta final — hacer streaming
                 if response.content:
                     # Si ya generó texto sin tools, emitirlo
+                    if collector is not None:
+                        collector.set_decision("final_answer_path", "content")
                     final_text = response.content
                     for chunk in self._chunk_text(final_text):
                         yield StreamEvent(type="token", data={"text": chunk})
                 else:
                     # Hacer streaming de la respuesta final
+                    if collector is not None:
+                        collector.set_decision("final_answer_path", "stream")
+                        collector.begin_step("llm_call")
                     final_parts = []
                     stream_messages = self._prepare_messages_for_stream(
-                        messages, provider
+                        messages, provider, collector
                     )
                     async for chunk in adapter.stream_completion(
                         messages=stream_messages,
@@ -151,6 +234,8 @@ class NormaPlusAgent:
                         if chunk.output_tokens:
                             total_output_tokens += chunk.output_tokens
                     final_text = "".join(final_parts)
+                    if collector is not None:
+                        collector.end_step("ok")
                 break
         else:
             # El while terminó porque tool_call_count >= max_tool_calls
@@ -163,6 +248,8 @@ class NormaPlusAgent:
 
         # ── Fallback: forzar respuesta final si se agotaron tools ──
         if exhausted_tools:
+            if collector is not None:
+                collector.set_decision("final_answer_path", "forced_synthesis")
             yield StreamEvent(
                 type="thinking",
                 data={
@@ -199,7 +286,7 @@ class NormaPlusAgent:
                     # Último recurso: streaming
                     final_parts = []
                     stream_messages = self._prepare_messages_for_stream(
-                        messages, provider
+                        messages, provider, collector
                     )
                     async for chunk in adapter.stream_completion(
                         messages=stream_messages,
@@ -215,6 +302,8 @@ class NormaPlusAgent:
                     final_text = "".join(final_parts)
             except Exception as e:
                 logger.error(f"Error en fallback de respuesta: {e}")
+                if collector is not None:
+                    collector.add_error("fallback_synthesis", str(e))
                 final_text = (
                     "La consulta requirió más búsquedas de las que puedo "
                     "realizar en un solo turno. Por favor, reformula tu "
@@ -246,6 +335,22 @@ class NormaPlusAgent:
                 data={"items": [ref.model_dump() for ref in references]},
             )
 
+        # ── Analizar la respuesta para la traza ─────────────
+        if collector is not None:
+            try:
+                collector.set_answer(analyze_answer(
+                    text=final_text,
+                    citation_builder=self.citations,
+                    criterio_results=all_criterios_results,
+                    expediente_results=all_expedientes_results,
+                    references=references,
+                    docs_in_context=collector.context.docs_in_context,
+                    expected_prefixes=collector.interpretation.scope.procedure_prefix,
+                ))
+            except Exception as e:
+                logger.warning(f"Error analizando respuesta para la traza: {e}")
+                collector.add_error("analyze_answer", str(e))
+
         # ── Generar título si es primer mensaje ─────────────
         session_title = None
         if is_first_message and final_text:
@@ -258,6 +363,8 @@ class NormaPlusAgent:
                 session_title = user_query[:60]
 
         # ── Done ────────────────────────────────────────────
+        # El trace_id viaja al frontend para que un reporte de "esta respuesta
+        # salió mal" apunte a una traza concreta.
         yield StreamEvent(
             type="done",
             data={
@@ -266,14 +373,99 @@ class NormaPlusAgent:
                 "tool_calls_count": tool_call_count,
                 "session_title": session_title,
                 "exhausted_tools": exhausted_tools,
+                "trace_id": collector.trace_id if collector else None,
             },
         )
+
+        if collector is not None:
+            collector.pending_finish = {
+                "status": "ok",
+                "exhausted_tools": exhausted_tools,
+                "tokens_input": total_input_tokens,
+                "tokens_output": total_output_tokens,
+            }
+
+    # ── Trazabilidad ────────────────────────────────────────
+
+    def _new_collector(
+        self, session_id: str, user_query: str, provider: str, model: str,
+        chat_history: list[dict], is_first_message: bool, turn_index: int,
+        question_set_id: Optional[str], client: str,
+    ):
+        """Crea el recolector. Si algo falla, se devuelve None y el agente
+        corre exactamente igual, sin traza."""
+        if isinstance(self.trace_sink, NullSink):
+            return None
+        try:
+            versions = build_versions(
+                self.settings, provider, model,
+                calendar=getattr(self.temporal, "cal", None),
+            )
+            collector = TraceCollector(
+                conversation_id=session_id,
+                versions=versions,
+                request=TraceRequest(
+                    query=user_query,
+                    query_sha256=sha256_short(user_query),
+                    provider=provider,
+                    model=model,
+                    chat_history_len=len(chat_history or []),
+                    is_first_message=is_first_message,
+                    client=client,
+                    question_set_id=question_set_id,
+                ),
+                turn_index=turn_index,
+                run_id=getattr(self.settings, "run_id", None),
+                full_text=getattr(self.settings, "tracing_full_text", False),
+            )
+            collector.pending_finish = {}
+            collector.set_interpretation(interpret(user_query))
+            if self.manifest_store is not None:
+                store = self.manifest_store
+                store.load_or_create(
+                    versions,
+                    label=getattr(self.settings, "run_label", "") or "",
+                    question_set=getattr(self.settings, "question_set", "") or None,
+                )
+                collector.drift = collector.check_drift(store.frozen_versions)
+            return collector
+        except Exception as e:
+            logger.error(f"No se pudo inicializar la traza: {e}")
+            return None
+
+    def _flush_trace(self, collector) -> None:
+        """Cierra y escribe la traza. Nunca propaga excepciones."""
+        if collector is None:
+            return
+        try:
+            pending = getattr(collector, "pending_finish", None) or {}
+            if not pending:
+                # El generador se interrumpió antes del evento `done`:
+                # cliente desconectado o excepción aguas arriba.
+                pending = {"status": "error", "exhausted_tools": False,
+                           "tokens_input": 0, "tokens_output": 0}
+                collector.add_error("run", "turno interrumpido antes de `done`")
+            trace = collector.finish(
+                status=pending.get("status", "ok"),
+                exhausted_tools=pending.get("exhausted_tools", False),
+                tokens_input=pending.get("tokens_input", 0),
+                tokens_output=pending.get("tokens_output", 0),
+            )
+            self.trace_sink.write(trace)
+            if self.manifest_store is not None:
+                self.manifest_store.record_trace(
+                    trace.trace_id,
+                    getattr(collector, "drift", []) or [],
+                    model=trace.versions.model,
+                )
+        except Exception as e:
+            logger.error(f"No se pudo cerrar la traza: {e}")
 
     # ── Constructores de mensajes ───────────────────────────
 
     def _build_messages(
         self, user_query: str, chat_history: list[dict],
-        provider: str, session_id: str,
+        provider: str, session_id: str, collector=None,
     ) -> list[dict]:
         """Construye mensajes en formato dict genérico, incluyendo cache."""
         # Obtener evidencia cacheada relevante
@@ -307,7 +499,41 @@ class NormaPlusAgent:
                 "content": m.get("content", ""),
             })
         messages.append({"role": "user", "content": user_query})
+
+        # El cache inyecta evidencia de turnos anteriores en el system prompt.
+        # Sin registrarla, habría documentos en el contexto que no vienen del
+        # retrieval de este turno y la respuesta parecería salir de la nada.
+        if collector is not None:
+            collector.set_context(
+                system_prompt=system_content,
+                messages_count=len(messages),
+                cached_evidence_used=bool(used_cache and cache_context),
+                cached_evidence_items=self._describe_cached_evidence(
+                    cached_criterios, cached_expedientes
+                ),
+                docs_in_context=[],
+                total_context_chars=len(system_content),
+            )
         return messages
+
+    def _describe_cached_evidence(
+        self, cached_criterios: list, cached_expedientes: list,
+    ) -> list[dict]:
+        items = []
+        for c in cached_criterios or []:
+            meta = c.get("metadata", {}) if isinstance(c, dict) else {}
+            items.append({
+                "doc_id": str(c.get("id", "")) if isinstance(c, dict) else "",
+                "case_link": meta.get("id_expediente", ""),
+                "source_type": "criterio",
+            })
+        for e in cached_expedientes or []:
+            items.append({
+                "doc_id": str(e.get("id", "")) if isinstance(e, dict) else "",
+                "case_link": e.get("id_expediente") or e.get("caseLink", ""),
+                "source_type": "estadistica",
+            })
+        return items
 
     def _append_tool_result(
         self,
@@ -363,22 +589,52 @@ class NormaPlusAgent:
 
     # ── Ejecutores de herramientas ──────────────────────────
 
-    async def _exec_buscar_criterios(self, args: dict) -> list:
+    async def _exec_buscar_criterios(self, args: dict, collector=None) -> list:
         results = await self.criterios.search(
             query=args["query"],
             top_k=args.get("top_k", 15),
+            collector=collector,
         )
-        return [
+        serialized = [
             {
                 "id": r.id,
-                "text": r.text[:700],  # truncar para no explotar el contexto
+                # truncar para no explotar el contexto
+                "text": r.text[:CRITERIO_CONTEXT_CHARS],
                 "score": r.score,
                 "metadata": r.metadata,
             }
             for r in results
         ]
 
-    async def _exec_buscar_expedientes(self, args: dict) -> list:
+        # Etapa 3 — lo que realmente entra al prompt. Es aquí donde se pierde
+        # texto respecto de lo que devolvió el buscador.
+        if collector is not None:
+            collector.record_stage(
+                stage="in_context",
+                method=f"truncate({CRITERIO_CONTEXT_CHARS})",
+                docs=[
+                    {**d, "text_len_in_context": len(d["text"])}
+                    for d in serialized
+                ],
+                notes=(
+                    f"El texto de cada criterio se recorta a "
+                    f"{CRITERIO_CONTEXT_CHARS} caracteres antes de serializarse."
+                ),
+            )
+            collector.add_docs_in_context([
+                {
+                    "doc_id": str(r.id),
+                    "case_link": r.metadata.get("id_expediente", ""),
+                    "source_type": "criterio",
+                    "chars_in_context": min(len(r.text), CRITERIO_CONTEXT_CHARS),
+                    "chars_full": len(r.text),
+                    "truncated": len(r.text) > CRITERIO_CONTEXT_CHARS,
+                }
+                for r in results
+            ])
+        return serialized
+
+    async def _exec_buscar_expedientes(self, args: dict, collector=None) -> list:
         text_search = args.get("text_search")
         limit = args.get("limit", 50)
         has_multas = args.get("has_multas", False)
@@ -407,6 +663,7 @@ class NormaPlusAgent:
             text_search=text_search,
             filters=filters if filters else None,
             limit=fetch_limit,
+            collector=collector,
         )
 
         serialized = [r.model_dump() for r in results]
@@ -425,9 +682,31 @@ class NormaPlusAgent:
             serialized = [r for r in serialized if _has_fines(r)]
             serialized = serialized[:limit]
 
+        if collector is not None:
+            collector.record_stage(
+                stage="in_context",
+                method="post_filter(has_multas)" if has_multas else "serialize_full",
+                docs=serialized,
+                notes=(
+                    "has_multas se filtra localmente: la API no tiene ese filtro."
+                    if has_multas else None
+                ),
+            )
+            collector.add_docs_in_context([
+                {
+                    "doc_id": str(r.get("id", "")),
+                    "case_link": r.get("caseLink", ""),
+                    "source_type": "estadistica",
+                    "chars_in_context": len(json.dumps(r, default=str)),
+                    "chars_full": len(json.dumps(r, default=str)),
+                    "truncated": False,
+                }
+                for r in serialized
+            ])
+
         return serialized
 
-    async def _exec_calcular_plazos(self, args: dict) -> dict:
+    async def _exec_calcular_plazos(self, args: dict, collector=None) -> dict:
         expedientes = args.get("expedientes", [])
         enriched = self.temporal.enrich_with_plazos(expedientes)
 
@@ -460,7 +739,82 @@ class NormaPlusAgent:
                 data_for_stats, plazo_field=plazo_field
             )
 
+        if collector is not None:
+            collector.record_computation(
+                self._describe_computation(
+                    enriched, plazo_field, fecha_inicio, result.get("stats")
+                )
+            )
+
         return result
+
+    def _describe_computation(
+        self, enriched: list[dict], plazo_field: str,
+        fecha_inicio: str, stats: dict | None,
+    ) -> dict:
+        """
+        Audita el cómputo de plazos caso por caso.
+
+        Registra dos cosas que hoy no se pueden ver desde fuera: la convención
+        de conteo vigente, y si la fecha cayó fuera del rango del catálogo de
+        días inhábiles para esa institución — en cuyo caso los fines de semana
+        se cuentan como hábiles y el plazo no es confiable.
+        """
+        cal = getattr(self.temporal, "cal", None)
+        start_field = (
+            "admissionDate" if fecha_inicio == "fecha_admision" else "notificationDate"
+        )
+
+        per_case = []
+        for rec in enriched:
+            authority = rec.get("authority") or rec.get("autoridad")
+            d_start = self.temporal._parse_date(
+                rec.get(start_field) or rec.get(fecha_inicio)
+            )
+            d_end = self.temporal._parse_date(
+                rec.get("resolutionDate") or rec.get("fecha_resolucion")
+            )
+            out_of_coverage = False
+            note = None
+            if cal is not None and d_start and d_end:
+                covered = cal.is_covered(d_start, authority) and \
+                    cal.is_covered(d_end, authority)
+                if not covered:
+                    out_of_coverage = True
+                    ranges = cal.coverage_ranges().get(
+                        (authority or "ALL").upper(), []
+                    )
+                    note = (
+                        f"Fechas fuera del rango del catálogo para "
+                        f"{authority or 'ALL'} ({ranges}); los fines de semana "
+                        f"fuera de rango se contaron como hábiles."
+                    )
+            per_case.append({
+                "case_link": rec.get("caseLink") or rec.get("id_expediente", ""),
+                "authority": authority,
+                "date_start": d_start.isoformat() if d_start else None,
+                "date_field_start": start_field,
+                "date_end": d_end.isoformat() if d_end else None,
+                "date_field_end": "resolutionDate",
+                "business_days": rec.get(plazo_field),
+                "calendar_days": rec.get("dias_calendario_notif_resol"),
+                "out_of_coverage": out_of_coverage,
+                "coverage_note": note,
+            })
+
+        return {
+            "tool_called": True,
+            "convention": {
+                # Documentado por traza: la convención vigente excluye ambos
+                # extremos (temporal/holidays.py: business_days_between).
+                "excludes_start_day": True,
+                "includes_end_day": False,
+                "calendar": "por institución del expediente (authority)",
+                "plazo_field": plazo_field,
+            },
+            "per_case": per_case[:200],
+            "stats": stats,
+        }
 
     # ── Helpers ─────────────────────────────────────────────
 
@@ -473,7 +827,7 @@ class NormaPlusAgent:
         return {"result": str(result)}
 
     def _prepare_messages_for_stream(
-        self, messages: list[dict], provider: str,
+        self, messages: list[dict], provider: str, collector=None,
     ) -> list[LLMMessage]:
         """
         Convierte mensajes dict (que pueden contener tool_calls/tool_results
@@ -485,6 +839,16 @@ class NormaPlusAgent:
         respuesta final.
         """
         clean: list[LLMMessage] = []
+        # Esta ruta condensa cada resultado de herramienta a ~200-500 chars:
+        # el modelo redacta la respuesta final sin ver la evidencia completa
+        # que acababa de recuperar. Se marca en la traza para poder medir su
+        # efecto sobre la calidad de las respuestas.
+        if collector is not None and any(
+            isinstance(m.get("content"), list) or m.get("role") == "tool"
+            or (m.get("content") is None and m.get("tool_calls"))
+            for m in messages
+        ):
+            collector.set_decision("context_condensed", True, "derived")
 
         for m in messages:
             role = m.get("role", "user")

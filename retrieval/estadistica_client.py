@@ -32,6 +32,7 @@ class EstadisticaSearchClient:
         limit: int = 50,
         page: int = 1,
         search_field: str | None = None,
+        collector=None,
     ) -> list[ExpedienteRecord]:
         """
         Búsqueda de expedientes/casos vía GET /cases/search.
@@ -105,10 +106,14 @@ class EstadisticaSearchClient:
 
         logger.debug(f"Buscando expedientes: params={params}")
 
+        url = f"{self.base_url}/cases/search"
+        if collector is not None:
+            collector.record_http_request("GET", url, params=dict(params))
+
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 resp = await client.get(
-                    f"{self.base_url}/cases/search",
+                    url,
                     params=params,
                     headers=headers,
                 )
@@ -116,9 +121,13 @@ class EstadisticaSearchClient:
                 data = resp.json()
         except httpx.ConnectError:
             logger.warning("Endpoint de casos no disponible.")
+            if collector is not None:
+                collector.add_error("estadistica_client", "ConnectError")
             return []
         except httpx.HTTPStatusError as e:
             logger.warning(f"Error en endpoint de casos: {e}")
+            if collector is not None:
+                collector.add_error("estadistica_client", str(e))
             return []
 
         # Respuesta paginada: { "data": [...], "meta": {...} }
@@ -138,6 +147,27 @@ class EstadisticaSearchClient:
             except Exception as e:
                 logger.warning(f"Error parseando caso: {e}")
                 continue
+
+        # Etapa única de retrieval: /cases/search filtra en SQL y no hay
+        # reranking posterior. `meta.total` es lo que permite saber si la
+        # respuesta se construyó sobre el universo completo o sobre una página.
+        if collector is not None:
+            collector.record_stage(
+                stage="candidates",
+                method="sql_filter:/cases/search",
+                docs=list(items),
+                notes=(
+                    "searchData usa ILIKE + unaccent sobre caseLink, name, "
+                    "economicAgents y relevantMarkets; no es fuzzy."
+                ),
+            )
+            collector.record_coverage(
+                total_available=meta.get("total") if meta else None,
+                requested_limit=limit,
+                returned=len(results),
+                pages_fetched=1,
+                truncation_reason="limit",
+            )
 
         logger.debug(f"Expedientes parseados: {len(results)}")
         return results

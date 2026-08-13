@@ -1,0 +1,182 @@
+{
+  "question_set_id": "pruebas_imanol_v1",
+  "version": "1.0",
+  "created": "2026-08-13",
+  "source": "Conversaciones de Imanol (COFECE) en normaplus.ai/chat, 11-ago-2026, documentadas en 'Pruebas 1 Agente Norma+.docx'",
+  "notes": [
+    "Las preguntas marcadas origen='literal' están transcritas de las capturas.",
+    "Las marcadas origen='titulo' se reconstruyeron del título de la conversación en la barra lateral; conviene que Imanol las confirme.",
+    "Las marcadas origen='derivada' las agregamos para cubrir un hueco de medición.",
+    "'ground_truth' se midió contra la API de staging el 13-ago-2026. Si el acervo cambia, hay que revisarlo.",
+    "'senales_esperadas' son las banderas de la traza que esperamos ver ENCENDIDAS en v1. No son el resultado deseado: son el diagnóstico que queremos poder demostrar."
+  ],
+
+  "universo_medido": {
+    "fecha_medicion": "2026-08-13",
+    "fuente": "GET /cases/search en api-staging.normaplus.ai",
+    "total_expedientes": 4632,
+    "por_prefijo": { "CNT": 4588, "VCN": 36, "IO": 6, "DE": 2, "RA": 2, "CON": 1 },
+    "cobertura_de_fechas": {
+      "CNT": { "notificationDate": "200/200", "resolutionDate": "197/200", "admissionDate": "0/200" },
+      "VCN": { "notificationDate": "0/36", "resolutionDate": "31/36", "admissionDate": "0/36" },
+      "IO": { "notificationDate": "0/6", "resolutionDate": "5/6", "admissionDate": "0/6" }
+    }
+  },
+
+  "questions": [
+    {
+      "id": "q01",
+      "origen": "literal",
+      "texto": "dime cuánto tiempo en promedio se tarda la COFECE en resolver un asunto VCN",
+      "categoria": "plazos + precision_scope",
+      "comentarios_imanol": [7, 8, 10],
+      "por_que_importa": "Es la pregunta que produjo el error VCN/CNT del comentario #7: el agente respondió con expedientes CNT (CNT-030-2015, CNT-011-2017, ...) y un promedio de 49 días hábiles que no corresponde a VCN.",
+      "ground_truth": "No calculable con los datos actuales: los 36 VCN tienen 0 notificationDate. Cualquier promedio de días hábiles VCN notificación→resolución es inventado.",
+      "senales_esperadas": ["scope_mismatch", "plazo_inputs_missing", "coverage_truncated"]
+    },
+    {
+      "id": "q02",
+      "origen": "literal",
+      "texto": "estás mezclando VCNs con concentraciones (CNTs); revisa tu respuesta y dime si es un error de tu respuesta o consultaste incorrectamente",
+      "categoria": "seguimiento",
+      "turno_previo": "q01",
+      "comentarios_imanol": [7],
+      "por_que_importa": "Segundo turno real de Imanol. Prueba el EvidenceCache y si el agente sabe auto-corregirse. En la corrida original sí reconoció el error y explicó que faltan fechas de inicio en los VCN — el agente ya diagnosticó por su cuenta el problema de datos.",
+      "senales_esperadas": ["used_cached_evidence"]
+    },
+    {
+      "id": "q03",
+      "origen": "literal",
+      "texto": "cuántos días inhábiles tardó cofece en resolver el VCN-002-2020",
+      "categoria": "plazos",
+      "comentarios_imanol": [8, 10],
+      "por_que_importa": "Comentario #8: el agente no llamó la herramienta de cómputo y estimó con conocimiento general ('aproximadamente 8 días inhábiles... sumando 9'). Dijo explícitamente que no tenía el calendario oficial — cuando el servicio sí lo tiene cargado.",
+      "ground_truth": "VCN-002-2020: resolutionDate=16-04-2020, notificationDate=null. El agente usó 20-03-2020 (acuerdo de inicio) como fecha de arranque; ese campo es startAgreementDate y hoy NO está en el enum de fecha_inicio de calcular_plazos.",
+      "senales_esperadas": ["plazo_inputs_missing"]
+    },
+    {
+      "id": "q04",
+      "origen": "literal",
+      "texto": "¿cuántos días hábiles transcurrieron entre el 21 de diciembre de 2018 y el 24 de enero de 2019?",
+      "categoria": "plazos_convencion",
+      "comentarios_imanol": [9, 10],
+      "por_que_importa": "El ejemplo exacto del comentario #9. Corresponde al VCN-006-2018 (resolutionDate=24-01-2019). El agente dio 13, luego se corrigió a 15 contando ambos extremos. La regla que pide Imanol es excluir el día inicial e incluir el final.",
+      "ground_truth": "Pendiente de fijar con Imanol el número correcto bajo su convención. Nota: hoy calcular_plazos NO acepta un par de fechas sueltas — solo un array de expedientes —, así que el modelo no tiene herramienta que llamar para esta pregunta.",
+      "senales_esperadas": ["deadline_tool_called=false"]
+    },
+    {
+      "id": "q05",
+      "origen": "titulo",
+      "texto": "¿cuál es la multa máxima impuesta en expedientes VCN y a qué agente económico se le impuso?",
+      "categoria": "exhaustividad + datos",
+      "comentarios_imanol": [3],
+      "por_que_importa": "Conversación 'Multa máxima en expedien...'. En la captura el agente listó 31 referencias [E1]–[E31] mezclando VCN e IO. Una pregunta de máximo exige recorrer el universo completo, no una página.",
+      "ground_truth": "36 VCN en total. Una respuesta construida sobre menos de 36 no puede afirmar un máximo.",
+      "senales_esperadas": ["coverage_truncated", "requires_exhaustive_search"]
+    },
+    {
+      "id": "q06",
+      "origen": "literal",
+      "texto": "ahora incluye un desglose de la multa global por agente",
+      "categoria": "seguimiento",
+      "turno_previo": "q05",
+      "comentarios_imanol": [3],
+      "por_que_importa": "Segundo turno real. Prueba si el agente conserva el universo del turno anterior o vuelve a buscar con otro recorte.",
+      "senales_esperadas": ["used_cached_evidence"]
+    },
+    {
+      "id": "q07",
+      "origen": "titulo",
+      "texto": "¿qué comisionados votaron en el expediente VCN-001-2023 y en qué sentido?",
+      "categoria": "trazabilidad_fuente",
+      "comentarios_imanol": [4],
+      "por_que_importa": "Conversación 'Comisionados en VCN-001...'. Es una pregunta cuya respuesta vive en la versión estenográfica, no en los campos estructurados: obliga a retrieval de criterios y a citar página exacta.",
+      "ground_truth": "Según la captura comparativa: unanimidad de siete votos para emitir la resolución del VCN-001-2023.",
+      "senales_esperadas": ["citations_emitted"]
+    },
+    {
+      "id": "q08",
+      "origen": "titulo",
+      "texto": "¿la COFECE ha considerado el licenciamiento de una marca como una concentración?",
+      "categoria": "criterios_analiticos",
+      "comentarios_imanol": [2],
+      "por_que_importa": "Conversación 'Licenciamiento de marca c...' / 'Licencias como concentraci...'. Pregunta conceptual pura: debe apoyarse en buscar_criterios y citar criterios, no expedientes.",
+      "senales_esperadas": ["tools_used=buscar_criterios"]
+    },
+    {
+      "id": "q09",
+      "origen": "titulo",
+      "texto": "¿qué casos ha resuelto la COFECE sobre fideicomisos y cuáles requirieron notificación?",
+      "categoria": "criterios + datos",
+      "comentarios_imanol": [3],
+      "por_que_importa": "Cubre dos conversaciones ('Casos sobre fideicomisos e...' y 'Notificación de fideicomiso...'). Cruza concepto con datos procesales: debe combinar herramientas.",
+      "senales_esperadas": ["second_retrieval_triggered"]
+    },
+    {
+      "id": "q10",
+      "origen": "titulo",
+      "texto": "¿cuáles son los criterios que usa la COFECE para determinar el monto de las multas?",
+      "categoria": "criterios_analiticos",
+      "comentarios_imanol": [2],
+      "por_que_importa": "Conversación 'Criterios de multas de la C...'. Pregunta doctrinal; sirve de control: si aquí también sale markdown crudo, el problema de formato es del frontend y no del tipo de pregunta.",
+      "senales_esperadas": ["format_markers"]
+    },
+    {
+      "id": "q11",
+      "origen": "titulo",
+      "texto": "¿cuál es la multa máxima que ha impuesto la COFECE y en qué mercado?",
+      "categoria": "exhaustividad",
+      "comentarios_imanol": [3],
+      "por_que_importa": "Conversación 'Multa máxima en mercados...'. Superlativo sobre el universo completo (4,632 expedientes) con un límite de 50 por página: es el caso más claro de falsa certeza.",
+      "ground_truth": "4,632 expedientes en total. Ninguna respuesta basada en una página puede sostener un máximo global.",
+      "senales_esperadas": ["coverage_truncated", "requires_exhaustive_search", "exhausted_tools"]
+    },
+    {
+      "id": "q12",
+      "origen": "derivada",
+      "texto": "dame la lista completa de los procedimientos VCN resueltos por la COFECE",
+      "categoria": "exhaustividad + cobertura_acervo",
+      "comentarios_imanol": ["whatsapp_a"],
+      "por_que_importa": "Es la pregunta que abrió el hilo de WhatsApp ('son 38 VCNs pero nos faltan los IO'). Mide directamente si el agente puede enumerar un universo cerrado y pequeño.",
+      "ground_truth": "36 VCN en la API de staging al 13-ago-2026. Imanol contó 38 en la carpeta compartida: la diferencia hay que aclararla con él o con Ricardo antes de la corrida.",
+      "senales_esperadas": ["coverage_truncated", "requires_exhaustive_search"]
+    },
+    {
+      "id": "q13",
+      "origen": "derivada",
+      "texto": "dame la lista de los procedimientos IO de omisión a la obligación de notificar una concentración",
+      "categoria": "cobertura_acervo",
+      "comentarios_imanol": ["whatsapp_a"],
+      "por_que_importa": "Imanol reportó que faltan los IO. En la API de casos SÍ están (6). Esta pregunta separa 'el dato no existe' de 'el agente no lo encuentra', que es una distinción que hoy nadie puede hacer.",
+      "ground_truth": "6 expedientes IO: IO-001-2014, IO-003-2016, IO-004-2016, IO-001-2017, IO-003-2018, IO-001-2019.",
+      "senales_esperadas": ["scope_mismatch"]
+    },
+    {
+      "id": "q14",
+      "origen": "titulo",
+      "texto": "¿qué precedentes hay en el mercado de distribución de medicamentos?",
+      "categoria": "criterios_analiticos",
+      "comentarios_imanol": [3],
+      "por_que_importa": "Conversación 'Precedentes en mercado d...'. El mercado exacto está cortado en la captura; confirmar con Imanol. Pregunta abierta de retrieval semántico, buena para observar el techo de top_k.",
+      "senales_esperadas": ["coverage_truncated"]
+    },
+    {
+      "id": "q15",
+      "origen": "derivada",
+      "texto": "¿cuánto tardó en resolverse el expediente CNT-095-2013 desde su notificación?",
+      "categoria": "plazos_control",
+      "comentarios_imanol": [8, 10],
+      "por_que_importa": "Control positivo del cómputo de plazos: los CNT SÍ tienen notificationDate (200/200). Si aquí el cálculo también falla, el problema es de la herramienta; si aquí funciona y en VCN no, el problema es de datos. Esa distinción decide quién arregla qué.",
+      "senales_esperadas": ["deadline_tool_called"]
+    },
+    {
+      "id": "q16",
+      "origen": "derivada",
+      "texto": "¿qué es el mercado relevante y cómo lo ha definido la COFECE?",
+      "categoria": "control_simple",
+      "comentarios_imanol": [2],
+      "por_que_importa": "Control de sanidad: pregunta conceptual simple que debe funcionar bien. Si esta falla, algo está roto aguas arriba y no tiene caso analizar el resto de la corrida.",
+      "senales_esperadas": []
+    }
+  ]
+}

@@ -73,6 +73,26 @@ class CitationBuilder:
 
         return llm_response, references
 
+    def resolve_marker(
+        self,
+        ref_type: str,
+        ref_num: int,
+        criterio_results: list[list],
+        expediente_results: list[list],
+    ) -> dict | None:
+        """
+        Resuelve un marcador suelto ([C3], [E1]) con la MISMA lógica que
+        build_references.
+
+        Existe para la trazabilidad: build_references descarta en silencio los
+        marcadores que no resuelven, así que sin esto no hay forma de detectar
+        una cita alucinada. No se usa en el camino de respuesta.
+        """
+        nested = criterio_results if ref_type == "C" else expediente_results
+        return self._resolve_item(
+            ref_num - 1, self._build_blocks(nested), self._flatten(nested)
+        )
+
     # ── Resolución de índices con bloques ─────────────────────
 
     def _build_blocks(self, nested: list[list]) -> list[tuple[int, list]]:
