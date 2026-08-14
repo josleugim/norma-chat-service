@@ -8,7 +8,7 @@
     "Las preguntas marcadas origen='literal' están transcritas de las capturas.",
     "Las marcadas origen='titulo' se reconstruyeron del título de la conversación en la barra lateral. CONFIRMADAS por Imanol el 14-ago-2026.",
     "Las marcadas origen='derivada' las agregamos para cubrir un hueco de medición.",
-    "'ground_truth' se midió contra la API de staging el 13-ago-2026. Si el acervo cambia, hay que revisarlo.",
+    "OJO: 'ground_truth' es un BLANCO MÓVIL. El acervo se está cargando todavía (Imanol, 14-ago-2026: 'son 38 pero no todas están arriba aún'), así que las cifras de universo valen para la fecha en que se midieron y no antes ni después. Cada corrida guarda su propio censo en run_manifest.json; para comparar dos corridas usar 'python -m core.tracing.compare', que avisa si el acervo cambió.",
     "'senales_esperadas' son las banderas de la traza que esperamos ver ENCENDIDAS en v1. No son el resultado deseado: son el diagnóstico que queremos poder demostrar."
   ],
 
@@ -139,7 +139,7 @@
       "categoria": "exhaustividad + cobertura_acervo",
       "comentarios_imanol": ["whatsapp_a"],
       "por_que_importa": "Es la pregunta que abrió el hilo de WhatsApp ('son 38 VCNs pero nos faltan los IO'). Mide directamente si el agente puede enumerar un universo cerrado y pequeño.",
-      "ground_truth": "38 VCN según Imanol (confirmado 14-ago-2026). La API de staging solo tiene 36, y de esos 3 son cascarones sin datos (VCN-043-2022, VCN-003-2025, VCN-002-2024), así que hay 33 utilizables. VCN-002-2025 es un hueco confirmado de secuencia. Faltan 2 expedientes por identificar.",
+      "ground_truth": "SIN NÚMERO EXACTO DISPONIBLE. Imanol menciona 38, pero aclaró el 14-ago-2026 que no todas están cargadas todavía. Al 14-ago la API tenía 36 registros, de los cuales 3 son cascarones sin datos (VCN-043-2022, VCN-003-2025, VCN-002-2024) → 33 utilizables. Mientras la carga siga en curso, esta pregunta NO sirve para medir exhaustividad entre corridas: compárese siempre contra el censo de su propia corrida.",
       "senales_esperadas": ["coverage_truncated", "requires_exhaustive_search"]
     },
     {

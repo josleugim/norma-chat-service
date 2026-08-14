@@ -15,6 +15,7 @@ from retrieval import CriteriosSearchClient, EstadisticaSearchClient
 from temporal import HolidayCalendar, TemporalAnalyzer
 from core import CitationBuilder, EvidenceCache
 from core.tracing import RunManifestStore, build_sink
+from core.tracing.census import take_census
 from core.tracing.versioning import build_versions
 from agent import NormaPlusAgent
 from routers.chat import router as chat_router
@@ -80,10 +81,22 @@ async def lifespan(app: FastAPI):
     if settings.tracing_enabled:
         manifest_store = RunManifestStore(settings.traces_dir, settings.run_id)
         versions = build_versions(settings, "", "", calendar=calendar)
+
+        # Foto del universo al arrancar. El acervo se sigue cargando, así que
+        # sin esto dos corridas no son comparables en exhaustividad.
+        census = await take_census(estadistica_client)
+        if census.get("errors"):
+            logger.warning(f"Censo del acervo incompleto: {census['errors']}")
+
         manifest_store.load_or_create(
             versions,
             label=settings.run_label or settings.run_id,
             question_set=settings.question_set or None,
+            corpus_census=census,
+        )
+        logger.info(
+            f"Censo del acervo: {census.get('total')} expedientes — "
+            + ", ".join(f"{k}:{v}" for k, v in census.get("by_prefix", {}).items())
         )
         logger.info(
             f"Corrida '{settings.run_id}' — prompt {versions.prompt_sha256}, "

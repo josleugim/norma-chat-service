@@ -304,3 +304,7 @@ class RunManifest(BaseModel):
     # Modelos usados en la corrida. Más de uno significa que la comparación
     # entre preguntas no es limpia, aunque el entorno no haya cambiado.
     models_observed: list[str] = Field(default_factory=list)
+    # Foto del universo al arrancar la corrida. El acervo se sigue cargando,
+    # así que sin esto dos corridas no son comparables en exhaustividad: no
+    # habría cómo distinguir un fix nuestro de documentos nuevos.
+    corpus_census: dict[str, Any] = Field(default_factory=dict)

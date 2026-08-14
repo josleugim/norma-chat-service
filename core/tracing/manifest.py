@@ -28,7 +28,8 @@ class RunManifestStore:
         self._manifest: Optional[RunManifest] = None
 
     def load_or_create(
-        self, versions: Versions, label: str = "", question_set: Optional[str] = None
+        self, versions: Versions, label: str = "", question_set: Optional[str] = None,
+        corpus_census: Optional[dict] = None,
     ) -> RunManifest:
         """
         Si el manifiesto existe, lo carga (la corrida ya estaba en marcha).
@@ -57,6 +58,7 @@ class RunManifestStore:
                 started_at=datetime.now(timezone.utc),
                 question_set=question_set,
                 frozen_versions=versions.fingerprint(),
+                corpus_census=corpus_census or {},
             )
             self._persist()
             logger.info(f"Baseline congelado para la corrida {self.run_id}")

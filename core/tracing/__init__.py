@@ -4,6 +4,7 @@ Trazabilidad estructurada del agente Norma+.
 Spec: NormaChat-Doc-Obs/docs/schema-trazas-v1.md
 """
 from core.tracing.analysis import analyze_answer, count_format_markers
+from core.tracing.census import diff_census, take_census
 from core.tracing.collector import TraceCollector, new_trace_id
 from core.tracing.heuristics import interpret
 from core.tracing.manifest import RunManifestStore
@@ -20,5 +21,5 @@ __all__ = [
     "RetrievalDoc", "RetrievalStage", "RunManifest", "RunManifestStore",
     "Step", "Trace", "TraceCollector", "TraceSink", "Versions",
     "analyze_answer", "build_sink", "build_versions", "count_format_markers",
-    "interpret", "new_trace_id", "sha256_short",
+    "diff_census", "interpret", "new_trace_id", "sha256_short", "take_census",
 ]
