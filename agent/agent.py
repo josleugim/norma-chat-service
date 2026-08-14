@@ -693,7 +693,20 @@ class NormaPlusAgent:
         return salida
 
     def _filtrar_local(self, registros: list[dict], args: dict) -> list[dict]:
-        """Aplica localmente los filtros que la API no sabe intersectar."""
+        """
+        Aplica localmente los filtros que la API no sabe intersectar.
+
+        Dos cuidados aprendidos por las malas:
+
+        1. El match NO puede ser exacto. El modelo escribe "NO ACREDITADO EL
+           INCUMPLIMIENTO" y el valor real es "NO SE ACREDITÓ INCUMPLIMIENTO";
+           con igualdad estricta el filtro daba cero y el agente concluía "no
+           existe ningún caso", que es falso y peligroso.
+        2. Si un filtro deja el conjunto vacío, hay que decirlo con los valores
+           que sí existen, para que el agente distinga "no hay ninguno" de
+           "tu filtro no coincidió".
+        """
+        self._filtro_vacio = None
         salida = registros
         equivalencias = {
             "autoridad": "authority",
@@ -704,11 +717,28 @@ class NormaPlusAgent:
             valor = args.get(arg_key)
             if not valor:
                 continue
-            v = str(valor).strip().upper()
+            antes = salida
+            objetivo = _normalizar(valor)
             salida = [
-                r for r in salida
-                if str(r.get(campo) or "").strip().upper() == v
+                r for r in antes
+                if _coincide(_normalizar(r.get(campo)), objetivo)
             ]
+            if antes and not salida:
+                disponibles = sorted({
+                    str(r.get(campo)) for r in antes if r.get(campo)
+                })
+                self._filtro_vacio = {
+                    "filtro": arg_key,
+                    "valor_solicitado": valor,
+                    "valores_disponibles": disponibles[:25],
+                    "nota": (
+                        f"Ningún expediente tiene {arg_key}='{valor}'. Esto NO "
+                        f"significa que no existan casos: significa que ese valor "
+                        f"no coincide con los que usa la base. Revisa la lista de "
+                        f"valores disponibles y vuelve a intentar."
+                    ),
+                }
+                break
         return salida
 
     def _build_expediente_filters(self, args: dict) -> dict:
@@ -1020,6 +1050,11 @@ class NormaPlusAgent:
             # truncada: recibía 50 de 1,796 sin enterarse y respondía con
             # falsa certeza. Ahora se le dice explícitamente.
             if tool_name == "buscar_expedientes":
+                # Un filtro que no coincidió con nada NO significa "no existen
+                # casos". Sin este aviso el agente concluye que no hay ninguno.
+                vacio = getattr(self, "_filtro_vacio", None)
+                if vacio:
+                    payload["FILTRO_SIN_COINCIDENCIAS"] = vacio
                 total = getattr(self.estadistica, "last_total", None)
                 if getattr(self, "_universo_completo", False):
                     payload["universo_completo_revisado"] = True
@@ -1215,3 +1250,44 @@ class NormaPlusAgent:
             max_tokens=20,
         )
         return title.strip()[:100]
+
+
+def _normalizar(valor) -> str:
+    """Minúsculas, sin acentos y sin puntuación, para comparar etiquetas."""
+    import unicodedata
+    s = str(valor or "").strip().lower()
+    s = "".join(
+        c for c in unicodedata.normalize("NFD", s)
+        if unicodedata.category(c) != "Mn"
+    )
+    return " ".join(s.replace("/", " ").replace(",", " ").split())
+
+
+def _coincide(valor: str, objetivo: str) -> bool:
+    """
+    Coincidencia tolerante: igualdad, contención, o que compartan las
+    palabras significativas. El modelo no reproduce las etiquetas literales.
+    """
+    if not valor or not objetivo:
+        return False
+    if valor == objetivo or objetivo in valor or valor in objetivo:
+        return True
+    # La negación decide el sentido de la resolución y NO puede tratarse como
+    # palabra vacía: "NO SE ACREDITÓ INCUMPLIMIENTO" y "SANCIÓN/ACREDITACIÓN
+    # DEL INCUMPLIMIENTO" comparten casi todas las palabras y significan lo
+    # contrario. Si una lado niega y el otro no, no coinciden.
+    NEGACIONES = {"no", "sin", "ningun", "ninguna", "improcedente", "niega"}
+    niega = lambda t: bool(NEGACIONES & set(t.split()))
+    if niega(valor) != niega(objetivo):
+        return False
+
+    # Se compara por raíz de 6 caracteres: el modelo escribe "acreditado"
+    # donde la base dice "acreditó", y palabra completa no las une.
+    vacias = {"de", "del", "la", "el", "los", "las", "en", "se", "al", "y"}
+    raices = lambda t: {
+        p[:6] for p in t.split() if p not in vacias and len(p) > 2
+    }
+    pv, po = raices(valor), raices(objetivo)
+    if not pv or not po:
+        return False
+    return len(pv & po) / len(po) >= 0.6

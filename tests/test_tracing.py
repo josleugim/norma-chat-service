@@ -608,3 +608,29 @@ class TestConvencionPlazos:
 
     def test_mismo_dia_es_cero(self, cal):
         assert cal.business_days_between(date(2019, 1, 21), date(2019, 1, 21)) == 0
+
+
+class TestCoincidenciaTolerante:
+    """
+    Los filtros se aplican localmente porque la API une con OR en vez de
+    intersectar. El match no puede ser exacto —el modelo no reproduce las
+    etiquetas literales— pero tampoco tan laxo que confunda sentidos opuestos.
+    """
+
+    @pytest.mark.parametrize("real,pedido,esperado", [
+        # El modelo parafrasea; debe coincidir igual
+        ("NO SE ACREDITÓ INCUMPLIMIENTO", "NO ACREDITADO EL INCUMPLIMIENTO", True),
+        ("SANCIÓN/ACREDITACIÓN DEL INCUMPLIMIENTO", "SANCION", True),
+        ("CIERRE POR INEXISTENCIA DE ELEMENTOS", "cierre por inexistencia", True),
+        ("COFECE", "Cofece", True),
+        # La negación decide el sentido: NUNCA deben confundirse
+        ("NO SE ACREDITÓ INCUMPLIMIENTO",
+         "SANCIÓN/ACREDITACIÓN DEL INCUMPLIMIENTO", False),
+        ("SANCIÓN/ACREDITACIÓN DEL INCUMPLIMIENTO",
+         "NO SE ACREDITÓ INCUMPLIMIENTO", False),
+        ("NO SE ACREDITÓ INCUMPLIMIENTO", "AUTORIZADA", False),
+        ("CFC", "COFECE", False),
+    ])
+    def test_coincidencia(self, real, pedido, esperado):
+        from agent.agent import _coincide, _normalizar
+        assert _coincide(_normalizar(real), _normalizar(pedido)) is esperado
