@@ -25,9 +25,18 @@ from core.tracing.schema import Constraints, Interpretation, Scope
 PREFIX_BARE_RE = re.compile(r"\b(VCN|CNT|IO|UO|IEBC|IEED)\b")
 CASE_LINK_RE = re.compile(r"\b[A-Z]{2,5}-\d{3}-\d{4}\b")
 
+# Disparadores de consulta exhaustiva.
+#
+# La lista de COFECE es explícita: "todos, cuántos, mayor, menor, promedio,
+# nunca, cuáles deberían permitir identificar que no basta necesariamente un
+# top-k semántico normal". Los superlativos y los agregados entran aquí aunque
+# también se clasifiquen aparte: preguntar por el MAYOR de algo exige haber
+# recorrido el universo completo, igual que preguntar por TODOS.
 EXHAUSTIVE_RE = re.compile(
-    r"\b(todos|todas|cu[áa]nt[oa]s|listado|lista completa|completo|completa"
-    r"|exhaustiv[oa]|la totalidad|en total|cada uno|universo)\b",
+    r"\b(todos|todas|cu[áa]nt[oa]s|cu[áa]les|listado|lista completa|completo|completa"
+    r"|exhaustiv[oa]|la totalidad|en total|cada uno|universo"
+    r"|mayor|menor|m[áa]xim[oa]|m[íi]nim[oa]|promedio|media|mediana"
+    r"|nunca|jam[áa]s|ning[úu]n|siempre)\b",
     re.IGNORECASE,
 )
 SUPERLATIVE_PATTERNS = [
@@ -113,6 +122,35 @@ def interpret(query: str) -> Interpretation:
         constraints=constraints,
         provenance=provenance,
     )
+
+
+def expected_tools(query: str) -> list[str]:
+    """
+    Herramientas que la consulta *debería* haber disparado.
+
+    Existe para cubrir el punto 4 de COFECE: "si una herramienta que debía
+    utilizarse no fue llamada, que podamos detectarlo". Comparando esto contra
+    las que realmente se llamaron, el trace responde solo esa pregunta.
+
+    Es heurístico y así queda marcado: dice qué esperaríamos, no qué decidió
+    el agente.
+    """
+    q = query or ""
+    esperadas = []
+    if COMPUTATION_RE.search(q):
+        esperadas.append("calcular_plazos")
+    if CASE_LINK_RE.search(q) or re.search(
+        r"\b(expediente|expedientes|multa|multas|resoluci[óo]n|agente econ[óo]mico"
+        r"|sentido|fecha)\b", q, re.IGNORECASE
+    ):
+        esperadas.append("buscar_expedientes")
+    if re.search(
+        r"\b(criterio|criterios|concepto|defini[óc]|mercado relevante|barreras"
+        r"|poder de mercado|eficiencias|precedente|precedentes|doctrina"
+        r"|ha considerado|argument)\w*\b", q, re.IGNORECASE
+    ):
+        esperadas.append("buscar_criterios")
+    return esperadas
 
 
 def extract_case_link_prefixes(text: str) -> set[str]:

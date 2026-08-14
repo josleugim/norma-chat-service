@@ -19,6 +19,7 @@ from core.tracing.schema import (
     Answer, ContextBlock, Coverage, Decisions, Interpretation, Outcome,
     Request, RetrievalDoc, RetrievalStage, Step, Trace, Versions,
 )
+from core.tracing.heuristics import expected_tools
 from core.tracing.versioning import diff_fingerprints, sha256_full, sha256_short
 
 logger = logging.getLogger(__name__)
@@ -184,6 +185,38 @@ class TraceCollector:
             return
         self._current.computation = computation
 
+    def record_result(self, result) -> None:
+        """
+        Resumen de lo que devolvió la herramienta. El detalle está en las
+        etapas de retrieval; esto permite leer un paso de un vistazo y cubre
+        el "resultado devuelto" que pidió COFECE.
+        """
+        if self._current is None:
+            return
+        try:
+            if isinstance(result, list):
+                self._current.result_summary = {
+                    "type": "list",
+                    "count": len(result),
+                    "sample_ids": [
+                        str(r.get("caseLink") or r.get("id", ""))
+                        for r in result[:5] if isinstance(r, dict)
+                    ],
+                }
+            elif isinstance(result, dict):
+                self._current.result_summary = {
+                    "type": "dict",
+                    "keys": sorted(result.keys())[:15],
+                    "total_expedientes": result.get("total_expedientes"),
+                    "filtered_count": result.get("filtered_count"),
+                    "stats": result.get("stats"),
+                    "error": result.get("error"),
+                }
+            else:
+                self._current.result_summary = {"type": type(result).__name__}
+        except Exception as e:
+            logger.warning(f"No se pudo resumir el resultado de la tool: {e}")
+
     # ── Contexto, decisiones, respuesta ─────────────────────
 
     def set_interpretation(self, interpretation: Interpretation) -> None:
@@ -286,6 +319,33 @@ class TraceCollector:
             "answered_without_retrieval", len(retrieval_tools) == 0, "derived"
         )
         self.set_decision("max_tool_calls_reached", exhausted_tools, "derived")
+
+        # Herramientas que la consulta pedía y no se llamaron.
+        esperadas = expected_tools(self.request.query)
+        self.set_decision("tools_expected", esperadas, "heuristic")
+        self.set_decision(
+            "tools_expected_not_called",
+            [t for t in esperadas if t not in tools_used],
+            "heuristic",
+        )
+
+        # Estrategia de cobertura del universo.
+        coberturas = [s.coverage for s in self.steps if s.coverage]
+        truncada = any(c.truncated for c in coberturas)
+        if not coberturas:
+            estrategia = "sin_busqueda"
+        elif truncada:
+            estrategia = "una_pagina_truncada"
+        elif len(retrieval_tools) > 1:
+            estrategia = "multiples_busquedas"
+        else:
+            estrategia = "una_busqueda_completa"
+        self.set_decision("coverage_strategy", estrategia, "derived")
+        self.set_decision(
+            "exhaustive_but_truncated",
+            bool(self.interpretation.constraints.exhaustive and truncada),
+            "derived",
+        )
 
         # Espejo de la interpretación heurística, para tener el scope a mano
         if self.interpretation.scope.procedure_prefix:

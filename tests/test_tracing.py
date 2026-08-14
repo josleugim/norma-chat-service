@@ -157,6 +157,26 @@ class TestInterpretation:
         i = interpret("¿Cuántos días hábiles tardó la resolución?")
         assert i.constraints.requires_computation is True
 
+    @pytest.mark.parametrize("palabra", [
+        "todos", "cuántos", "cuáles", "mayor", "menor", "promedio", "nunca",
+    ])
+    def test_disparadores_de_exhaustividad_de_cofece(self, palabra):
+        """
+        COFECE listó explícitamente estas palabras como señal de que no basta
+        un top-k semántico normal.
+        """
+        assert interpret(f"¿{palabra} de los expedientes?").constraints.exhaustive
+
+    def test_herramientas_esperadas(self):
+        from core.tracing.heuristics import expected_tools
+        assert "calcular_plazos" in expected_tools(
+            "¿cuántos días hábiles tardó el VCN-002-2020?"
+        )
+        assert "buscar_criterios" in expected_tools(
+            "¿qué criterios usa la COFECE para el mercado relevante?"
+        )
+        assert expected_tools("hola") == []
+
     def test_preposicion_de_no_es_prefijo(self):
         """
         'DE' es un prefijo de expediente y también una preposición. Buscarlo
@@ -492,3 +512,63 @@ class TestAgentTracing:
         assert row["scope_expected"] == "VCN"
         assert row["query"] == "¿Cuántos VCN hay?"
         assert "coverage_truncated" in row
+
+
+# ── Atribución de fallas por etapa ──────────────────────────
+
+class TestDiagnose:
+    """
+    Criterio de aceptación de COFECE: ante una respuesta incorrecta, poder
+    determinar si el error fue de pregunta/filtros, retrieval, selección de
+    contexto, tool calling, generación o cita.
+    """
+
+    def _trace(self, **kw):
+        from core.tracing.schema import Trace
+        t = Trace(trace_id="t", conversation_id="c",
+                  timestamp_utc="2026-08-14T00:00:00Z")
+        for bloque, valores in kw.items():
+            for k, v in valores.items():
+                setattr(getattr(t, bloque), k, v)
+        return t
+
+    def test_scope_mismatch_apunta_a_pregunta_filtros(self):
+        from core.tracing.diagnose import diagnose
+        t = self._trace(answer={"scope_mismatch": True, "scope_observed": ["CNT"]})
+        t.interpretation.scope.procedure_prefix = ["VCN"]
+        d = diagnose(t)
+        assert d["stage"] == "pregunta/filtros"
+        assert "VCN" in d["reason"] and "CNT" in d["reason"]
+
+    def test_exhaustiva_truncada_apunta_a_retrieval(self):
+        from core.tracing.diagnose import diagnose
+        t = self._trace(decisions={"exhaustive_but_truncated": True})
+        assert diagnose(t)["stage"] == "retrieval"
+
+    def test_tool_faltante_apunta_a_tool_calling(self):
+        from core.tracing.diagnose import diagnose
+        t = self._trace(decisions={"tools_expected_not_called": ["calcular_plazos"]})
+        d = diagnose(t)
+        assert d["stage"] == "tool_calling"
+        assert "calcular_plazos" in d["reason"]
+
+    def test_cita_alucinada_apunta_a_cita(self):
+        from core.tracing.diagnose import diagnose
+        t = self._trace(answer={"citations_unresolved": ["C7"]})
+        assert diagnose(t)["stage"] == "cita"
+
+    def test_reporta_la_etapa_mas_temprana(self):
+        """Los errores se propagan: si el filtro estuvo mal, culpar a la
+        generación despista."""
+        from core.tracing.diagnose import diagnose
+        t = self._trace(
+            answer={"scope_mismatch": True, "citations_unresolved": ["C7"]},
+            decisions={"tools_expected_not_called": ["calcular_plazos"]},
+        )
+        d = diagnose(t)
+        assert d["stage"] == "pregunta/filtros"
+        assert len(d["signals"]) == 3   # las otras quedan registradas igual
+
+    def test_flujo_limpio(self):
+        from core.tracing.diagnose import diagnose
+        assert diagnose(self._trace())["stage"] is None

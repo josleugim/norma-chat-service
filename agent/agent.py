@@ -176,6 +176,7 @@ class NormaPlusAgent:
                             tc.arguments, collector
                         )
                         if collector is not None:
+                            collector.record_result(result)
                             collector.end_step("ok")
                     except Exception as e:
                         logger.error(f"Error ejecutando {tc.name}: {e}")

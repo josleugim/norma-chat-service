@@ -111,8 +111,18 @@ class Decisions(BaseModel):
     tool_deadline_calculator: bool = False
     second_retrieval_triggered: bool = False
     tools_used: list[str] = Field(default_factory=list)
+    # Herramientas que la pregunta debía disparar y cuáles no se llamaron.
+    # Punto 4 de COFECE: "si una herramienta que debía utilizarse no fue
+    # llamada, que podamos detectarlo".
+    tools_expected: list[str] = Field(default_factory=list)
+    tools_expected_not_called: list[str] = Field(default_factory=list)
     tool_call_count: int = 0
     max_tool_calls_reached: bool = False
+    # Estrategia de cobertura del universo. Aclaración 5 de COFECE: en las
+    # consultas exhaustivas hay que poder comprobar en el trace qué hizo el
+    # agente para cubrir el universo relevante, no solo si acertó.
+    coverage_strategy: Optional[str] = None
+    exhaustive_but_truncated: bool = False
     used_cached_evidence: bool = False
     answered_without_retrieval: bool = False
     final_answer_path: Optional[str] = None
@@ -167,6 +177,10 @@ class Step(BaseModel):
     coverage: Optional[Coverage] = None
     computation: Optional[dict[str, Any]] = None
     tokens: Optional[dict[str, int]] = None
+    # Resumen de lo que devolvió la herramienta (punto 4 de COFECE:
+    # "resultado devuelto"). El detalle completo vive en `stages`; esto es
+    # para poder leer un paso de un vistazo.
+    result_summary: Optional[dict[str, Any]] = None
 
 
 class ContextBlock(BaseModel):
@@ -259,7 +273,12 @@ class Trace(BaseModel):
             "provider": self.request.provider,
             "model": self.request.model,
             "tools_used": ",".join(self.decisions.tools_used),
+            "tools_expected_not_called": ",".join(
+                self.decisions.tools_expected_not_called
+            ),
             "tool_call_count": self.decisions.tool_call_count,
+            "coverage_strategy": self.decisions.coverage_strategy,
+            "exhaustive_but_truncated": self.decisions.exhaustive_but_truncated,
             "docs_retrieved": retrieval_docs,
             "coverage_truncated": truncated,
             "deadline_tool_called": self.decisions.tool_deadline_calculator,
@@ -276,6 +295,11 @@ class Trace(BaseModel):
             "scope_mismatch": self.answer.scope_mismatch,
             "citations_emitted": len(self.answer.citations_emitted),
             "citations_unresolved": ",".join(self.answer.citations_unresolved),
+            "answer": self.answer.text,
+            "sources": " | ".join(
+                f"{c.get('case_link','')}"
+                for c in self.answer.citations_resolved if c.get("case_link")
+            ),
             "answer_chars": self.answer.length_chars,
             "baseline_drift": self.decisions.baseline_drift,
             "status": self.outcome.status,
