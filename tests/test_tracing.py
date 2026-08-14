@@ -200,6 +200,27 @@ class TestAnswerAnalysis:
         )
         assert answer.scope_mismatch is True
 
+    def test_scope_mismatch_por_retrieval_sin_citas(self):
+        """
+        El caso real de q01: se pregunta por VCN, el agente busca
+        concentraciones notificadas y contesta con un promedio agregado sin
+        citar ningún expediente. El texto no delata nada; los documentos que
+        entraron al contexto sí.
+        """
+        answer = analyze_answer(
+            text="El tiempo promedio es de 49 días hábiles.",
+            citation_builder=CitationBuilder(),
+            criterio_results=[], expediente_results=[], references=[],
+            docs_in_context=[
+                {"doc_id": "1", "case_link": "CNT-030-2015"},
+                {"doc_id": "2", "case_link": "CNT-011-2017"},
+            ],
+            expected_prefixes=["VCN"],
+        )
+        assert answer.case_links_mentioned == []
+        assert answer.scope_observed == ["CNT"]
+        assert answer.scope_mismatch is True
+
     def test_scope_ok_cuando_coincide(self):
         answer = analyze_answer(
             text="El expediente VCN-001-2022 fue sancionado.",

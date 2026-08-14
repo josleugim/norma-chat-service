@@ -189,6 +189,9 @@ class Answer(BaseModel):
     has_fuentes_section: bool = False
     format_markers: dict[str, int] = Field(default_factory=dict)
     case_links_mentioned: list[str] = Field(default_factory=list)
+    # Prefijos realmente vistos: los citados en la respuesta más los de los
+    # documentos que entraron al contexto. Hace auditable el scope_mismatch.
+    scope_observed: list[str] = Field(default_factory=list)
     scope_mismatch: bool = False
 
 
@@ -269,6 +272,7 @@ class Trace(BaseModel):
             "final_answer_path": self.decisions.final_answer_path,
             "used_cached_evidence": self.decisions.used_cached_evidence,
             "scope_expected": ",".join(self.interpretation.scope.procedure_prefix),
+            "scope_observed": ",".join(self.answer.scope_observed),
             "scope_mismatch": self.answer.scope_mismatch,
             "citations_emitted": len(self.answer.citations_emitted),
             "citations_unresolved": ",".join(self.answer.citations_unresolved),

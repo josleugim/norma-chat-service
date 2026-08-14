@@ -88,12 +88,22 @@ def analyze_answer(
     )
 
     mentioned = extract_case_links(text)
+
+    # Desajuste de scope. Se mira el retrieval, no solo la respuesta: si el
+    # agente contesta con un promedio agregado sin citar expedientes, el texto
+    # no delata nada, pero los documentos que entraron al contexto sí. Ese es
+    # justo el caso del comentario #7 —preguntar por VCN y que el agente busque
+    # concentraciones notificadas— y mirando solo el texto se escapa.
+    observed = extract_case_link_prefixes(text)
+    for d in docs_in_context:
+        link = d.get("case_link") or ""
+        if "-" in link:
+            observed.add(link.split("-")[0])
+
     scope_mismatch = False
     if expected_prefixes:
-        mentioned_prefixes = extract_case_link_prefixes(text)
-        # Desajuste = se mencionó al menos un expediente de un prefijo que no
-        # se pidió. No basta con que falten: contestar de más también es error.
-        scope_mismatch = bool(mentioned_prefixes - set(expected_prefixes))
+        # Contestar de más también es error, no solo que falten.
+        scope_mismatch = bool(observed - set(expected_prefixes))
 
     return Answer(
         text=text,
@@ -105,6 +115,7 @@ def analyze_answer(
         has_fuentes_section=bool(FUENTES_RE.search(text)) or "FUENTES" in text,
         format_markers=count_format_markers(text),
         case_links_mentioned=mentioned,
+        scope_observed=sorted(observed),
         scope_mismatch=scope_mismatch,
     )
 

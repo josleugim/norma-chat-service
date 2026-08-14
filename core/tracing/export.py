@@ -19,7 +19,7 @@ COLUMNS = [
     "plazo_cases", "plazo_inputs_missing", "plazo_out_of_coverage",
     "second_retrieval", "exhausted_tools",
     "context_condensed", "final_answer_path", "scope_expected",
-    "scope_mismatch", "citations_emitted", "citations_unresolved",
+    "scope_observed", "scope_mismatch", "citations_emitted", "citations_unresolved",
     "answer_chars", "baseline_drift", "status", "duration_ms",
     "tokens_input", "tokens_output", "trace_id",
 ]
