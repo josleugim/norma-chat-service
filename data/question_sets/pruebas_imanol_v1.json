@@ -3,9 +3,10 @@
   "version": "1.0",
   "created": "2026-08-13",
   "source": "Conversaciones de Imanol (COFECE) en normaplus.ai/chat, 11-ago-2026, documentadas en 'Pruebas 1 Agente Norma+.docx'",
+  "confirmado_por": "Imanol (COFECE), 14-ago-2026 — validó la lista completa, incluidas las reconstruidas",
   "notes": [
     "Las preguntas marcadas origen='literal' están transcritas de las capturas.",
-    "Las marcadas origen='titulo' se reconstruyeron del título de la conversación en la barra lateral; conviene que Imanol las confirme.",
+    "Las marcadas origen='titulo' se reconstruyeron del título de la conversación en la barra lateral. CONFIRMADAS por Imanol el 14-ago-2026.",
     "Las marcadas origen='derivada' las agregamos para cubrir un hueco de medición.",
     "'ground_truth' se midió contra la API de staging el 13-ago-2026. Si el acervo cambia, hay que revisarlo.",
     "'senales_esperadas' son las banderas de la traza que esperamos ver ENCENDIDAS en v1. No son el resultado deseado: son el diagnóstico que queremos poder demostrar."
@@ -138,7 +139,7 @@
       "categoria": "exhaustividad + cobertura_acervo",
       "comentarios_imanol": ["whatsapp_a"],
       "por_que_importa": "Es la pregunta que abrió el hilo de WhatsApp ('son 38 VCNs pero nos faltan los IO'). Mide directamente si el agente puede enumerar un universo cerrado y pequeño.",
-      "ground_truth": "36 VCN en la API de staging al 13-ago-2026. Imanol contó 38 en la carpeta compartida: la diferencia hay que aclararla con él o con Ricardo antes de la corrida.",
+      "ground_truth": "38 VCN según Imanol (confirmado 14-ago-2026). La API de staging solo tiene 36, y de esos 3 son cascarones sin datos (VCN-043-2022, VCN-003-2025, VCN-002-2024), así que hay 33 utilizables. VCN-002-2025 es un hueco confirmado de secuencia. Faltan 2 expedientes por identificar.",
       "senales_esperadas": ["coverage_truncated", "requires_exhaustive_search"]
     },
     {
