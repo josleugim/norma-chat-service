@@ -135,16 +135,29 @@ class HolidayCalendar:
     def business_days_between(
         self, start: date, end: date,
         institucion: str | None = None,
+        include_end: bool = True,
     ) -> int:
         """
         Cuenta días hábiles entre dos fechas.
-        Excluye ambos extremos (convención de plazos procesales mexicanos).
+
+        Convención por defecto (regla general de plazos procesales, confirmada
+        por COFECE el 11-ago-2026): **se excluye el día inicial y se incluye el
+        día final.** El día que origina el plazo no cuenta; el siguiente es el
+        día 1.
+
+        Antes se excluían ambos extremos, lo que subcontaba un día cada vez que
+        la fecha final era hábil. Ejemplo del reporte: del 21-dic-2018 al
+        24-ene-2019 devolvía 13; lo correcto bajo esta regla son 14.
+
+        Args:
+            include_end: False vuelve a la convención anterior (excluir ambos
+                         extremos), para los casos en que se solicite otra cosa.
         """
         if start >= end:
             return 0
         count = 0
         current = start + timedelta(days=1)
-        while current < end:
+        while current < end or (include_end and current == end):
             if self.is_business_day(current, institucion):
                 count += 1
             current += timedelta(days=1)

@@ -572,3 +572,39 @@ class TestDiagnose:
     def test_flujo_limpio(self):
         from core.tracing.diagnose import diagnose
         assert diagnose(self._trace())["stage"] is None
+
+
+# ── Fixes de v1.1 ───────────────────────────────────────────
+
+class TestConvencionPlazos:
+    """
+    COFECE: "el cómputo debe excluir el día inicial e incluir el día final".
+    Antes se excluían ambos, lo que subcontaba un día.
+    """
+
+    @pytest.fixture(scope="class")
+    @classmethod
+    def cal(cls):
+        return HolidayCalendar("data/dias_inhabiles.xlsx")
+
+    def test_ejemplo_del_reporte(self, cal):
+        """21-dic-2018 → 24-ene-2019: el agente daba 13, lo correcto es 14."""
+        n = cal.business_days_between(date(2018, 12, 21), date(2019, 1, 24), "COFECE")
+        assert n == 14
+
+    def test_convencion_anterior_sigue_disponible(self, cal):
+        n = cal.business_days_between(
+            date(2018, 12, 21), date(2019, 1, 24), "COFECE", include_end=False
+        )
+        assert n == 13
+
+    def test_dia_final_inhabil_no_suma(self, cal):
+        """Si el día final es inhábil, incluirlo no cambia el conteo."""
+        con = cal.business_days_between(date(2019, 1, 21), date(2019, 1, 26), "COFECE")
+        sin = cal.business_days_between(
+            date(2019, 1, 21), date(2019, 1, 26), "COFECE", include_end=False
+        )
+        assert con == sin   # 26-ene-2019 es sábado
+
+    def test_mismo_dia_es_cero(self, cal):
+        assert cal.business_days_between(date(2019, 1, 21), date(2019, 1, 21)) == 0

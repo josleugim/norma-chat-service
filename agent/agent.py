@@ -65,8 +65,13 @@ class NormaPlusAgent:
         self.tool_executors = {
             "buscar_criterios": self._exec_buscar_criterios,
             "buscar_expedientes": self._exec_buscar_expedientes,
+            "contar_expedientes": self._exec_contar_expedientes,
             "calcular_plazos": self._exec_calcular_plazos,
         }
+        # Últimos expedientes recuperados en el turno. Evita que el modelo
+        # tenga que devolverlos completos a calcular_plazos, que es lo que
+        # trunca los argumentos contra el límite de tokens.
+        self._last_expedientes: list[dict] = []
 
     async def run(
         self,
@@ -635,37 +640,85 @@ class NormaPlusAgent:
             ])
         return serialized
 
-    async def _exec_buscar_expedientes(self, args: dict, collector=None) -> list:
-        text_search = args.get("text_search")
-        limit = args.get("limit", 50)
-        has_multas = args.get("has_multas", False)
+    async def _exec_contar_expedientes(self, args: dict, collector=None) -> dict:
+        """
+        Devuelve el tamaño del universo sin traer los registros.
 
-        filters = {}
-        # Mapeo de parámetros del agente → filtros del cliente
+        Existe porque "¿cuántos?" no se responde con top-k: en el baseline el
+        agente contestó un conteo comparativo con 1 registro de 2,793.
+        """
+        filters = self._build_expediente_filters(args)
+        prefijo = args.get("prefijo_expediente")
+        text_search = args.get("text_search")
+        if prefijo and not text_search:
+            text_search = f"{prefijo}-"
+
+        await self.estadistica.search(
+            text_search=text_search,
+            filters=filters if filters else None,
+            limit=1,
+            collector=collector,
+            prefijo=prefijo,
+        )
+        return {
+            "total": self.estadistica.last_total,
+            "filtros_aplicados": {**filters, "prefijo_expediente": prefijo},
+            "nota": (
+                "Total exacto según la base. Si necesitas los registros, usa "
+                "buscar_expedientes con exhaustivo=true."
+            ),
+        }
+
+    def _build_expediente_filters(self, args: dict) -> dict:
         filter_keys = {
             "autoridad": "authority",
             "tipo_procedimiento": "typeOfProcedure",
             "sentido_resolucion": "senseOfResolution",
             "id_expediente": "caseLink",
-            # Rango de años
             "fecha_resolucion_desde": "senseOfResolutionFrom",
             "fecha_resolucion_hasta": "senseOfResolutionTo",
         }
-        for agent_key, api_key in filter_keys.items():
-            if agent_key in args and args[agent_key] is not None:
-                filters[api_key] = args[agent_key]
+        return {
+            api_key: args[agent_key]
+            for agent_key, api_key in filter_keys.items()
+            if args.get(agent_key) is not None
+        }
+
+    async def _exec_buscar_expedientes(self, args: dict, collector=None) -> list:
+        text_search = args.get("text_search")
+        limit = args.get("limit", 50)
+        has_multas = args.get("has_multas", False)
+
+        filters = self._build_expediente_filters(args)
+        prefijo = args.get("prefijo_expediente")
+        exhaustivo = args.get("exhaustivo", False)
+
+        # El prefijo se traduce a searchData ("VCN-"), que es ILIKE sobre
+        # caseLink; el cliente además filtra localmente por si cuela otra cosa.
+        if prefijo and not text_search:
+            text_search = f"{prefijo}-"
 
         # Si piden multas, traer más resultados para filtrar después
         fetch_limit = limit * 3 if has_multas else limit
 
-        # text_search se envía como searchData (búsqueda libre cross-field
-        # en caseLink, nombre, agentes económicos y mercados relevantes)
-        results = await self.estadistica.search(
-            text_search=text_search,
-            filters=filters if filters else None,
-            limit=fetch_limit,
-            collector=collector,
-        )
+        if exhaustivo:
+            results = await self.estadistica.search_all_pages(
+                text_search=text_search,
+                filters=filters if filters else None,
+                max_results=min(max(fetch_limit, 500), 500),
+                collector=collector,
+                prefijo=prefijo,
+            )
+        else:
+            # text_search se envía como searchData (búsqueda libre cross-field
+            # en caseLink, nombre, agentes económicos y mercados relevantes)
+            results = await self.estadistica.search(
+                text_search=text_search,
+                filters=filters if filters else None,
+                limit=fetch_limit,
+                collector=collector,
+                prefijo=prefijo,
+            )
 
         serialized = [r.model_dump() for r in results]
 
@@ -682,6 +735,10 @@ class NormaPlusAgent:
 
             serialized = [r for r in serialized if _has_fines(r)]
             serialized = serialized[:limit]
+
+        # Guardado para usar_ultima_busqueda, que evita que el modelo tenga
+        # que devolver el arreglo completo y truncar sus propios argumentos.
+        self._last_expedientes = serialized
 
         if collector is not None:
             collector.record_stage(
@@ -708,7 +765,30 @@ class NormaPlusAgent:
         return serialized
 
     async def _exec_calcular_plazos(self, args: dict, collector=None) -> dict:
-        expedientes = args.get("expedientes", [])
+        # ── Modo A: dos fechas sueltas ──────────────────────
+        # Antes no existía: ante "¿cuántos días hábiles entre X e Y?" el modelo
+        # no tenía herramienta que llamar y estimaba de memoria.
+        f_ini = args.get("fecha_inicio_explicita")
+        f_fin = args.get("fecha_fin_explicita")
+        if f_ini and f_fin:
+            return self._calcular_entre_fechas(
+                f_ini, f_fin, args.get("institucion", "COFECE"), collector
+            )
+
+        # ── Modo B: expedientes ─────────────────────────────
+        expedientes = args.get("expedientes") or []
+        if args.get("usar_ultima_busqueda") or not expedientes:
+            if self._last_expedientes:
+                expedientes = self._last_expedientes
+        if not expedientes:
+            return {
+                "error": "No hay expedientes sobre los que calcular.",
+                "sugerencia": (
+                    "Usa fecha_inicio_explicita y fecha_fin_explicita para dos "
+                    "fechas sueltas, o llama primero a buscar_expedientes."
+                ),
+            }
+
         enriched = self.temporal.enrich_with_plazos(expedientes)
 
         plazo_field = "dias_habiles_notif_resol"
@@ -748,6 +828,62 @@ class NormaPlusAgent:
             )
 
         return result
+
+    def _calcular_entre_fechas(
+        self, f_ini: str, f_fin: str, institucion: str, collector=None,
+    ) -> dict:
+        """Cómputo entre dos fechas sueltas, con el calendario oficial."""
+        d_ini = self.temporal._parse_date(f_ini)
+        d_fin = self.temporal._parse_date(f_fin)
+        if not d_ini or not d_fin:
+            return {"error": f"No pude interpretar las fechas: '{f_ini}', '{f_fin}'."}
+
+        cal = self.temporal.cal
+        habiles = cal.business_days_between(d_ini, d_fin, institucion)
+        naturales = (d_fin - d_ini).days
+        cubierto = cal.is_covered(d_ini, institucion) and cal.is_covered(d_fin, institucion)
+
+        resultado = {
+            "fecha_inicio": d_ini.isoformat(),
+            "fecha_fin": d_fin.isoformat(),
+            "dias_habiles": habiles,
+            "dias_naturales": naturales,
+            "institucion": institucion,
+            "convencion": "excluye el día inicial, incluye el día final",
+            "dentro_de_cobertura_del_calendario": cubierto,
+        }
+        if not cubierto:
+            resultado["ADVERTENCIA"] = (
+                f"Alguna de las fechas cae fuera del rango del catálogo de días "
+                f"inhábiles para {institucion} "
+                f"({cal.coverage_ranges().get(institucion.upper())}). "
+                f"El conteo puede ser incorrecto: avísale al usuario."
+            )
+
+        if collector is not None:
+            collector.record_computation({
+                "tool_called": True,
+                "modo": "fechas_explicitas",
+                "convention": {
+                    "excludes_start_day": True,
+                    "includes_end_day": True,
+                    "calendar": institucion,
+                },
+                "per_case": [{
+                    "case_link": None,
+                    "authority": institucion,
+                    "date_start": d_ini.isoformat(),
+                    "date_field_start": "explicita",
+                    "date_end": d_fin.isoformat(),
+                    "date_field_end": "explicita",
+                    "business_days": habiles,
+                    "calendar_days": naturales,
+                    "out_of_coverage": not cubierto,
+                    "coverage_note": resultado.get("ADVERTENCIA"),
+                }],
+                "stats": None,
+            })
+        return resultado
 
     def _describe_computation(
         self, enriched: list[dict], plazo_field: str,
@@ -806,10 +942,10 @@ class NormaPlusAgent:
         return {
             "tool_called": True,
             "convention": {
-                # Documentado por traza: la convención vigente excluye ambos
-                # extremos (temporal/holidays.py: business_days_between).
+                # Regla general confirmada por COFECE: excluir el día inicial,
+                # incluir el final (temporal/holidays.py: business_days_between).
                 "excludes_start_day": True,
-                "includes_end_day": False,
+                "includes_end_day": True,
                 "calendar": "por institución del expediente (authority)",
                 "plazo_field": plazo_field,
             },
@@ -824,7 +960,23 @@ class NormaPlusAgent:
         if isinstance(result, dict):
             return result
         if isinstance(result, list):
-            return {"results": result, "count": len(result)}
+            payload = {"results": result, "count": len(result)}
+            # El modelo no tenía forma de saber que su búsqueda estaba
+            # truncada: recibía 50 de 1,796 sin enterarse y respondía con
+            # falsa certeza. Ahora se le dice explícitamente.
+            if tool_name == "buscar_expedientes":
+                total = getattr(self.estadistica, "last_total", None)
+                if total is not None:
+                    payload["total_en_la_base"] = total
+                    if len(result) < total:
+                        payload["ADVERTENCIA_COBERTURA"] = (
+                            f"Solo estás viendo {len(result)} de {total} expedientes "
+                            f"que cumplen estos filtros. NO puedes afirmar 'todos', "
+                            f"'el mayor', 'el menor' ni un conteo con esta muestra. "
+                            f"Vuelve a llamar con exhaustivo=true, o dile al usuario "
+                            f"explícitamente sobre cuántos expedientes te basaste."
+                        )
+            return payload
         return {"result": str(result)}
 
     def _prepare_messages_for_stream(
@@ -948,13 +1100,26 @@ class NormaPlusAgent:
             return f"Buscando criterios sobre: {args.get('query', '')}"
         elif name == "buscar_expedientes":
             return self._describe_expedientes_search(args)
+        elif name == "contar_expedientes":
+            prefijo = args.get("prefijo_expediente")
+            return f"Contando expedientes{f' {prefijo}' if prefijo else ''}..."
         elif name == "calcular_plazos":
-            n = len(args.get("expedientes", []))
+            if args.get("fecha_inicio_explicita"):
+                return (
+                    f"Calculando días hábiles entre "
+                    f"{args['fecha_inicio_explicita']} y "
+                    f"{args.get('fecha_fin_explicita', '?')}..."
+                )
+            n = len(args.get("expedientes") or []) or len(self._last_expedientes)
             return f"Calculando plazos en días hábiles para {n} expedientes..."
         return f"Ejecutando {name}"
 
     def _describe_expedientes_search(self, args: dict) -> str:
         parts = ["Buscando expedientes"]
+        if args.get("prefijo_expediente"):
+            parts.append(args["prefijo_expediente"])
+        if args.get("exhaustivo"):
+            parts.append("(universo completo)")
         if args.get("text_search"):
             parts.append(f"con '{args['text_search']}'")
         if args.get("sentido_resolucion"):

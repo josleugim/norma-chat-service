@@ -24,6 +24,9 @@ class EstadisticaSearchClient:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
+        # Total de la última búsqueda (meta.total). Permite que el agente
+        # sepa cuánto universo quedó fuera en vez de responder a ciegas.
+        self.last_total: int | None = None
 
     async def search(
         self,
@@ -33,6 +36,7 @@ class EstadisticaSearchClient:
         page: int = 1,
         search_field: str | None = None,
         collector=None,
+        prefijo: str | None = None,
     ) -> list[ExpedienteRecord]:
         """
         Búsqueda de expedientes/casos vía GET /cases/search.
@@ -148,6 +152,17 @@ class EstadisticaSearchClient:
                 logger.warning(f"Error parseando caso: {e}")
                 continue
 
+        # Filtro por prefijo de expediente (VCN, IO, CNT...). searchData es
+        # ILIKE cross-field, así que puede colar registros cuyo prefijo no
+        # coincide; el filtro local garantiza el universo pedido.
+        if prefijo:
+            p = prefijo.strip().upper().rstrip("-") + "-"
+            results = [r for r in results if (r.caseLink or "").upper().startswith(p)]
+
+        # `meta.total` se guarda en el cliente para que el ejecutor pueda
+        # decirle al modelo cuánto universo quedó fuera.
+        self.last_total = (meta or {}).get("total")
+
         # Etapa única de retrieval: /cases/search filtra en SQL y no hay
         # reranking posterior. `meta.total` es lo que permite saber si la
         # respuesta se construyó sobre el universo completo o sobre una página.
@@ -177,22 +192,32 @@ class EstadisticaSearchClient:
         text_search: str | None = None,
         filters: dict | None = None,
         max_results: int = 200,
+        collector=None,
+        prefijo: str | None = None,
     ) -> list[ExpedienteRecord]:
         """
         Busca iterando páginas hasta obtener max_results o agotar resultados.
-        Útil para consultas como "todos los expedientes con multas".
+        Es lo que hace falta para responder "todos", "cuántos", "el mayor":
+        una sola página no permite sostener ninguna de esas afirmaciones.
         """
         all_results = []
         page = 1
-        page_size = min(50, max_results)
+        page_size = min(100, max_results)
+        total = None
 
         while len(all_results) < max_results:
+            # El filtro por prefijo NO se aplica por página: reduciría el lote
+            # y la paginación lo leería como última página, cortando de más.
+            # Se aplica al final, sobre el acumulado.
             batch = await self.search(
                 text_search=text_search,
                 filters=filters,
                 limit=page_size,
                 page=page,
+                collector=collector if page == 1 else None,
             )
+            if total is None:
+                total = self.last_total
             if not batch:
                 break
             all_results.extend(batch)
@@ -200,4 +225,12 @@ class EstadisticaSearchClient:
                 break  # última página
             page += 1
 
+        if prefijo:
+            p = prefijo.strip().upper().rstrip("-") + "-"
+            all_results = [
+                r for r in all_results if (r.caseLink or "").upper().startswith(p)
+            ]
+
+        self.last_total = total
+        self.last_pages_fetched = page
         return all_results[:max_results]
