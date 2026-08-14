@@ -647,27 +647,69 @@ class NormaPlusAgent:
         Existe porque "¿cuántos?" no se responde con top-k: en el baseline el
         agente contestó un conteo comparativo con 1 registro de 2,793.
         """
-        filters = self._build_expediente_filters(args)
         prefijo = args.get("prefijo_expediente")
-        text_search = args.get("text_search")
-        if prefijo and not text_search:
-            text_search = f"{prefijo}-"
+        filters = self._build_expediente_filters(args)
 
+        # La API une sus filtros con OR (verificado): pedir VCN + COFECE
+        # devuelve 1,839 en vez de 36. Por eso, con prefijo se manda un solo
+        # filtro y el resto se cuenta localmente sobre el universo real.
+        if prefijo:
+            registros = await self.estadistica.fetch_by_prefix(
+                prefijo, collector=collector
+            )
+            locales = self._filtrar_local(
+                [r.model_dump() for r in registros], args
+            )
+            return {
+                "total": len(locales),
+                "total_del_prefijo_sin_otros_filtros": len(registros),
+                "exacto": True,
+                "filtros_aplicados": {**filters, "prefijo_expediente": prefijo},
+                "metodo": (
+                    "Universo completo del prefijo traído por paginación y "
+                    "filtrado localmente."
+                ),
+            }
+
+        # Sin prefijo, meta.total solo es confiable con un filtro o ninguno.
         await self.estadistica.search(
-            text_search=text_search,
+            text_search=args.get("text_search"),
             filters=filters if filters else None,
             limit=1,
             collector=collector,
-            prefijo=prefijo,
         )
-        return {
+        confiable = len(filters) + (1 if args.get("text_search") else 0) <= 1
+        salida = {
             "total": self.estadistica.last_total,
-            "filtros_aplicados": {**filters, "prefijo_expediente": prefijo},
-            "nota": (
-                "Total exacto según la base. Si necesitas los registros, usa "
-                "buscar_expedientes con exhaustivo=true."
-            ),
+            "exacto": confiable,
+            "filtros_aplicados": filters,
         }
+        if not confiable:
+            salida["ADVERTENCIA"] = (
+                "Este total NO es confiable: la API combina varios filtros con "
+                "OR en vez de AND, así que el número está inflado. Vuelve a "
+                "contar con un solo filtro, o usa prefijo_expediente."
+            )
+        return salida
+
+    def _filtrar_local(self, registros: list[dict], args: dict) -> list[dict]:
+        """Aplica localmente los filtros que la API no sabe intersectar."""
+        salida = registros
+        equivalencias = {
+            "autoridad": "authority",
+            "tipo_procedimiento": "typeOfProcedure",
+            "sentido_resolucion": "senseOfResolution",
+        }
+        for arg_key, campo in equivalencias.items():
+            valor = args.get(arg_key)
+            if not valor:
+                continue
+            v = str(valor).strip().upper()
+            salida = [
+                r for r in salida
+                if str(r.get(campo) or "").strip().upper() == v
+            ]
+        return salida
 
     def _build_expediente_filters(self, args: dict) -> dict:
         filter_keys = {
@@ -693,22 +735,36 @@ class NormaPlusAgent:
         prefijo = args.get("prefijo_expediente")
         exhaustivo = args.get("exhaustivo", False)
 
-        # El prefijo se traduce a searchData ("VCN-"), que es ILIKE sobre
-        # caseLink; el cliente además filtra localmente por si cuela otra cosa.
-        if prefijo and not text_search:
-            text_search = f"{prefijo}-"
-
         # Si piden multas, traer más resultados para filtrar después
         fetch_limit = limit * 3 if has_multas else limit
 
-        if exhaustivo:
+        if prefijo:
+            # La API une filtros con OR, así que combinar prefijo con autoridad
+            # o tipo devolvería MÁS resultados, no menos. Se trae el universo
+            # completo del prefijo con un solo filtro y se acota localmente.
+            registros = await self.estadistica.fetch_by_prefix(
+                prefijo, max_results=500, collector=collector
+            )
+            serialized = self._filtrar_local(
+                [r.model_dump() for r in registros], args
+            )
+            # Se recorrió el universo completo del prefijo: no hay que
+            # advertir de cobertura parcial aunque los filtros locales
+            # hayan reducido el conjunto.
+            self._universo_completo = True
+            self._universo_tamano = len(registros)
+            if not exhaustivo:
+                serialized = serialized[:fetch_limit]
+                self._universo_completo = len(serialized) == len(registros)
+        elif exhaustivo:
             results = await self.estadistica.search_all_pages(
                 text_search=text_search,
                 filters=filters if filters else None,
-                max_results=min(max(fetch_limit, 500), 500),
+                max_results=500,
                 collector=collector,
-                prefijo=prefijo,
             )
+            serialized = [r.model_dump() for r in results]
+            self._universo_completo = False
         else:
             # text_search se envía como searchData (búsqueda libre cross-field
             # en caseLink, nombre, agentes económicos y mercados relevantes)
@@ -717,10 +773,9 @@ class NormaPlusAgent:
                 filters=filters if filters else None,
                 limit=fetch_limit,
                 collector=collector,
-                prefijo=prefijo,
             )
-
-        serialized = [r.model_dump() for r in results]
+            serialized = [r.model_dump() for r in results]
+            self._universo_completo = False
 
         # Post-filtro: has_multas (la API no tiene este filtro nativo,
         # se filtra localmente por agentFines no vacío)
@@ -966,7 +1021,12 @@ class NormaPlusAgent:
             # falsa certeza. Ahora se le dice explícitamente.
             if tool_name == "buscar_expedientes":
                 total = getattr(self.estadistica, "last_total", None)
-                if total is not None:
+                if getattr(self, "_universo_completo", False):
+                    payload["universo_completo_revisado"] = True
+                    payload["total_del_universo"] = getattr(
+                        self, "_universo_tamano", len(result)
+                    )
+                elif total is not None:
                     payload["total_en_la_base"] = total
                     if len(result) < total:
                         payload["ADVERTENCIA_COBERTURA"] = (

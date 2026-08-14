@@ -37,16 +37,23 @@ async def take_census(estadistica_client, prefixes: tuple[str, ...] = PREFIXES) 
         "errors": [],
     }
 
-    try:
-        census["total"] = await _count(estadistica_client, None)
-    except Exception as e:
-        census["errors"].append(f"total: {e}")
+    # En paralelo: en serie son ~8s de arranque del servicio, que se pagan en
+    # cada despliegue sin ninguna razón.
+    import asyncio
 
-    for prefix in prefixes:
-        try:
-            census["by_prefix"][prefix] = await _count(estadistica_client, f"{prefix}-")
-        except Exception as e:
-            census["errors"].append(f"{prefix}: {e}")
+    etiquetas = ["total"] + list(prefixes)
+    consultas = [_count(estadistica_client, None)] + [
+        _count(estadistica_client, f"{p}-") for p in prefixes
+    ]
+    resultados = await asyncio.gather(*consultas, return_exceptions=True)
+
+    for etiqueta, resultado in zip(etiquetas, resultados):
+        if isinstance(resultado, Exception):
+            census["errors"].append(f"{etiqueta}: {resultado}")
+        elif etiqueta == "total":
+            census["total"] = resultado
+        else:
+            census["by_prefix"][etiqueta] = resultado
 
     return census
 

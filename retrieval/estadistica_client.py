@@ -187,6 +187,34 @@ class EstadisticaSearchClient:
         logger.debug(f"Expedientes parseados: {len(results)}")
         return results
 
+    async def fetch_by_prefix(
+        self,
+        prefijo: str,
+        max_results: int = 500,
+        collector=None,
+    ) -> list[ExpedienteRecord]:
+        """
+        Trae TODOS los expedientes de un prefijo, con `searchData` como ÚNICO
+        filtro de la API.
+
+        Existe por una razón concreta: **la API combina sus filtros con OR, no
+        con AND.** Verificado el 14-ago-2026 — `authority=CFC` da 2,793,
+        `searchData=VCN-` da 36, y ambos juntos dan 2,829, que es la suma
+        exacta. Cualquier filtro adicional *amplía* el resultado.
+
+        Por eso aquí se manda un solo filtro y el resto se aplica localmente.
+        Es la única forma de obtener un universo correcto mientras la API no
+        intersecte.
+        """
+        p = prefijo.strip().upper().rstrip("-")
+        results = await self.search_all_pages(
+            text_search=f"{p}-",
+            filters=None,
+            max_results=max_results,
+            collector=collector,
+        )
+        return [r for r in results if (r.caseLink or "").upper().startswith(f"{p}-")]
+
     async def search_all_pages(
         self,
         text_search: str | None = None,
