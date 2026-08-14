@@ -178,6 +178,50 @@
       "comentarios_imanol": [2],
       "por_que_importa": "Control de sanidad: pregunta conceptual simple que debe funcionar bien. Si esta falla, algo está roto aguas arriba y no tiene caso analizar el resto de la corrida.",
       "senales_esperadas": []
+    },
+    {
+      "id": "q17",
+      "origen": "derivada",
+      "texto": "¿en cuáles expedientes VCN la COFECE no acreditó el incumplimiento?",
+      "categoria": "exhaustividad_negativa",
+      "comentarios_imanol": ["aclaracion_5"],
+      "por_que_importa": "Aclaración 5: 'cuáles' es uno de los disparadores que Imanol nombró. Además es una pregunta NEGATIVA sobre un subconjunto, que solo se puede responder bien habiendo recorrido el universo: no basta con encontrar ejemplos, hay que descartar el resto.",
+      "ground_truth": "Al 14-ago-2026 la API muestra 3 con 'NO SE ACREDITÓ INCUMPLIMIENTO' (VCN-002-2018, VCN-003-2018, VCN-005-2018) más VCN-005-2024. Blanco móvil: verificar contra el censo de la corrida.",
+      "senales_esperadas": ["requires_exhaustive_search", "exhaustive_but_truncated"]
+    },
+    {
+      "id": "q18",
+      "origen": "derivada",
+      "texto": "¿en qué expedientes VCN la COFECE nunca impuso una multa?",
+      "categoria": "exhaustividad_negativa",
+      "comentarios_imanol": ["aclaracion_5"],
+      "por_que_importa": "'nunca' es otro disparador explícito de Imanol. Las preguntas negativas son la trampa clásica del RAG: un top-k semántico devuelve casos CON multa y el modelo no tiene cómo saber qué no vio.",
+      "senales_esperadas": ["requires_exhaustive_search", "exhaustive_but_truncated"]
+    },
+    {
+      "id": "q19",
+      "origen": "derivada",
+      "texto": "¿cuál es el plazo menor en que la COFECE ha resuelto una concentración notificada?",
+      "categoria": "exhaustividad + plazos",
+      "comentarios_imanol": ["aclaracion_5", 8],
+      "por_que_importa": "Cruza los dos temas centrales: 'menor' exige recorrer el universo (4,588 CNT) y además exige que el cómputo de plazos funcione. Usa CNT a propósito, que sí tiene fechas de notificación.",
+      "senales_esperadas": ["requires_exhaustive_search", "coverage_truncated", "deadline_tool_called"]
+    },
+    {
+      "id": "q20",
+      "origen": "derivada",
+      "texto": "¿cuántas resoluciones emitió la CFC frente a cuántas ha emitido la COFECE?",
+      "categoria": "exhaustividad + comparacion",
+      "comentarios_imanol": ["aclaracion_5", 3],
+      "por_que_importa": "Conteo comparativo sobre el acervo completo. En las pruebas previas una comparación CFC vs COFECE fue la que agotó las 6 herramientas; sirve para ver si el agente reconoce que un conteo no se resuelve con top-k.",
+      "senales_esperadas": ["requires_exhaustive_search", "exhaustive_but_truncated", "exhausted_tools"]
     }
-  ]
+  ],
+
+  "holdout": {
+    "estado": "pendiente",
+    "regla": "Imanol pidió que algunas preguntas nuevas se mantengan como holdout para evitar sobreajustar Norma al benchmark (aclaración 6).",
+    "quien_las_escribe": "COFECE, NO nosotros. Un holdout que escribe el mismo equipo que aplica los fixes no protege de nada: acabaríamos optimizando contra preguntas que ya conocemos.",
+    "como_usarlo": "No correrlo durante el desarrollo. Se abre una sola vez, al cerrar una versión, y su resultado no se usa para decidir más fixes de esa misma versión."
+  }
 }
