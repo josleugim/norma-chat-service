@@ -34,3 +34,13 @@ class TurnState:
     # Filtro local que no coincidió con nada, para poder distinguir
     # "no hay ninguno" de "tu filtro estaba mal escrito"
     filtro_vacio: dict | None = None
+
+    # ── Routing y control de suficiencia ────────────────────
+    # La secuencia que pidió COFECE para v1, sin reranker ni multiagente:
+    #   routing → evidence check → un retry focalizado → abstención
+    query: str = ""
+    query_type: str = ""
+    sufficiency_checks: list[dict] = field(default_factory=list)
+    retrieval_retries: int = 0
+    pending_retry_terms: list[str] = field(default_factory=list)
+    abstention_reason: str | None = None

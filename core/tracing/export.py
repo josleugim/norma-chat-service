@@ -18,7 +18,8 @@ from pathlib import Path
 COLUMNS = [
     "question_set_id", "query", "answer", "sources", "diagnosis_stage",
     "diagnosis_reason", "tools_used", "tools_expected_not_called",
-    "tool_call_count", "coverage_strategy", "docs_retrieved",
+    "tool_call_count", "query_type", "sufficiency_passed",
+    "retrieval_retries", "abstained", "coverage_strategy", "docs_retrieved",
     "coverage_truncated", "exhaustive_but_truncated", "deadline_tool_called",
     "plazo_cases", "plazo_inputs_missing", "plazo_out_of_coverage",
     "second_retrieval", "exhausted_tools", "context_condensed",

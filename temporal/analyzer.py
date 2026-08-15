@@ -8,10 +8,99 @@ from typing import Optional
 from temporal.holidays import HolidayCalendar
 
 
+# Campos de fecha por tipo de procedimiento, según el modelo de datos que
+# confirmó COFECE el 14-ago-2026. La distinción importa: en VCN la fecha de
+# notificación NO APLICA por diseño —el equivalente es el acuerdo de inicio—,
+# así que buscarla ahí no era un hueco de datos sino un error de modelado.
+CAMPOS_FECHA = {
+    "startAgreementDate": "Fecha de emisión del acuerdo de inicio (VCN)",
+    "notificationDate": "Fecha de notificación (CNT)",
+    "basicInfoRequestDate": "Fecha de requerimiento de información básica (CNT)",
+    "admissionDate": "Fecha de admisión a trámite (CNT)",
+    "additionalInfoRequestDate": "Fecha de requerimiento de información adicional (CNT)",
+    "resolutionDate": "Fecha de resolución",
+    "ResolutionIssueDate": "Fecha de emisión de la resolución",
+}
+
+# Para "¿cuánto tardó la autoridad en resolver?" sin más precisión.
+DEFAULT_POR_PREFIJO = {
+    "VCN": ("startAgreementDate", "resolutionDate"),
+    "IO": ("startAgreementDate", "resolutionDate"),
+    "CNT": ("notificationDate", "resolutionDate"),
+}
+DEFAULT_GENERICO = ("notificationDate", "resolutionDate")
+
+
+def campos_por_defecto(case_link: str | None) -> tuple[str, str]:
+    """Par de fechas por defecto según el tipo de expediente."""
+    prefijo = (case_link or "").split("-")[0].upper()
+    return DEFAULT_POR_PREFIJO.get(prefijo, DEFAULT_GENERICO)
+
+
 class TemporalAnalyzer:
 
     def __init__(self, calendar: HolidayCalendar):
         self.cal = calendar
+
+    def compute_between_fields(
+        self,
+        records: list[dict],
+        campo_inicio: str | None = None,
+        campo_fin: str = "resolutionDate",
+    ) -> list[dict]:
+        """
+        Calculadora general entre cualquier par de campos de fecha.
+
+        Antes la herramienta estaba cableada a notificación → resolución, que
+        no existe en VCN. Ahora el agente elige el par según la pregunta, y si
+        no lo especifica se usa el default del tipo de expediente.
+
+        Si falta alguna de las dos fechas **no se estima**: se devuelve el caso
+        marcado como no calculable, con el nombre del campo que faltó.
+        """
+        salida = []
+        for rec in records:
+            case_link = rec.get("caseLink") or rec.get("id_expediente") or ""
+            inicio = campo_inicio or campos_por_defecto(case_link)[0]
+            autoridad = rec.get("authority") or rec.get("autoridad")
+
+            d_ini = self._parse_date(rec.get(inicio))
+            d_fin = self._parse_date(rec.get(campo_fin))
+
+            entrada = {
+                "case_link": case_link,
+                "authority": autoridad,
+                "campo_inicio": inicio,
+                "campo_fin": campo_fin,
+                "fecha_inicio": d_ini.isoformat() if d_ini else None,
+                "fecha_fin": d_fin.isoformat() if d_fin else None,
+            }
+
+            if not d_ini or not d_fin:
+                faltantes = [
+                    c for c, d in ((inicio, d_ini), (campo_fin, d_fin)) if not d
+                ]
+                entrada.update({
+                    "calculable": False,
+                    "campos_faltantes": faltantes,
+                    "dias_habiles": None,
+                    "dias_naturales": None,
+                })
+            else:
+                cubierto = (
+                    self.cal.is_covered(d_ini, autoridad)
+                    and self.cal.is_covered(d_fin, autoridad)
+                )
+                entrada.update({
+                    "calculable": True,
+                    "dias_habiles": self.cal.business_days_between(
+                        d_ini, d_fin, autoridad
+                    ),
+                    "dias_naturales": (d_fin - d_ini).days,
+                    "fuera_de_cobertura": not cubierto,
+                })
+            salida.append(entrada)
+        return salida
 
     def enrich_with_plazos(
         self, records: list[dict], institucion: str | None = None,

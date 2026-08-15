@@ -148,6 +148,58 @@ TOOLS = [
         },
     },
     {
+        "name": "agregar_expedientes",
+        "description": (
+            "Calcula un MÁXIMO, MÍNIMO, PROMEDIO, SUMA o CONTEO recorriendo el "
+            "universo COMPLETO de expedientes, no una muestra. "
+            "ÚSALA SIEMPRE que la pregunta sea de superlativo o agregado: "
+            "'la multa máxima', 'el plazo menor', 'el promedio', 'cuántos'. "
+            "NO intentes calcular un máximo revisando resultados de "
+            "buscar_expedientes: esa lista está truncada y la respuesta sería "
+            "falsa. Esta herramienta pagina el universo, hace el cálculo de "
+            "forma determinista y te dice cuántos registros procesó, para que "
+            "puedas afirmar el resultado con respaldo."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "operacion": {
+                    "type": "string",
+                    "enum": ["max", "min", "promedio", "suma", "conteo"],
+                    "description": "Qué calcular",
+                },
+                "metrica": {
+                    "type": "string",
+                    "enum": ["multa", "dias_habiles", "dias_naturales"],
+                    "description": (
+                        "Sobre qué. 'multa' usa los montos de agentFines; "
+                        "'dias_habiles' calcula el plazo de cada expediente con "
+                        "el calendario oficial."
+                    ),
+                },
+                "prefijo_expediente": {
+                    "type": "string",
+                    "enum": ["VCN", "IO", "CNT", "DE", "RA", "CON"],
+                    "description": "Tipo de expediente que define el universo",
+                },
+                "autoridad": {
+                    "type": "string",
+                    "enum": ["CFC", "COFECE", "Cofece"],
+                },
+                "sentido_resolucion": {"type": "string"},
+                "campo_inicio": {
+                    "type": "string",
+                    "description": "Solo para métricas de días: campo de fecha inicial",
+                },
+                "campo_fin": {
+                    "type": "string",
+                    "description": "Solo para métricas de días: campo de fecha final",
+                },
+            },
+            "required": ["operacion", "metrica"],
+        },
+    },
+    {
         "name": "calcular_plazos",
         "description": (
             "Calcula plazos en días hábiles con el calendario oficial de días "
@@ -192,17 +244,30 @@ TOOLS = [
                     "description": "Lista de expedientes con sus fechas. Opcional si usas usar_ultima_busqueda o fechas explícitas.",
                     "items": {"type": "object"},
                 },
-                "fecha_inicio": {
+                "campo_inicio": {
                     "type": "string",
-                    "enum": ["fecha_notificacion", "fecha_admision", "fecha_requerimiento_basica"],
-                    "description": "Campo de fecha inicial para el cálculo",
-                    "default": "fecha_notificacion",
+                    "enum": [
+                        "startAgreementDate", "notificationDate",
+                        "basicInfoRequestDate", "admissionDate",
+                        "additionalInfoRequestDate", "resolutionDate",
+                        "ResolutionIssueDate",
+                    ],
+                    "description": (
+                        "Campo de fecha inicial. IMPORTANTE: en VCN e IO la fecha "
+                        "de notificación NO EXISTE por diseño; ahí el inicio del "
+                        "procedimiento es startAgreementDate (acuerdo de inicio). "
+                        "En CNT es notificationDate. Si no lo especificas se usa "
+                        "el default del tipo de expediente."
+                    ),
                 },
-                "fecha_fin": {
+                "campo_fin": {
                     "type": "string",
-                    "enum": ["fecha_resolucion"],
-                    "description": "Campo de fecha final para el cálculo",
-                    "default": "fecha_resolucion",
+                    "enum": [
+                        "resolutionDate", "ResolutionIssueDate", "admissionDate",
+                        "additionalInfoRequestDate", "basicInfoRequestDate",
+                    ],
+                    "description": "Campo de fecha final. Default: resolutionDate.",
+                    "default": "resolutionDate",
                 },
                 "max_dias_habiles": {
                     "type": "integer",

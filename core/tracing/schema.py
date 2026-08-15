@@ -123,6 +123,16 @@ class Decisions(BaseModel):
     # agente para cubrir el universo relevante, no solo si acertó.
     coverage_strategy: Optional[str] = None
     exhaustive_but_truncated: bool = False
+    # Routing y control de suficiencia (punto 3 de COFECE): tipo de
+    # consulta detectado, estrategia, si hubo segunda búsqueda y si se
+    # abstuvo por evidencia insuficiente.
+    query_type: Optional[str] = None
+    routing_strategy: Optional[str] = None
+    sufficiency_checks: list[dict[str, Any]] = Field(default_factory=list)
+    sufficiency_passed: Optional[bool] = None
+    retrieval_retries: int = 0
+    abstained: bool = False
+    abstention_reason: Optional[str] = None
     used_cached_evidence: bool = False
     answered_without_retrieval: bool = False
     final_answer_path: Optional[str] = None
@@ -281,6 +291,10 @@ class Trace(BaseModel):
             ),
             "tool_call_count": self.decisions.tool_call_count,
             "coverage_strategy": self.decisions.coverage_strategy,
+            "query_type": self.decisions.query_type,
+            "sufficiency_passed": self.decisions.sufficiency_passed,
+            "retrieval_retries": self.decisions.retrieval_retries,
+            "abstained": self.decisions.abstained,
             "exhaustive_but_truncated": self.decisions.exhaustive_but_truncated,
             "docs_retrieved": retrieval_docs,
             "coverage_truncated": truncated,
