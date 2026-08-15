@@ -196,15 +196,16 @@ class TestInterpretation:
 class TestAnswerAnalysis:
 
     def test_cita_alucinada(self):
-        criterios = [[{"id": "1", "metadata": {"id_expediente": "CNT-001-2020"}}]]
+        from core.citations import CitationRegistry
+        reg = CitationRegistry()
+        reg.assign({"id": "1", "metadata": {"id_expediente": "CNT-001-2020"}}, "C")
+        refs, sin_resolver = CitationBuilder().build_from_registry(
+            "Según el criterio [C1] y también [C7].", reg
+        )
         answer = analyze_answer(
             text="Según el criterio [C1] y también [C7].",
-            citation_builder=CitationBuilder(),
-            criterio_results=criterios,
-            expediente_results=[],
-            references=[],
-            docs_in_context=[],
-            expected_prefixes=[],
+            registry=reg, references=refs, unresolved=sin_resolver,
+            docs_in_context=[], expected_prefixes=[],
         )
         assert answer.citations_emitted == ["C1", "C7"]
         assert answer.citations_unresolved == ["C7"]
@@ -213,8 +214,7 @@ class TestAnswerAnalysis:
         """El error del comentario #7: se pidió VCN y contestó con CNT."""
         answer = analyze_answer(
             text="El expediente CNT-095-2013 resolvió el asunto.",
-            citation_builder=CitationBuilder(),
-            criterio_results=[], expediente_results=[], references=[],
+            registry=None, references=[], unresolved=[],
             docs_in_context=[],
             expected_prefixes=["VCN"],
         )
@@ -229,8 +229,7 @@ class TestAnswerAnalysis:
         """
         answer = analyze_answer(
             text="El tiempo promedio es de 49 días hábiles.",
-            citation_builder=CitationBuilder(),
-            criterio_results=[], expediente_results=[], references=[],
+            registry=None, references=[], unresolved=[],
             docs_in_context=[
                 {"doc_id": "1", "case_link": "CNT-030-2015"},
                 {"doc_id": "2", "case_link": "CNT-011-2017"},
@@ -244,8 +243,7 @@ class TestAnswerAnalysis:
     def test_scope_ok_cuando_coincide(self):
         answer = analyze_answer(
             text="El expediente VCN-001-2022 fue sancionado.",
-            citation_builder=CitationBuilder(),
-            criterio_results=[], expediente_results=[], references=[],
+            registry=None, references=[], unresolved=[],
             docs_in_context=[],
             expected_prefixes=["VCN"],
         )
@@ -254,8 +252,7 @@ class TestAnswerAnalysis:
     def test_markdown_crudo_es_medible(self):
         answer = analyze_answer(
             text="### Título\n**negritas** | tabla |",
-            citation_builder=CitationBuilder(),
-            criterio_results=[], expediente_results=[], references=[],
+            registry=None, references=[], unresolved=[],
             docs_in_context=[], expected_prefixes=[],
         )
         assert answer.format_markers["h3"] == 1
@@ -265,8 +262,7 @@ class TestAnswerAnalysis:
     def test_docs_recuperados_sin_citar(self):
         answer = analyze_answer(
             text="Respuesta sin citas.",
-            citation_builder=CitationBuilder(),
-            criterio_results=[], expediente_results=[], references=[],
+            registry=None, references=[], unresolved=[],
             docs_in_context=[{"doc_id": "d1", "case_link": "CNT-001-2020"}],
             expected_prefixes=[],
         )
@@ -634,3 +630,79 @@ class TestCoincidenciaTolerante:
     def test_coincidencia(self, real, pedido, esperado):
         from agent.agent import _coincide, _normalizar
         assert _coincide(_normalizar(real), _normalizar(pedido)) is esperado
+
+
+# ── Citas: el bug crítico reportado por COFECE ──────────────
+
+class TestRegistroDeCitas:
+    """
+    COFECE, 14-ago-2026: respuestas materialmente correctas cuya cita apuntaba
+    a OTRO expediente (q05, q06, q12, q18, q19). Severidad crítica: manda a un
+    abogado a leer el expediente equivocado.
+
+    Causa: la resolución era posicional. Con dos búsquedas en un turno, [E1] se
+    resolvía contra el último bloque donde el índice fuera válido.
+
+    Ahora el marcador se entrega junto con el documento y se resuelve por
+    diccionario. Criterio de aceptación: 0 citas al expediente incorrecto.
+    """
+
+    def _registry(self):
+        from core.citations import CitationRegistry
+        return CitationRegistry()
+
+    def test_dos_busquedas_no_confunden_expedientes(self):
+        """El caso exacto que reportaron."""
+        reg = self._registry()
+        m1 = reg.assign({"caseLink": "VCN-004-2024"}, "E")   # 1ª búsqueda
+        m2 = reg.assign({"caseLink": "VCN-004-2022"}, "E")   # 2ª búsqueda
+        assert m1 == "E1" and m2 == "E2"
+        assert reg.case_link_of("E1") == "VCN-004-2024"
+        assert reg.case_link_of("E2") == "VCN-004-2022"
+
+    def test_la_numeracion_no_se_reinicia_entre_busquedas(self):
+        reg = self._registry()
+        for i in range(3):
+            reg.assign({"caseLink": f"CNT-00{i}-2020"}, "E")
+        # Segunda búsqueda: debe continuar en E4, no volver a E1
+        assert reg.assign({"caseLink": "VCN-001-2022"}, "E") == "E4"
+
+    def test_mismo_expediente_mismo_marcador(self):
+        reg = self._registry()
+        a = reg.assign({"caseLink": "VCN-001-2022"}, "E")
+        b = reg.assign({"caseLink": "VCN-001-2022"}, "E")
+        assert a == b
+
+    def test_criterios_y_expedientes_numeran_aparte(self):
+        reg = self._registry()
+        assert reg.assign({"id": "1"}, "C") == "C1"
+        assert reg.assign({"caseLink": "VCN-001-2022"}, "E") == "E1"
+
+    def test_marcador_inexistente_no_se_muestra(self):
+        """Mejor sin cita que con una fuente equivocada."""
+        reg = self._registry()
+        reg.assign({"caseLink": "VCN-001-2022"}, "E")
+        refs, sin_resolver = CitationBuilder().build_from_registry(
+            "Según [E1] y también [E9].", reg
+        )
+        assert [r.id_expediente for r in refs] == ["VCN-001-2022"]
+        assert sin_resolver == ["E9"]
+
+    def test_la_cita_apunta_al_expediente_del_que_salio_el_dato(self):
+        """Prueba de regresión del bug: antes [E1] daba VCN-004-2022."""
+        reg = self._registry()
+        reg.assign({"caseLink": "VCN-004-2024"}, "E")
+        reg.assign({"caseLink": "VCN-004-2022"}, "E")
+        refs, _ = CitationBuilder().build_from_registry(
+            "La multa máxima corresponde a VCN-004-2024 [E1].", reg
+        )
+        assert refs[0].id_expediente == "VCN-004-2024"
+        assert refs[0].marker == "E1"
+
+    def test_el_registro_queda_auditable_en_la_traza(self):
+        reg = self._registry()
+        reg.assign({"caseLink": "VCN-001-2022", "id": 7}, "E")
+        fila = reg.to_trace()[0]
+        assert fila["marker"] == "E1"
+        assert fila["case_link"] == "VCN-001-2022"
+        assert fila["source_type"] == "estadistica"

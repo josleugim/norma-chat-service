@@ -12,6 +12,9 @@ from typing import Optional
 
 class ReferenceItem(BaseModel):
     """Referencia citada en la respuesta — usado por CitationBuilder."""
+    # Marcador exacto que emitió el modelo ([E3]). Cierra la cadena
+    # afirmación → evidencia → registro → expediente → fuente visible.
+    marker: Optional[str] = None
     id_expediente: str
     nombre_expediente: str = ""
     source_type: str  # "criterio" | "estadistica"

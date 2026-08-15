@@ -34,49 +34,46 @@ def count_format_markers(text: str) -> dict[str, int]:
 
 def analyze_answer(
     text: str,
-    citation_builder,
-    criterio_results: list[list],
-    expediente_results: list[list],
+    registry,
     references: list,
+    unresolved: list[str],
     docs_in_context: list[dict[str, Any]],
     expected_prefixes: list[str],
 ) -> Answer:
     """
     Args:
-        citation_builder: instancia de CitationBuilder, para resolver marcadores
-            con exactamente la misma lógica que usa el agente.
+        registry: CitationRegistry del turno. La resolución ya ocurrió por
+            diccionario; aquí solo se registra la cadena para el trace.
+        unresolved: marcadores que el modelo citó y no existen en el registro.
         docs_in_context: [{doc_id, case_link, ...}] de lo que entró al prompt.
         expected_prefixes: prefijos que la pregunta pidió (VCN, IO, ...).
     """
     text = text or ""
 
     emitted: list[str] = []
-    unresolved: list[str] = []
     cited_case_links: set[str] = set()
 
     for match in CITATION_RE.finditer(text):
         marker = f"{match.group(1)}{match.group(2)}"
         if marker not in emitted:
             emitted.append(marker)
-        item = citation_builder.resolve_marker(
-            match.group(1), int(match.group(2)), criterio_results, expediente_results
-        )
-        if item is None:
-            if marker not in unresolved:
-                unresolved.append(marker)
-        else:
-            link = _case_link_of(item)
-            if link:
-                cited_case_links.add(link)
 
+    # Cadena completa por cita: marcador → registro → expediente → fuente.
+    # Es lo que permite auditar cualquier cita desde el trace.
     resolved = []
     for ref in references:
         data = ref.model_dump() if hasattr(ref, "model_dump") else dict(ref)
+        marker = data.get("marker")
         resolved.append({
+            "marker": marker,
             "doc_id": data.get("id_expediente", ""),
             "case_link": data.get("id_expediente", ""),
             "source_type": data.get("source_type", ""),
             "title": data.get("title"),
+            # Verificación cruzada: lo que dice el registro para ese marcador.
+            "registry_case_link": (
+                registry.case_link_of(marker) if marker and registry else None
+            ),
         })
         if data.get("id_expediente"):
             cited_case_links.add(data["id_expediente"])
@@ -110,7 +107,8 @@ def analyze_answer(
         length_chars=len(text),
         citations_emitted=emitted,
         citations_resolved=resolved,
-        citations_unresolved=unresolved,
+        citations_unresolved=list(unresolved or []),
+        citation_registry=registry.to_trace() if registry else [],
         docs_in_context_uncited=uncited,
         has_fuentes_section=bool(FUENTES_RE.search(text)) or "FUENTES" in text,
         format_markers=count_format_markers(text),

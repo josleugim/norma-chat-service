@@ -73,6 +73,50 @@ class CitationBuilder:
 
         return llm_response, references
 
+    def build_from_registry(
+        self, llm_response: str, registry,
+    ) -> tuple[list, list[str]]:
+        """
+        Resuelve las citas contra el registro del turno.
+
+        Sustituye a build_references, que infería el documento por la posición
+        del índice y podía asignar una cita al expediente equivocado. Aquí el
+        marcador se resolvió por diccionario o no se resuelve: COFECE pidió
+        explícitamente que sea preferible no mostrar cita a mostrar una
+        incorrecta.
+
+        Retorna (referencias, marcadores_sin_resolver).
+        """
+        references: list[ReferenceItem] = []
+        sin_resolver: list[str] = []
+        vistos: set[str] = set()
+
+        for match in re.finditer(r"\[([CE])(\d+)\]", llm_response):
+            marker = f"{match.group(1)}{match.group(2)}"
+            if marker in vistos:
+                continue
+            vistos.add(marker)
+
+            item = registry.resolve(marker)
+            if item is None:
+                sin_resolver.append(marker)
+                logger.warning(
+                    f"Cita {marker} no está en el registro del turno; "
+                    f"se omite en vez de resolverla a otro expediente."
+                )
+                continue
+
+            ref = (
+                self._build_criterio_ref(item, 0, set())
+                if marker.startswith("C")
+                else self._build_expediente_ref(item, 0, set())
+            )
+            if ref:
+                ref.marker = marker
+                references.append(ref)
+
+        return references, sin_resolver
+
     def resolve_marker(
         self,
         ref_type: str,

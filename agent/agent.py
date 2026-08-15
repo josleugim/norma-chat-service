@@ -13,7 +13,9 @@ from retrieval.criterios_client import CriteriosSearchClient
 from retrieval.estadistica_client import EstadisticaSearchClient
 from temporal.analyzer import TemporalAnalyzer
 from core.citation_builder import CitationBuilder
+from core.citations import CitationRegistry
 from core.evidence_cache import EvidenceCache
+from agent.turn_state import TurnState
 from core.tracing import (
     NullSink, Request as TraceRequest, TraceCollector, analyze_answer,
     build_versions, interpret,
@@ -68,10 +70,6 @@ class NormaPlusAgent:
             "contar_expedientes": self._exec_contar_expedientes,
             "calcular_plazos": self._exec_calcular_plazos,
         }
-        # Últimos expedientes recuperados en el turno. Evita que el modelo
-        # tenga que devolverlos completos a calcular_plazos, que es lo que
-        # trunca los argumentos contra el límite de tokens.
-        self._last_expedientes: list[dict] = []
 
     async def run(
         self,
@@ -127,6 +125,11 @@ class NormaPlusAgent:
         chat_history: list[dict],
         is_first_message: bool,
     ) -> AsyncIterator[StreamEvent]:
+        # Todo lo que dura este turno. El agente es un singleton, así que
+        # nada de esto puede vivir en self: dos peticiones simultáneas se
+        # pisarían.
+        state = TurnState()
+
         # Construir mensajes para el LLM en formato nativo
         messages = self._build_messages(
             user_query, chat_history, provider, session_id, collector
@@ -178,7 +181,7 @@ class NormaPlusAgent:
                                              arguments=tc.arguments)
                     try:
                         result = await self.tool_executors[tc.name](
-                            tc.arguments, collector
+                            tc.arguments, collector, state
                         )
                         if collector is not None:
                             collector.record_result(result)
@@ -204,7 +207,7 @@ class NormaPlusAgent:
 
                     # Agregar al historial del LLM (formato depende del proveedor)
                     result_str = json.dumps(
-                        self._serialize_tool_result(tc.name, result),
+                        self._serialize_tool_result(tc.name, result, state),
                         ensure_ascii=False, default=str,
                     )
                     messages = self._append_tool_result(
@@ -328,11 +331,11 @@ class NormaPlusAgent:
                 expedientes=flat_expedientes,
             )
 
-        # ── Parsear citas ───────────────────────────────────
-        _, references = self.citations.build_references(
-            final_text,
-            all_criterios_results,
-            all_expedientes_results,
+        # ── Resolver citas contra el registro del turno ─────
+        # Por diccionario, no por posición: es lo que impide que una cita
+        # termine apuntando a un expediente distinto del que se usó.
+        references, citas_sin_resolver = self.citations.build_from_registry(
+            final_text, state.registry
         )
 
         if references:
@@ -346,10 +349,9 @@ class NormaPlusAgent:
             try:
                 collector.set_answer(analyze_answer(
                     text=final_text,
-                    citation_builder=self.citations,
-                    criterio_results=all_criterios_results,
-                    expediente_results=all_expedientes_results,
+                    registry=state.registry,
                     references=references,
+                    unresolved=citas_sin_resolver,
                     docs_in_context=collector.context.docs_in_context,
                     expected_prefixes=collector.interpretation.scope.procedure_prefix,
                 ))
@@ -595,7 +597,7 @@ class NormaPlusAgent:
 
     # ── Ejecutores de herramientas ──────────────────────────
 
-    async def _exec_buscar_criterios(self, args: dict, collector=None) -> list:
+    async def _exec_buscar_criterios(self, args: dict, collector=None, state=None) -> list:
         results = await self.criterios.search(
             query=args["query"],
             top_k=args.get("top_k", 15),
@@ -640,7 +642,7 @@ class NormaPlusAgent:
             ])
         return serialized
 
-    async def _exec_contar_expedientes(self, args: dict, collector=None) -> dict:
+    async def _exec_contar_expedientes(self, args: dict, collector=None, state=None) -> dict:
         """
         Devuelve el tamaño del universo sin traer los registros.
 
@@ -658,7 +660,7 @@ class NormaPlusAgent:
                 prefijo, collector=collector
             )
             locales = self._filtrar_local(
-                [r.model_dump() for r in registros], args
+                [r.model_dump() for r in registros], args, state
             )
             return {
                 "total": len(locales),
@@ -692,7 +694,7 @@ class NormaPlusAgent:
             )
         return salida
 
-    def _filtrar_local(self, registros: list[dict], args: dict) -> list[dict]:
+    def _filtrar_local(self, registros: list[dict], args: dict, state=None) -> list[dict]:
         """
         Aplica localmente los filtros que la API no sabe intersectar.
 
@@ -706,7 +708,7 @@ class NormaPlusAgent:
            que sí existen, para que el agente distinga "no hay ninguno" de
            "tu filtro no coincidió".
         """
-        self._filtro_vacio = None
+        filtro_vacio = None
         salida = registros
         equivalencias = {
             "autoridad": "authority",
@@ -727,7 +729,7 @@ class NormaPlusAgent:
                 disponibles = sorted({
                     str(r.get(campo)) for r in antes if r.get(campo)
                 })
-                self._filtro_vacio = {
+                filtro_vacio = {
                     "filtro": arg_key,
                     "valor_solicitado": valor,
                     "valores_disponibles": disponibles[:25],
@@ -756,7 +758,7 @@ class NormaPlusAgent:
             if args.get(agent_key) is not None
         }
 
-    async def _exec_buscar_expedientes(self, args: dict, collector=None) -> list:
+    async def _exec_buscar_expedientes(self, args: dict, collector=None, state=None) -> list:
         text_search = args.get("text_search")
         limit = args.get("limit", 50)
         has_multas = args.get("has_multas", False)
@@ -776,16 +778,16 @@ class NormaPlusAgent:
                 prefijo, max_results=500, collector=collector
             )
             serialized = self._filtrar_local(
-                [r.model_dump() for r in registros], args
+                [r.model_dump() for r in registros], args, state
             )
             # Se recorrió el universo completo del prefijo: no hay que
             # advertir de cobertura parcial aunque los filtros locales
             # hayan reducido el conjunto.
-            self._universo_completo = True
-            self._universo_tamano = len(registros)
+            state.universo_completo = True
+            state.universo_tamano = len(registros)
             if not exhaustivo:
                 serialized = serialized[:fetch_limit]
-                self._universo_completo = len(serialized) == len(registros)
+                state.universo_completo = len(serialized) == len(registros)
         elif exhaustivo:
             results = await self.estadistica.search_all_pages(
                 text_search=text_search,
@@ -794,7 +796,7 @@ class NormaPlusAgent:
                 collector=collector,
             )
             serialized = [r.model_dump() for r in results]
-            self._universo_completo = False
+            state.universo_completo = False
         else:
             # text_search se envía como searchData (búsqueda libre cross-field
             # en caseLink, nombre, agentes económicos y mercados relevantes)
@@ -805,7 +807,7 @@ class NormaPlusAgent:
                 collector=collector,
             )
             serialized = [r.model_dump() for r in results]
-            self._universo_completo = False
+            state.universo_completo = False
 
         # Post-filtro: has_multas (la API no tiene este filtro nativo,
         # se filtra localmente por agentFines no vacío)
@@ -823,7 +825,7 @@ class NormaPlusAgent:
 
         # Guardado para usar_ultima_busqueda, que evita que el modelo tenga
         # que devolver el arreglo completo y truncar sus propios argumentos.
-        self._last_expedientes = serialized
+        state.last_expedientes = serialized
 
         if collector is not None:
             collector.record_stage(
@@ -849,7 +851,7 @@ class NormaPlusAgent:
 
         return serialized
 
-    async def _exec_calcular_plazos(self, args: dict, collector=None) -> dict:
+    async def _exec_calcular_plazos(self, args: dict, collector=None, state=None) -> dict:
         # ── Modo A: dos fechas sueltas ──────────────────────
         # Antes no existía: ante "¿cuántos días hábiles entre X e Y?" el modelo
         # no tenía herramienta que llamar y estimaba de memoria.
@@ -863,8 +865,8 @@ class NormaPlusAgent:
         # ── Modo B: expedientes ─────────────────────────────
         expedientes = args.get("expedientes") or []
         if args.get("usar_ultima_busqueda") or not expedientes:
-            if self._last_expedientes:
-                expedientes = self._last_expedientes
+            if state and state.last_expedientes:
+                expedientes = state.last_expedientes
         if not expedientes:
             return {
                 "error": "No hay expedientes sobre los que calcular.",
@@ -1040,11 +1042,27 @@ class NormaPlusAgent:
 
     # ── Helpers ─────────────────────────────────────────────
 
-    def _serialize_tool_result(self, tool_name: str, result) -> dict | list:
-        """Serializa resultado de tool para el LLM."""
+    def _serialize_tool_result(self, tool_name: str, result, state=None) -> dict | list:
+        """
+        Serializa resultado de tool para el LLM.
+
+        Cada documento sale con su marcador de cita ya asignado (`ref`). El
+        modelo cita ese marcador tal cual, así que resolver una cita después
+        es una búsqueda en un diccionario y no una inferencia por posición.
+        Antes se adivinaba, y con dos búsquedas en un turno la cita podía
+        acabar apuntando a otro expediente.
+        """
         if isinstance(result, dict):
             return result
         if isinstance(result, list):
+            if state is not None and tool_name in (
+                "buscar_criterios", "buscar_expedientes"
+            ):
+                kind = "C" if tool_name == "buscar_criterios" else "E"
+                result = [
+                    {"ref": state.registry.assign(doc, kind), **doc}
+                    for doc in result if isinstance(doc, dict)
+                ]
             payload = {"results": result, "count": len(result)}
             # El modelo no tenía forma de saber que su búsqueda estaba
             # truncada: recibía 50 de 1,796 sin enterarse y respondía con
@@ -1052,15 +1070,13 @@ class NormaPlusAgent:
             if tool_name == "buscar_expedientes":
                 # Un filtro que no coincidió con nada NO significa "no existen
                 # casos". Sin este aviso el agente concluye que no hay ninguno.
-                vacio = getattr(self, "_filtro_vacio", None)
+                vacio = state.filtro_vacio if state else None
                 if vacio:
                     payload["FILTRO_SIN_COINCIDENCIAS"] = vacio
                 total = getattr(self.estadistica, "last_total", None)
-                if getattr(self, "_universo_completo", False):
+                if state and state.universo_completo:
                     payload["universo_completo_revisado"] = True
-                    payload["total_del_universo"] = getattr(
-                        self, "_universo_tamano", len(result)
-                    )
+                    payload["total_del_universo"] = state.universo_tamano
                 elif total is not None:
                     payload["total_en_la_base"] = total
                     if len(result) < total:
@@ -1205,7 +1221,7 @@ class NormaPlusAgent:
                     f"{args['fecha_inicio_explicita']} y "
                     f"{args.get('fecha_fin_explicita', '?')}..."
                 )
-            n = len(args.get("expedientes") or []) or len(self._last_expedientes)
+            n = len(args.get("expedientes") or [])
             return f"Calculando plazos en días hábiles para {n} expedientes..."
         return f"Ejecutando {name}"
 

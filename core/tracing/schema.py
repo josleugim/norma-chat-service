@@ -199,6 +199,9 @@ class Answer(BaseModel):
     citations_emitted: list[str] = Field(default_factory=list)
     citations_resolved: list[dict[str, Any]] = Field(default_factory=list)
     citations_unresolved: list[str] = Field(default_factory=list)
+    # Todos los documentos que recibieron marcador en el turno, con su
+    # expediente. Permite auditar cualquier cita desde la traza.
+    citation_registry: list[dict[str, Any]] = Field(default_factory=list)
     docs_in_context_uncited: list[str] = Field(default_factory=list)
     has_fuentes_section: bool = False
     format_markers: dict[str, int] = Field(default_factory=dict)
