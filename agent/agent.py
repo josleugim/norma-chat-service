@@ -860,6 +860,18 @@ class NormaPlusAgent:
             )
             resultado["campo_inicio"] = args.get("campo_inicio") or "default por tipo"
             resultado["campo_fin"] = args.get("campo_fin", "resolutionDate")
+            anomalias = [c for c in calculos if c.get("anomalia")]
+            if anomalias:
+                resultado["EXPEDIENTES_CON_FECHAS_INCONSISTENTES"] = {
+                    "count": len(anomalias),
+                    "ejemplos": [c["case_link"] for c in anomalias[:8]],
+                    "nota": (
+                        "Estos expedientes tienen la fecha final ANTES que la "
+                        "inicial en la base. Se excluyeron del cálculo por ser "
+                        "datos inconsistentes, no plazos de cero días. "
+                        "Menciónalo si el usuario pregunta por mínimos."
+                    ),
+                }
 
         resultado["universo_recuperado"] = universo_total
         resultado["universo_tras_filtros"] = len(registros)

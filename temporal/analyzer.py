@@ -86,6 +86,22 @@ class TemporalAnalyzer:
                     "dias_habiles": None,
                     "dias_naturales": None,
                 })
+            elif d_fin < d_ini:
+                # Fecha final anterior a la inicial: el dato está mal en la
+                # base, no es un plazo de cero días. Sin esta distinción,
+                # 114 expedientes con fechas invertidas se colaban como
+                # "resuelto el mismo día" y ganaban cualquier mínimo.
+                entrada.update({
+                    "calculable": False,
+                    "anomalia": "fecha_fin_anterior_a_inicio",
+                    "dias_habiles": None,
+                    "dias_naturales": None,
+                    "nota": (
+                        f"{campo_fin} ({d_fin.isoformat()}) es anterior a "
+                        f"{inicio} ({d_ini.isoformat()}). Dato inconsistente "
+                        f"en la base; no se calcula el plazo."
+                    ),
+                })
             else:
                 cubierto = (
                     self.cal.is_covered(d_ini, autoridad)

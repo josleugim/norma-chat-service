@@ -706,3 +706,61 @@ class TestRegistroDeCitas:
         assert fila["marker"] == "E1"
         assert fila["case_link"] == "VCN-001-2022"
         assert fila["source_type"] == "estadistica"
+
+
+class TestFechasInconsistentes:
+    """
+    114 expedientes tienen la fecha de resolución ANTES que la de
+    notificación. business_days_between devolvía 0 cuando start >= end, así
+    que esos datos malos se disfrazaban de "resuelto el mismo día" y ganaban
+    cualquier consulta de mínimo.
+    """
+
+    @pytest.fixture(scope="class")
+    @classmethod
+    def analyzer(cls):
+        from temporal.analyzer import TemporalAnalyzer
+        return TemporalAnalyzer(HolidayCalendar("data/dias_inhabiles.xlsx"))
+
+    def test_fecha_invertida_no_es_plazo_cero(self, analyzer):
+        r = analyzer.compute_between_fields([{
+            "caseLink": "CNT-085-2020", "authority": "COFECE",
+            "notificationDate": "10-08-2020", "resolutionDate": "09-03-2020",
+        }])[0]
+        assert r["calculable"] is False
+        assert r["anomalia"] == "fecha_fin_anterior_a_inicio"
+        assert r["dias_habiles"] is None
+
+    def test_vcn_usa_acuerdo_de_inicio(self, analyzer):
+        """En VCN la fecha de notificación no existe por diseño."""
+        r = analyzer.compute_between_fields([{
+            "caseLink": "VCN-001-2022", "authority": "COFECE",
+            "startAgreementDate": "21-04-2022", "resolutionDate": "07-06-2022",
+        }])[0]
+        assert r["campo_inicio"] == "startAgreementDate"
+        assert r["calculable"] and r["dias_habiles"] > 0
+
+    def test_cnt_usa_notificacion(self, analyzer):
+        r = analyzer.compute_between_fields([{
+            "caseLink": "CNT-095-2013", "authority": "COFECE",
+            "notificationDate": "23-09-2013", "resolutionDate": "21-02-2014",
+        }])[0]
+        assert r["campo_inicio"] == "notificationDate"
+        assert r["dias_habiles"] == 96
+
+    def test_par_de_campos_arbitrario(self, analyzer):
+        """La herramienta ya no está cableada a notificación → resolución."""
+        r = analyzer.compute_between_fields(
+            [{"caseLink": "CNT-001-2020", "authority": "COFECE",
+              "notificationDate": "10-01-2020", "admissionDate": "20-01-2020"}],
+            campo_inicio="notificationDate", campo_fin="admissionDate",
+        )[0]
+        assert r["calculable"] and r["campo_fin"] == "admissionDate"
+
+    def test_falta_una_fecha_no_se_estima(self, analyzer):
+        r = analyzer.compute_between_fields([{
+            "caseLink": "VCN-002-2018", "authority": "COFECE",
+            "startAgreementDate": "05-04-2018", "resolutionDate": None,
+        }])[0]
+        assert r["calculable"] is False
+        assert "resolutionDate" in r["campos_faltantes"]
