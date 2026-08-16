@@ -808,23 +808,19 @@ class NormaPlusAgent:
         metrica = args.get("metrica", "multa")
         prefijo = args.get("prefijo_expediente")
 
-        # Universo
+        # Universo completo. Nunca una muestra: los primeros registros del
+        # acervo son casi todos de CFC, así que cortar por arriba sesga el
+        # resultado y lo vuelve falso, no solo incompleto.
+        crudos, total_en_base, completo = await self.estadistica.fetch_universe(
+            text_search=f"{prefijo}-" if prefijo else args.get("text_search"),
+            collector=collector,
+        )
+        registros = [r.model_dump() for r in crudos]
         if prefijo:
+            p = prefijo.upper().rstrip("-") + "-"
             registros = [
-                r.model_dump()
-                for r in await self.estadistica.fetch_by_prefix(
-                    prefijo, max_results=1000, collector=collector
-                )
-            ]
-        else:
-            registros = [
-                r.model_dump()
-                for r in await self.estadistica.search_all_pages(
-                    text_search=args.get("text_search"),
-                    filters=None,
-                    max_results=1000,
-                    collector=collector,
-                )
+                r for r in registros
+                if (r.get("caseLink") or "").upper().startswith(p)
             ]
         universo_total = len(registros)
         registros = self._filtrar_local(registros, args, state)
@@ -867,11 +863,27 @@ class NormaPlusAgent:
 
         resultado["universo_recuperado"] = universo_total
         resultado["universo_tras_filtros"] = len(registros)
+        resultado["total_en_la_base"] = total_en_base
+        resultado["cobertura_completa"] = completo
         resultado["metrica"] = metrica
-        resultado["nota_cobertura"] = (
-            f"Cálculo determinista sobre {len(registros)} expedientes, que son "
-            f"todos los que cumplen los filtros. Puedes afirmar el resultado."
-        )
+
+        # La afirmación de exhaustividad depende de que el universo se haya
+        # recorrido de verdad. Decir "puedes afirmarlo" cuando la paginación
+        # quedó corta sería fabricar certeza, que es justo lo que se corrige.
+        if completo:
+            resultado["nota_cobertura"] = (
+                f"Cálculo determinista sobre los {len(registros)} expedientes "
+                f"que cumplen los filtros, recorriendo el universo completo "
+                f"({total_en_base} en la base). Puedes afirmar el resultado."
+            )
+        else:
+            resultado["ADVERTENCIA_COBERTURA_PARCIAL"] = (
+                f"NO se recorrió el universo completo: se revisaron "
+                f"{universo_total} de {total_en_base} expedientes. Este "
+                f"{operacion} es el de la parte revisada, NO el global. "
+                f"Preséntalo así explícitamente y no afirmes 'el mayor' ni "
+                f"'el menor' sin más."
+            )
         if collector is not None:
             collector.record_computation({
                 "tool_called": True,

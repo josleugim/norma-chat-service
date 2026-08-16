@@ -187,6 +187,50 @@ class EstadisticaSearchClient:
         logger.debug(f"Expedientes parseados: {len(results)}")
         return results
 
+    async def fetch_universe(
+        self,
+        text_search: str | None = None,
+        max_results: int = 6000,
+        collector=None,
+    ) -> tuple[list[ExpedienteRecord], int, bool]:
+        """
+        Trae el universo COMPLETO, paginando en paralelo.
+
+        Existe porque una agregación sobre una muestra no es una agregación.
+        Y la muestra no es siquiera aleatoria: los primeros 1,000 registros del
+        acervo son 977 de CFC y 23 de COFECE, así que cortar por arriba sesga
+        el resultado de forma sistemática.
+
+        Como la API une sus filtros con OR, cualquier acotación tiene que
+        hacerse localmente sobre el universo completo.
+
+        Retorna (registros, total_en_la_base, universo_completo). El tercer
+        valor es el que decide si se puede afirmar un máximo o hay que avisar.
+        """
+        # La API acepta páginas grandes: `limit=5000` devuelve los 4,632
+        # expedientes en una sola petición y en menos de 3 segundos. Paginar
+        # de a 100 tardaba un minuto y provocaba 500 al pedir en paralelo.
+        registros = await self.search(
+            text_search=text_search, limit=max_results, page=1,
+            collector=collector,
+        )
+        total = self.last_total or len(registros)
+
+        # Si el tope pedido se quedó corto, se completa paginando en serie.
+        if len(registros) < min(total, max_results):
+            pagina = 2
+            while len(registros) < min(total, max_results):
+                lote = await self.search(
+                    text_search=text_search, limit=max_results, page=pagina
+                )
+                if not lote:
+                    break
+                registros.extend(lote)
+                pagina += 1
+            self.last_total = total
+
+        return registros, total, len(registros) >= total
+
     async def fetch_by_prefix(
         self,
         prefijo: str,
