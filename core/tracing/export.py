@@ -149,7 +149,10 @@ def main() -> None:
     parser.add_argument("--format", choices=["xlsx", "csv"], default="xlsx")
     parser.add_argument("--no-report", action="store_true")
     parser.add_argument("--zip", action="store_true",
-                        help="empaqueta la corrida completa en un ZIP")
+                        help="ZIP simple: resumen, trazas y tabla")
+    parser.add_argument("--artifacts", action="store_true",
+                        help="ZIP completo: además prompts, código y config")
+    parser.add_argument("--question-set", help="batería a incluir en el ZIP")
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir)
@@ -158,6 +161,10 @@ def main() -> None:
     print(f"Escrito: {out}")
     if args.zip:
         print(f"Escrito: {bundle_zip(run_dir)}")
+    if args.artifacts:
+        from core.tracing.artifacts import build_artifacts
+        qs = Path(args.question_set) if args.question_set else None
+        print(f"Escrito: {build_artifacts(run_dir, question_set=qs)}")
     if not args.no_report:
         print_report(rows)
 

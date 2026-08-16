@@ -37,24 +37,32 @@ async def take_census(estadistica_client, prefixes: tuple[str, ...] = PREFIXES) 
         "errors": [],
     }
 
-    # En paralelo: en serie son ~8s de arranque del servicio, que se pagan en
-    # cada despliegue sin ninguna razón.
+    # En serie y con reintento. La API devuelve 500 ante peticiones
+    # concurrentes: el censo en paralelo perdía VCN y CON, y un censo
+    # incompleto es peor que uno lento, porque se usa para decidir si dos
+    # corridas son comparables.
     import asyncio
 
-    etiquetas = ["total"] + list(prefixes)
-    consultas = [_count(estadistica_client, None)] + [
-        _count(estadistica_client, f"{p}-") for p in prefixes
-    ]
-    resultados = await asyncio.gather(*consultas, return_exceptions=True)
+    async def contar(etiqueta: str, search: str | None) -> None:
+        for intento in range(3):
+            try:
+                valor = await _count(estadistica_client, search)
+                if etiqueta == "total":
+                    census["total"] = valor
+                else:
+                    census["by_prefix"][etiqueta] = valor
+                return
+            except Exception as e:
+                if intento == 2:
+                    census["errors"].append(f"{etiqueta}: {e}")
+                else:
+                    await asyncio.sleep(0.5 * (intento + 1))
 
-    for etiqueta, resultado in zip(etiquetas, resultados):
-        if isinstance(resultado, Exception):
-            census["errors"].append(f"{etiqueta}: {resultado}")
-        elif etiqueta == "total":
-            census["total"] = resultado
-        else:
-            census["by_prefix"][etiqueta] = resultado
+    await contar("total", None)
+    for prefijo in prefixes:
+        await contar(prefijo, f"{prefijo}-")
 
+    census["completo"] = not census["errors"]
     return census
 
 

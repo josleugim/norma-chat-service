@@ -825,6 +825,9 @@ class NormaPlusAgent:
         universo_total = len(registros)
         registros = self._filtrar_local(registros, args, state)
 
+        # Casos con problemas de fecha; se llena solo en métricas temporales.
+        anomalias_calculo: list[dict] = []
+
         # Métrica
         if metrica == "multa":
             confidenciales = sum(
@@ -849,6 +852,7 @@ class NormaPlusAgent:
                 campo_inicio=args.get("campo_inicio"),
                 campo_fin=args.get("campo_fin", "resolutionDate"),
             )
+            anomalias_calculo = calculos
             campo = "dias_habiles" if metrica == "dias_habiles" else "dias_naturales"
             por_expediente = {c["case_link"]: c for c in calculos}
             for r in registros:
@@ -904,7 +908,25 @@ class NormaPlusAgent:
                     "excludes_start_day": True, "includes_end_day": True,
                     "calendar": "por institución del expediente",
                 },
-                "per_case": [],
+                # Los casos con fechas inconsistentes tienen que llegar a la
+                # traza: si no, el reporte de anomalías dice "ninguna" cuando
+                # hay 114 expedientes con la resolución antes de la
+                # notificación, y eso es falsa confianza en nuestra propia
+                # herramienta de diagnóstico.
+                "per_case": [
+                    {
+                        "case_link": c.get("case_link"),
+                        "authority": c.get("authority"),
+                        "date_start": c.get("fecha_inicio"),
+                        "date_end": c.get("fecha_fin"),
+                        "business_days": c.get("dias_habiles"),
+                        "anomalia": c.get("anomalia"),
+                        "out_of_coverage": c.get("fuera_de_cobertura", False),
+                        "coverage_note": c.get("nota"),
+                    }
+                    for c in anomalias_calculo
+                    if c.get("anomalia") or c.get("fuera_de_cobertura")
+                ][:200],
                 "stats": {k: v for k, v in resultado.items() if k != "ganadores"},
             })
         return resultado
