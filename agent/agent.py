@@ -198,11 +198,16 @@ class NormaPlusAgent:
                             collector.record_result(result)
                             collector.end_step("ok")
                     except Exception as e:
-                        logger.error(f"Error ejecutando {tc.name}: {e}")
-                        result = {"error": str(e)}
+                        # Algunas excepciones traen mensaje vacío (timeouts,
+                        # KeyError sin args) y un error sin descripción no
+                        # sirve para diagnosticar nada. Se registra siempre
+                        # el tipo.
+                        detalle = f"{type(e).__name__}: {e}".rstrip(": ")
+                        logger.error(f"Error ejecutando {tc.name}: {detalle}")
+                        result = {"error": detalle}
                         if collector is not None:
-                            collector.end_step("error", error=str(e))
-                            collector.add_error(f"tool:{tc.name}", str(e))
+                            collector.end_step("error", error=detalle)
+                            collector.add_error(f"tool:{tc.name}", detalle)
 
                     # Rastrear resultados para citation_builder
                     if tc.name == "buscar_criterios":
