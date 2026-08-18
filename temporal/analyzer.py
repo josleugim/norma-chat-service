@@ -86,6 +86,22 @@ class TemporalAnalyzer:
                     "dias_habiles": None,
                     "dias_naturales": None,
                 })
+            elif d_fin == d_ini:
+                # Mismo día de inicio y resolución. Matemáticamente da 0, pero
+                # no es creíble: un procedimiento exige admisión, análisis y
+                # sesión de Pleno. Son 52 CNT y, sin marcarlos, ganan cualquier
+                # consulta de plazo mínimo con una cifra sin sentido.
+                entrada.update({
+                    "calculable": False,
+                    "anomalia": "fecha_inicio_igual_a_fin",
+                    "dias_habiles": None,
+                    "dias_naturales": 0,
+                    "nota": (
+                        f"{inicio} y {campo_fin} son la misma fecha "
+                        f"({d_ini.isoformat()}). Implausible para un "
+                        f"procedimiento; se excluye del cálculo."
+                    ),
+                })
             elif d_fin < d_ini:
                 # Fecha final anterior a la inicial: el dato está mal en la
                 # base, no es un plazo de cero días. Sin esta distinción,

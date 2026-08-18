@@ -845,3 +845,19 @@ class TestFixesV17:
         c.record_coverage(total_available=2793, requested_limit=1, returned=1)
         c.end_step()
         assert c.finish().decisions.exhaustive_but_truncated is False
+
+    def test_mismo_dia_no_es_plazo_de_cero(self):
+        """
+        52 CNT tienen fecha de inicio y resolución idénticas. Matemáticamente
+        da 0, pero un procedimiento resuelto el mismo día que se notifica no
+        es creíble, y esos casos ganaban cualquier consulta de mínimo.
+        """
+        from temporal.analyzer import TemporalAnalyzer
+        ta = TemporalAnalyzer(HolidayCalendar("data/dias_inhabiles.xlsx"))
+        r = ta.compute_between_fields([{
+            "caseLink": "CNT-045-2024", "authority": "COFECE",
+            "notificationDate": "13-02-2025", "resolutionDate": "13-02-2025",
+        }])[0]
+        assert r["calculable"] is False
+        assert r["anomalia"] == "fecha_inicio_igual_a_fin"
+        assert r["dias_habiles"] is None

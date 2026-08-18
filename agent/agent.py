@@ -974,6 +974,24 @@ class NormaPlusAgent:
                     ),
                 }
 
+        # Los expedientes que ganan un máximo o mínimo necesitan marcador de
+        # cita: si no, el modelo los menciona e inventa [E1]-[E5], que quedan
+        # sin resolver. Pasó en q19.
+        if state is not None and resultado.get("ganadores"):
+            for ganador in resultado["ganadores"]:
+                link = ganador.get("case_link")
+                if not link:
+                    continue
+                original = next(
+                    (r for r in registros if r.get("caseLink") == link), {"caseLink": link}
+                )
+                ganador["ref"] = state.registry.assign(original, "E")
+            resultado["COMO_CITAR"] = (
+                "Los expedientes de 'ganadores' traen su campo `ref`. Cita "
+                "exactamente ese identificador. No inventes [E1], [E2]: si el "
+                "expediente no tiene `ref`, menciónalo sin cita."
+            )
+
         resultado["universo_recuperado"] = universo_total
         resultado["universo_tras_filtros"] = len(registros)
         resultado["total_en_la_base"] = total_en_base
