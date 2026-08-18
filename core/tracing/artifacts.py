@@ -91,6 +91,7 @@ def build_artifacts(
     _codigo(stage, repo_root)
     _retrieval_config(stage, repo_root, manifest)
     _errores(stage, run_dir, manifest, filas)
+    _audits(stage, run_dir)
     _readme(stage, manifest, filas)
 
     zip_path = run_dir / f"{run_dir.name}_artifacts.zip"
@@ -112,8 +113,11 @@ def _manifest(stage: Path, manifest: dict, repo: Path, filas: list[dict]) -> Non
     salida = dict(manifest)
     salida["generated_at"] = datetime.now(timezone.utc).isoformat()
     salida["git"] = _git_info(repo)
-    salida["question_count_ejecutadas"] = len(filas)
-    salida["schema_version"] = "1.0"
+    # COFECE pidió un solo campo con el número real de preguntas ejecutadas,
+    # y que la versión del manifest siga a la de la corrida.
+    salida["question_count"] = len(filas)
+    salida.pop("question_count_ejecutadas", None)
+    salida["manifest_version"] = salida.get("label") or salida.get("run_id")
     _escribir(stage / "manifest.json", json.dumps(salida, ensure_ascii=False, indent=2))
 
 
@@ -283,6 +287,69 @@ def _errores(stage: Path, run_dir: Path, manifest: dict, filas: list[dict]) -> N
     )
 
     _escribir(d / "resumen.md", "\n".join(lineas))
+
+
+def _audits(stage: Path, run_dir: Path) -> None:
+    """
+    Audit por registro de los cálculos, linaje de filtros y anomalías.
+
+    COFECE tuvo que leer el código del agente para descubrir la secuencia
+    `$1,400,000,00 → parser → 140000000 → máximo`. Con estos CSV, reconstruir
+    un promedio o un máximo se hace desde los artifacts.
+    """
+    import csv
+
+    audits = stage / "computation_audits"
+    lineage = stage / "filter_lineage"
+    anomalias_todas: list[dict] = []
+
+    for path in sorted((run_dir / "traces").glob("*.json")):
+        try:
+            traza = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        qid = (traza.get("request", {}).get("question_set_id")
+               or traza.get("trace_id", "?"))
+        dec = traza.get("decisions", {})
+
+        if dec.get("computation_audit"):
+            _csv(audits / f"{qid}.csv", dec["computation_audit"])
+        if dec.get("filter_lineage"):
+            _csv(lineage / f"{qid}.csv", dec["filter_lineage"])
+        for anomalia in dec.get("data_anomalies", []):
+            anomalias_todas.append({"question_id": qid, **anomalia})
+
+        # Anomalías de fecha, que viven en los cómputos
+        for paso in traza.get("steps", []):
+            for caso in (paso.get("computation") or {}).get("per_case", []):
+                if caso.get("anomalia"):
+                    anomalias_todas.append({
+                        "question_id": qid,
+                        "case_link": caso.get("case_link"),
+                        "field": f"{caso.get('campo_inicio')}→{caso.get('campo_fin')}",
+                        "raw_value": f"{caso.get('date_start')}→{caso.get('date_end')}",
+                        "anomaly_type": caso["anomalia"],
+                        "action_taken": "excluded",
+                    })
+
+    if anomalias_todas:
+        _csv(stage / "errors_warnings" / "anomalias.csv", anomalias_todas)
+
+
+def _csv(path: Path, filas: list[dict]) -> None:
+    import csv
+    if not filas:
+        return
+    campos: list[str] = []
+    for fila in filas:
+        for k in fila:
+            if k not in campos:
+                campos.append(k)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=campos, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(filas)
 
 
 def _readme(stage: Path, manifest: dict, filas: list[dict]) -> None:

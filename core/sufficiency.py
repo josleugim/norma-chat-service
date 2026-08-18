@@ -105,6 +105,113 @@ _VACIAS = {
 }
 
 
+SUFFICIENT = "SUFFICIENT"
+PARTIAL = "PARTIAL"
+INSUFFICIENT = "INSUFFICIENT"
+
+# Una pregunta jurídica suele tener dos componentes que se satisfacen con
+# evidencia distinta: el concepto en abstracto, y su atribución a la autoridad.
+# En q16 —"¿qué es el mercado relevante y cómo lo ha definido COFECE?"— el
+# control lexical dio cobertura 1.0 porque las palabras aparecían, pero ningún
+# criterio recuperado definía mercado relevante. Separar los componentes es lo
+# que permite decir "el concepto sí, la atribución no".
+_ATRIBUCION_RE = re.compile(
+    r"\b(c[óo]mo lo ha definido|ha definido|seg[úu]n (?:la )?cofece|de la cofece"
+    r"|ha considerado|ha resuelto|criterio de|ha establecido|ha aplicado"
+    r"|ha usado|utiliza|precedent\w*)\b",
+    re.I,
+)
+_CONCEPTO_PREGUNTA_RE = re.compile(
+    r"\b(qu[ée] es|definici[óo]n de|en qu[ée] consiste|c[óo]mo se define)\b", re.I
+)
+
+
+def analyze_components(query: str) -> list[dict]:
+    """
+    Descompone la pregunta en los componentes que la evidencia debe sostener.
+
+    COFECE pidió poder ver "qué parte sustantiva de la pregunta está
+    contestada". Sin esta separación, una respuesta que explica bien el
+    concepto general pero se lo atribuye a COFECE sin respaldo pasa como
+    suficiente.
+    """
+    q = query or ""
+    componentes = []
+    if _CONCEPTO_PREGUNTA_RE.search(q):
+        componentes.append({
+            "id": "concepto_general",
+            "descripcion": "definición o explicación conceptual",
+            "requiere_evidencia": False,   # el conocimiento general es válido aquí
+        })
+    if _ATRIBUCION_RE.search(q):
+        componentes.append({
+            "id": "atribucion_a_autoridad",
+            "descripcion": "qué ha sostenido concretamente la autoridad",
+            "requiere_evidencia": True,    # esto NO se puede llenar de memoria
+        })
+    if not componentes:
+        componentes.append({
+            "id": "respuesta_directa",
+            "descripcion": "lo que se pregunta",
+            "requiere_evidencia": True,
+        })
+    return componentes
+
+
+def check_evidence(query: str, docs: list[dict]) -> dict[str, Any]:
+    """
+    Evidence check por componente, con estado SUFFICIENT / PARTIAL /
+    INSUFFICIENT.
+
+    Sustituye al chequeo lexical plano, que declaraba suficiente cualquier
+    evidencia donde aparecieran las palabras de la pregunta.
+    """
+    componentes = analyze_components(query)
+    base = check_sufficiency(query, docs, "semantic_retrieval")
+    cobertura = base.get("coverage", 0.0)
+
+    # Para la atribución no basta que aparezcan las palabras: la evidencia
+    # tiene que contener afirmaciones sustantivas sobre el tema preguntado.
+    terminos = _terminos(query)
+    nucleo = {t for t in terminos if len(t) > 5}
+    texto = " ".join(_texto_de(d) for d in docs).lower()
+    nucleo_presente = {t for t in nucleo if t[:6] in texto}
+    densidad = len(nucleo_presente) / len(nucleo) if nucleo else 0.0
+
+    estados = []
+    for comp in componentes:
+        if not comp["requiere_evidencia"]:
+            estado = SUFFICIENT   # se puede responder con conocimiento general
+        elif densidad >= 0.6 and cobertura >= 0.5:
+            estado = SUFFICIENT
+        elif densidad >= 0.25:
+            estado = PARTIAL
+        else:
+            estado = INSUFFICIENT
+        estados.append({**comp, "estado": estado})
+
+    criticos = [e for e in estados if e["requiere_evidencia"]]
+    if not criticos:
+        overall = SUFFICIENT
+    elif all(e["estado"] == SUFFICIENT for e in criticos):
+        overall = SUFFICIENT
+    elif any(e["estado"] == INSUFFICIENT for e in criticos):
+        overall = INSUFFICIENT
+    else:
+        overall = PARTIAL
+
+    return {
+        "overall": overall,
+        "sufficient": overall == SUFFICIENT,
+        "components": estados,
+        "coverage_lexical": cobertura,
+        "densidad_nucleo": round(densidad, 2),
+        "missing_terms": base.get("missing_terms", []),
+        "docs_evaluated": len(docs),
+        "provenance": "heuristic",
+    }
+
+
 def check_sufficiency(
     query: str,
     docs: list[dict],

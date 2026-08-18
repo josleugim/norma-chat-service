@@ -58,18 +58,72 @@ def parse_multas(valor: Any) -> dict[str, float]:
     return salida
 
 
-def _a_numero(valor: Any) -> Optional[float]:
+def parse_monto(valor: Any) -> dict:
+    """
+    Convierte un monto legacy a número, o lo rechaza si es ambiguo.
+
+    Regla de COFECE, textual: *"si el dato puede convertirse de forma
+    determinista a un único valor, utilizarlo; si requiere adivinar qué quiso
+    decir el dato, no utilizarlo"*.
+
+    El caso que lo motivó: `$1,400,000,00`. El parser anterior eliminaba las
+    comas y devolvía **140,000,000** — unas cien veces el valor probable— y con
+    eso el agente reportó una multa máxima falsa. No se sabe si esa última coma
+    es decimal (1,400,000.00) o de millar (1,400,00,000 mal escrito), así que
+    la respuesta correcta es no usarlo, no adivinar.
+
+    Retorna {status, value, raw, reason} con status:
+      valid       → convertible sin ambigüedad
+      ambiguous   → formato dudoso; NO usar en cálculos
+      non_numeric → confidencial, N/D, vacío
+    """
+    crudo = valor
     if isinstance(valor, (int, float)):
-        return float(valor)
+        return {"status": "valid", "value": float(valor), "raw": crudo, "reason": None}
     if not isinstance(valor, str):
-        return None
-    match = _MONTO_RE.search(valor.replace(" ", ""))
+        return {"status": "non_numeric", "value": None, "raw": crudo,
+                "reason": "tipo no numérico"}
+
+    texto = valor.strip()
+    if not texto:
+        return {"status": "non_numeric", "value": None, "raw": crudo,
+                "reason": "vacío"}
+    if any(p in texto.upper() for p in ("CONFIDENCIAL", "RESERVAD", "N/A", "N.D.", "N/D")):
+        return {"status": "non_numeric", "value": None, "raw": crudo,
+                "reason": "valor reservado o no disponible"}
+
+    match = _MONTO_RE.search(texto.replace(" ", "").replace("$", ""))
     if not match:
-        return None
-    try:
-        return float(match.group(0).replace(",", ""))
-    except ValueError:
-        return None
+        return {"status": "non_numeric", "value": None, "raw": crudo,
+                "reason": "sin dígitos reconocibles"}
+
+    numero = match.group(0)
+
+    # Formato canónico: miles con coma y exactamente dos decimales con punto.
+    if re.fullmatch(r"\d{1,3}(,\d{3})*(\.\d{1,2})?", numero) or \
+            re.fullmatch(r"\d+(\.\d{1,2})?", numero):
+        try:
+            return {"status": "valid", "value": float(numero.replace(",", "")),
+                    "raw": crudo, "reason": None}
+        except ValueError:
+            pass
+
+    # Todo lo demás es ambiguo: grupos de coma irregulares (`1,400,000,00`),
+    # mezcla de separadores, o más de dos decimales.
+    return {
+        "status": "ambiguous",
+        "value": None,
+        "raw": crudo,
+        "reason": (
+            "formato ambiguo: no se puede determinar si los separadores son "
+            "de millar o decimales sin adivinar"
+        ),
+    }
+
+
+def _a_numero(valor: Any) -> Optional[float]:
+    """Compatibilidad: solo devuelve el valor cuando es inequívoco."""
+    return parse_monto(valor).get("value")
 
 
 def tiene_multa_no_numerica(valor: Any) -> bool:

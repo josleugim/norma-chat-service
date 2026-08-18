@@ -44,3 +44,16 @@ class TurnState:
     retrieval_retries: int = 0
     pending_retry_terms: list[str] = field(default_factory=list)
     abstention_reason: str | None = None
+
+    # ── Linaje de filtros ───────────────────────────────────
+    # Mientras la API una con OR en vez de intersectar, hay que poder ver
+    # filtros pedidos → resultados de la API → postfiltro local → universo
+    # final, con cuántos descartó cada condición.
+    filtros_aplicados: list[dict] = field(default_factory=list)
+
+    # ── Auditoría de cálculos deterministas ─────────────────
+    # Un registro por expediente y operación, para poder reconstruir un
+    # promedio o un máximo desde los artifacts sin releer el código.
+    computation_audit: list[dict] = field(default_factory=list)
+    # Anomalías de datos encontradas, en formato analizable.
+    anomalias: list[dict] = field(default_factory=list)

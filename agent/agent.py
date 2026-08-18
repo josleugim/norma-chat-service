@@ -360,6 +360,12 @@ class NormaPlusAgent:
             collector.set_decision(
                 "sufficiency_checks", state.sufficiency_checks, "heuristic")
             collector.set_decision(
+                "filter_lineage", state.filtros_aplicados, "derived")
+            collector.set_decision(
+                "computation_audit", state.computation_audit, "derived")
+            collector.set_decision(
+                "data_anomalies", state.anomalias, "derived")
+            collector.set_decision(
                 "retrieval_retries", state.retrieval_retries, "derived")
             collector.set_decision(
                 "abstained", bool(state.abstention_reason), "derived")
@@ -646,13 +652,12 @@ class NormaPlusAgent:
         # parece? Es el caso de q14 y q16: se recuperó algo temáticamente
         # cercano y el modelo llenó el hueco con conocimiento general.
         if state is not None:
-            from core.sufficiency import check_sufficiency
-            chequeo = check_sufficiency(
-                state.query, serialized, state.query_type
-            )
+            from core.sufficiency import INSUFFICIENT, check_evidence
+            chequeo = check_evidence(state.query, serialized)
             state.sufficiency_checks.append({
                 "tool": "buscar_criterios",
                 "query": args.get("query", ""),
+                "intento": state.retrieval_retries + 1,
                 "retry": state.retrieval_retries > 0,
                 **chequeo,
             })
@@ -661,7 +666,14 @@ class NormaPlusAgent:
                     state.retrieval_retries += 1
                     state.pending_retry_terms = chequeo.get("missing_terms", [])
                 else:
-                    state.abstention_reason = chequeo.get("reason")
+                    faltantes = [
+                        c["descripcion"] for c in chequeo["components"]
+                        if c["estado"] == INSUFFICIENT
+                    ]
+                    state.abstention_reason = (
+                        "Tras dos búsquedas la evidencia no sostiene: "
+                        + "; ".join(faltantes)
+                    )
 
         # Etapa 3 — lo que realmente entra al prompt. Es aquí donde se pierde
         # texto respecto de lo que devolvió el buscador.
@@ -759,10 +771,15 @@ class NormaPlusAgent:
         """
         filtro_vacio = None
         salida = registros
+        # Todas las condiciones se aplican localmente y de forma acumulativa:
+        # es la defensa contra el OR de la API, y tiene que ser transversal.
+        # En q09 una consulta restringida a COFECE devolvió casos de CFC
+        # porque esta ruta no pasaba por aquí.
         equivalencias = {
             "autoridad": "authority",
             "tipo_procedimiento": "typeOfProcedure",
             "sentido_resolucion": "senseOfResolution",
+            "id_expediente": "caseLink",
         }
         for arg_key, campo in equivalencias.items():
             valor = args.get(arg_key)
@@ -774,6 +791,19 @@ class NormaPlusAgent:
                 r for r in antes
                 if _coincide(_normalizar(r.get(campo)), objetivo)
             ]
+            if state is not None:
+                state.filtros_aplicados.append({
+                    "filtro": arg_key,
+                    "campo": campo,
+                    "valor_solicitado": valor,
+                    "universo_antes": len(antes),
+                    "universo_despues": len(salida),
+                    "descartados": len(antes) - len(salida),
+                    "ejemplos_descartados": [
+                        f"{r.get('caseLink')} → {campo}={r.get(campo)}"
+                        for r in antes if r not in salida
+                    ][:5],
+                })
             if antes and not salida:
                 disponibles = sorted({
                     str(r.get(campo)) for r in antes if r.get(campo)
@@ -830,15 +860,59 @@ class NormaPlusAgent:
 
         # Métrica
         if metrica == "multa":
+            from core.aggregation import parse_monto
             confidenciales = sum(
                 1 for r in registros if tiene_multa_no_numerica(r.get("agentFines"))
             )
+            ambiguos = 0
 
             def extraer(r):
-                montos = parse_multas(r.get("agentFines"))
-                return max(montos.values()) if montos else None
+                nonlocal ambiguos
+                crudo = r.get("agentFines")
+                montos = parse_multas(crudo)
+                valor = max(montos.values()) if montos else None
+
+                # Audit por registro: permite reconstruir el máximo desde los
+                # artifacts sin volver a leer el código, que es justo lo que
+                # COFECE tuvo que hacer para encontrar el bug del parser.
+                estado = "valid" if valor is not None else "excluded"
+                razon = None
+                if valor is None and crudo:
+                    import re as _re
+                    for token in _re.findall(r"[\d][\d,\.]{4,}", str(crudo)):
+                        p = parse_monto(token)
+                        if p["status"] == "ambiguous":
+                            estado, razon = "ambiguous", p["reason"]
+                            ambiguos += 1
+                            if state is not None:
+                                state.anomalias.append({
+                                    "case_link": r.get("caseLink"),
+                                    "field": "agentFines",
+                                    "raw_value": str(crudo)[:120],
+                                    "anomaly_type": "ambiguous_numeric_format",
+                                    "action_taken": "excluded",
+                                })
+                            break
+                if state is not None:
+                    state.computation_audit.append({
+                        "case_link": r.get("caseLink"),
+                        "raw_value": str(crudo)[:120] if crudo else None,
+                        "normalized_value": valor,
+                        "status": estado,
+                        "exclusion_reason": razon,
+                        "value_used": valor is not None,
+                    })
+                return valor
 
             resultado = agregar(registros, operacion, extraer)
+            if ambiguos:
+                resultado["ADVERTENCIA_VALORES_AMBIGUOS"] = (
+                    f"{ambiguos} expedientes tienen montos con formato ambiguo "
+                    f"(p.ej. '$1,400,000,00', donde no se puede saber si la "
+                    f"última coma es decimal o de millar). Se EXCLUYERON del "
+                    f"cálculo en vez de adivinar. Si el usuario pregunta por un "
+                    f"máximo o mínimo, advierte que esos casos quedaron fuera."
+                )
             if confidenciales:
                 resultado["ADVERTENCIA_CONFIDENCIALES"] = (
                     f"{confidenciales} expedientes tienen montos no numéricos "
@@ -887,11 +961,24 @@ class NormaPlusAgent:
         # recorrido de verdad. Decir "puedes afirmarlo" cuando la paginación
         # quedó corta sería fabricar certeza, que es justo lo que se corrige.
         if completo:
-            resultado["nota_cobertura"] = (
-                f"Cálculo determinista sobre los {len(registros)} expedientes "
-                f"que cumplen los filtros, recorriendo el universo completo "
-                f"({total_en_base} en la base). Puedes afirmar el resultado."
+            # El denominador que se describe en la respuesta tiene que ser el
+            # que usó la herramienta. En v1.7 el promedio se calculó sobre 31
+            # expedientes y la respuesta dijo "35 con ambas fechas": la
+            # matemática estaba bien y el texto la describía mal.
+            procesados = resultado.get("procesados", len(registros))
+            con_valor = resultado.get("con_valor", procesados)
+            sin_valor = resultado.get("sin_valor", 0)
+            resultado["COMO_DEBES_DESCRIBIR_LA_COBERTURA"] = (
+                f"Se analizaron {procesados} expedientes; {con_valor} tenían la "
+                f"información necesaria y el {operacion} se obtuvo sobre esos "
+                f"{con_valor}"
+                + (f" ({sin_valor} quedaron fuera por falta de datos)." if sin_valor
+                   else ".")
+                + " USA EXACTAMENTE ESTAS CIFRAS: no digas que el cálculo se "
+                  "hizo sobre los expedientes procesados si el denominador real "
+                  "es menor."
             )
+            resultado["denominador_real"] = con_valor
         else:
             resultado["ADVERTENCIA_COBERTURA_PARCIAL"] = (
                 f"NO se recorrió el universo completo: se revisaron "
@@ -949,14 +1036,14 @@ class NormaPlusAgent:
     async def _exec_buscar_expedientes(self, args: dict, collector=None, state=None) -> list:
         text_search = args.get("text_search")
         limit = args.get("limit", 50)
-        has_multas = args.get("has_multas", False)
+        has_multas = args.get("has_multas")  # triestado: True/False/None
 
         filters = self._build_expediente_filters(args)
         prefijo = args.get("prefijo_expediente")
         exhaustivo = args.get("exhaustivo", False)
 
         # Si piden multas, traer más resultados para filtrar después
-        fetch_limit = limit * 3 if has_multas else limit
+        fetch_limit = limit * 3 if has_multas is not None else limit
 
         if prefijo:
             # La API une filtros con OR, así que combinar prefijo con autoridad
@@ -997,18 +1084,31 @@ class NormaPlusAgent:
             serialized = [r.model_dump() for r in results]
             state.universo_completo = False
 
-        # Post-filtro: has_multas (la API no tiene este filtro nativo,
-        # se filtra localmente por agentFines no vacío)
-        if has_multas:
-            def _has_fines(r: dict) -> bool:
-                fines = r.get("agentFines")
-                if fines is None:
-                    return False
-                if isinstance(fines, dict):
-                    return bool(fines)  # {} = False
-                return str(fines).strip() not in ("", "{}", "None", "null")
+        # La API une filtros con OR, así que TODA ruta tiene que intersectar
+        # localmente, no solo la del prefijo. En q09 "fideicomiso + COFECE"
+        # devolvió expedientes de CFC presentados como si fueran de COFECE.
+        if not prefijo and filters:
+            serialized = self._filtrar_local(serialized, args, state)
 
-            serialized = [r for r in serialized if _has_fines(r)]
+        # Post-filtro de multas. Es triestado y hay que respetarlo:
+        #   True  → solo expedientes CON multa
+        #   False → solo expedientes SIN multa
+        #   None  → no filtrar
+        # Antes `if has_multas:` trataba False igual que ausencia, así que al
+        # pedir "VCN sin multa" llegaban los 35 al modelo para que dedujera
+        # cuáles no tenían — y se inventó uno que no estaba en la evidencia.
+        if has_multas is not None:
+            antes = len(serialized)
+            serialized = [
+                r for r in serialized if _tiene_multa(r) is bool(has_multas)
+            ]
+            state.filtros_aplicados.append({
+                "filtro": "has_multas",
+                "valor_recibido": has_multas,
+                "universo_antes": antes,
+                "universo_despues": len(serialized),
+                "descartados": antes - len(serialized),
+            })
             serialized = serialized[:limit]
 
         # Guardado para usar_ultima_busqueda, que evita que el modelo tenga
@@ -1018,11 +1118,12 @@ class NormaPlusAgent:
         if collector is not None:
             collector.record_stage(
                 stage="in_context",
-                method="post_filter(has_multas)" if has_multas else "serialize_full",
+                method=(f"post_filter(has_multas={has_multas})"
+                        if has_multas is not None else "serialize_full"),
                 docs=serialized,
                 notes=(
                     "has_multas se filtra localmente: la API no tiene ese filtro."
-                    if has_multas else None
+                    if has_multas is not None else None
                 ),
             )
             collector.add_docs_in_context([
@@ -1303,21 +1404,33 @@ class NormaPlusAgent:
                 )
                 if ultimo and not ultimo.get("sufficient"):
                     faltan = ", ".join(ultimo.get("missing_terms", [])[:6])
+                    sin_respaldo = [
+                        c["descripcion"] for c in ultimo.get("components", [])
+                        if c["estado"] != "SUFFICIENT" and c["requiere_evidencia"]
+                    ]
+                    payload["EVIDENCE_CHECK"] = {
+                        "overall": ultimo.get("overall"),
+                        "componentes": ultimo.get("components"),
+                        "intento": ultimo.get("intento"),
+                    }
                     if state.abstention_reason:
-                        payload["EVIDENCIA_INSUFICIENTE_ABSTENERSE"] = (
-                            f"Ya reformulaste la búsqueda y la evidencia sigue "
-                            f"sin cubrir: {faltan}. NO completes el hueco con "
-                            f"conocimiento general ni presentes lo recuperado "
-                            f"como si respondiera. Dile al usuario qué "
-                            f"encontraste, qué no, y por qué no puedes afirmar "
-                            f"lo que preguntó."
+                        payload["EVIDENCIA_INSUFICIENTE_SEPARA_PROCEDENCIA"] = (
+                            f"Después de dos búsquedas, la evidencia recuperada "
+                            f"NO sostiene: {'; '.join(sin_respaldo)}. "
+                            f"Puedes explicar el concepto con tu conocimiento "
+                            f"general —es útil y está permitido— pero márcalo "
+                            f"como [CONOCIMIENTO GENERAL] y di aparte qué "
+                            f"encontraste en los precedentes. NO escribas "
+                            f"'COFECE ha definido que...' si lo recuperado no "
+                            f"lo demuestra."
                         )
                     else:
                         payload["EVIDENCIA_INSUFICIENTE_REINTENTA"] = (
-                            f"Lo recuperado no cubre: {faltan}. Haz UNA segunda "
-                            f"búsqueda focalizada con otros términos —sinónimos, "
-                            f"formulación jurídica— antes de responder. Si la "
-                            f"segunda tampoco alcanza, abstente."
+                            f"Lo recuperado no sostiene: "
+                            f"{'; '.join(sin_respaldo) or faltan}. Haz UNA "
+                            f"segunda búsqueda focalizada con otros términos "
+                            f"—sinónimos, formulación jurídica— antes de "
+                            f"responder."
                         )
 
             # El modelo no tenía forma de saber que su búsqueda estaba
@@ -1578,3 +1691,19 @@ def _coincide(valor: str, objetivo: str) -> bool:
     if not pv or not po:
         return False
     return len(pv & po) / len(po) >= 0.6
+
+
+def _tiene_multa(registro: dict) -> bool:
+    """
+    ¿Este expediente tiene multa registrada?
+
+    Con datos legacy, un campo vacío puede significar "sin multa" o "no
+    extraído todavía". Aquí se interpreta como "sin multa", que es lo que
+    permite responder la pregunta; la ambigüedad se advierte en la respuesta.
+    """
+    fines = registro.get("agentFines")
+    if fines is None:
+        return False
+    if isinstance(fines, dict):
+        return bool(fines)
+    return str(fines).strip() not in ("", "{}", "None", "null")

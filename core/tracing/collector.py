@@ -330,7 +330,15 @@ class TraceCollector:
         )
 
         # Estrategia de cobertura del universo.
-        coberturas = [s.coverage for s in self.steps if s.coverage]
+        # Una operación determinista (contar_expedientes) obtiene el dato con
+        # meta.total sin materializar el corpus: marcarla como truncada es un
+        # falso positivo. Solo cuenta el truncamiento de rutas que SÍ debían
+        # recorrer el universo.
+        deterministas = {"contar_expedientes", "agregar_expedientes"}
+        coberturas = [
+            s.coverage for s in self.steps
+            if s.coverage and s.tool not in deterministas
+        ]
         truncada = any(c.truncated for c in coberturas)
         if not coberturas:
             estrategia = "sin_busqueda"

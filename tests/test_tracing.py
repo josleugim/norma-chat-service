@@ -764,3 +764,84 @@ class TestFechasInconsistentes:
         }])[0]
         assert r["calculable"] is False
         assert "resolutionDate" in r["campos_faltantes"]
+
+
+# ── Fixes de la adjudicación de v1.7 ────────────────────────
+
+class TestFixesV17:
+    """Los seis puntos que COFECE pidió corregir sobre v1.7."""
+
+    def test_has_multas_es_triestado(self):
+        """
+        FIX 1 (q18): `false` se trataba como ausencia de filtro, así que al
+        pedir "VCN sin multa" llegaban todos al modelo para que dedujera.
+        """
+        from agent.agent import _tiene_multa
+        con = {"caseLink": "VCN-001-2022", "agentFines": "{'X': '$1,000.00'}"}
+        sin = {"caseLink": "VCN-002-2022", "agentFines": None}
+        assert _tiene_multa(con) is True
+        assert _tiene_multa(sin) is False
+        # El filtro compara identidad booleana, no truthiness
+        for pedido, esperado in ((True, [con]), (False, [sin])):
+            assert [r for r in (con, sin)
+                    if _tiene_multa(r) is bool(pedido)] == esperado
+
+    @pytest.mark.parametrize("valor,estado", [
+        ("$1,400,000,00", "ambiguous"),    # el que produjo el dato falso
+        ("1.400.000,00", "ambiguous"),
+        ("$1,324,195.20", "valid"),
+        ("$40,838,762.32", "valid"),
+        ("Confidencial", "non_numeric"),
+        ("N/D", "non_numeric"),
+    ])
+    def test_parser_conservador_de_montos(self, valor, estado):
+        """
+        FIX 4 (q05, q11): el parser eliminaba comas y convertía
+        `$1,400,000,00` en 140,000,000 — cien veces el valor probable.
+        Regla de COFECE: si hay que adivinar, no se usa.
+        """
+        from core.aggregation import parse_monto
+        assert parse_monto(valor)["status"] == estado
+
+    def test_monto_ambiguo_no_entra_al_calculo(self):
+        from core.aggregation import parse_multas
+        assert parse_multas("{'Agente': '$1,400,000,00'}") == {}
+
+    def test_evidence_check_separa_concepto_de_atribucion(self):
+        """
+        FIX 2 (q16): la evidencia hablaba de otra cosa y el control lexical
+        la declaraba suficiente porque las palabras aparecían.
+        """
+        from core.sufficiency import check_evidence
+        docs = [{"text": "la omisión de notificar genera una afectación a las "
+                         "atribuciones de la Comisión"}]
+        r = check_evidence(
+            "¿qué es el mercado relevante y cómo lo ha definido la COFECE?", docs
+        )
+        assert r["overall"] == "INSUFFICIENT"
+        por_id = {c["id"]: c["estado"] for c in r["components"]}
+        # El concepto se puede explicar de conocimiento general; la
+        # atribución a COFECE no está respaldada.
+        assert por_id["concepto_general"] == "SUFFICIENT"
+        assert por_id["atribucion_a_autoridad"] == "INSUFFICIENT"
+
+    def test_evidence_check_acepta_evidencia_pertinente(self):
+        from core.sufficiency import check_evidence
+        docs = [{"text": "el mercado relevante se define por sustituibilidad "
+                         "de los productos y su dimensión geográfica"}]
+        r = check_evidence("¿cómo ha definido la COFECE el mercado relevante?", docs)
+        assert r["overall"] == "SUFFICIENT"
+
+    def test_conteo_determinista_no_cuenta_como_truncado(self):
+        """
+        FIX 5 (q20): contar con meta.total no requiere traer 2,793
+        expedientes; marcarlo truncado era un falso positivo.
+        """
+        from core.tracing import Request as TR, TraceCollector, Versions
+        c = TraceCollector(conversation_id="s", versions=Versions(),
+                           request=TR(query="¿cuántas resoluciones emitió la CFC?"))
+        c.set_interpretation(interpret("¿cuántas resoluciones emitió la CFC?"))
+        c.begin_step("tool_call", tool="contar_expedientes", arguments={})
+        c.record_coverage(total_available=2793, requested_limit=1, returned=1)
+        c.end_step()
+        assert c.finish().decisions.exhaustive_but_truncated is False
