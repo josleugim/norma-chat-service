@@ -861,3 +861,18 @@ class TestFixesV17:
         assert r["calculable"] is False
         assert r["anomalia"] == "fecha_inicio_igual_a_fin"
         assert r["dias_habiles"] is None
+
+    def test_una_tool_puede_satisfacer_la_expectativa_de_otra(self):
+        """
+        FIX 5, segunda parte: agregar_expedientes recorre expedientes y
+        calcula plazos. Exigir además buscar_expedientes o calcular_plazos
+        marcaba cuatro FAIL falsos en v1.10.
+        """
+        from core.tracing import Request as TR, TraceCollector, Versions
+        q = "¿cuál es la multa máxima impuesta en expedientes VCN?"
+        c = TraceCollector(conversation_id="s", versions=Versions(),
+                           request=TR(query=q))
+        c.set_interpretation(interpret(q))
+        c.begin_step("tool_call", tool="agregar_expedientes", arguments={})
+        c.end_step()
+        assert c.finish().decisions.tools_expected_not_called == []

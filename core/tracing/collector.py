@@ -321,11 +321,24 @@ class TraceCollector:
         self.set_decision("max_tool_calls_reached", exhausted_tools, "derived")
 
         # Herramientas que la consulta pedía y no se llamaron.
+        #
+        # Una herramienta puede satisfacer la expectativa de otra:
+        # agregar_expedientes recorre expedientes Y calcula plazos, así que
+        # exigir además buscar_expedientes o calcular_plazos genera un FAIL
+        # falso. COFECE pidió expresamente no producir esos falsos positivos.
+        equivalentes = {
+            "agregar_expedientes": {"buscar_expedientes", "calcular_plazos"},
+            "contar_expedientes": {"buscar_expedientes"},
+        }
+        cubiertas = set(tools_used)
+        for usada in tools_used:
+            cubiertas |= equivalentes.get(usada, set())
+
         esperadas = expected_tools(self.request.query)
         self.set_decision("tools_expected", esperadas, "heuristic")
         self.set_decision(
             "tools_expected_not_called",
-            [t for t in esperadas if t not in tools_used],
+            [t for t in esperadas if t not in cubiertas],
             "heuristic",
         )
 
