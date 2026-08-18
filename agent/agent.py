@@ -928,6 +928,29 @@ class NormaPlusAgent:
             )
             anomalias_calculo = calculos
             campo = "dias_habiles" if metrica == "dias_habiles" else "dias_naturales"
+
+            # Audit por registro también para plazos, no solo para montos:
+            # COFECE lo pidió con el formato caseLink | start | end |
+            # business_days | status | exclusion_reason.
+            if state is not None:
+                state.computation_audit.extend([
+                    {
+                        "case_link": c.get("case_link"),
+                        "start_date": c.get("fecha_inicio"),
+                        "end_date": c.get("fecha_fin"),
+                        "campo_inicio": c.get("campo_inicio"),
+                        "campo_fin": c.get("campo_fin"),
+                        "business_days": c.get("dias_habiles"),
+                        "status": "valid" if c.get("calculable") else "excluded",
+                        "exclusion_reason": (
+                            c.get("anomalia")
+                            or (", ".join(c.get("campos_faltantes", []))
+                                if not c.get("calculable") else None)
+                        ),
+                        "value_used": bool(c.get("calculable")),
+                    }
+                    for c in calculos
+                ])
             por_expediente = {c["case_link"]: c for c in calculos}
             for r in registros:
                 link = r.get("caseLink", "")
