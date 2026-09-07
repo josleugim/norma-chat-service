@@ -113,12 +113,27 @@ class HolidayCalendar:
             institucion: "COFECE" o "CNA" para calendario específico.
                          None usa el calendario combinado (ambas).
         """
+        # Calendario de la institución, PERO solo dentro de su rango.
+        #
+        # Antes esta rama hacía `d not in self.cofece_holidays` sin más, y
+        # fuera del rango eso devuelve True para todos los días —sábados y
+        # domingos incluidos—, porque el archivo simplemente no los tiene.
+        # El plazo degradaba a contar días naturales: un periodo de 4 semanas
+        # en feb-2026 daba 28 días hábiles en vez de 20.
+        #
+        # No es hipotético a plazo largo: el catálogo de COFECE termina el
+        # 17-nov-2025 y el acervo se sigue cargando. En cuanto entren
+        # resoluciones posteriores, todos sus plazos salen inflados ~40%.
+        #
+        # Fuera del rango de su institución se cae al calendario combinado,
+        # que sí tiene fallback de fin de semana y que además cubre el hueco
+        # con los registros de la otra institución: CNA cubre
+        # 2025-10-18 → 2026-12-27, justo lo que a COFECE le falta, y los días
+        # festivos nacionales son los mismos.
         if institucion:
-            inst = institucion.strip().upper()
-            if inst == "COFECE":
-                return d not in self.cofece_holidays
-            elif inst == "CNA":
-                return d not in self.cna_holidays
+            dates = self._holidays_for(institucion)
+            if dates and min(dates) <= d <= max(dates):
+                return d not in dates
 
         # Calendario combinado: si está en el set de CUALQUIER
         # institución, es inhábil. Para fechas fuera del rango del

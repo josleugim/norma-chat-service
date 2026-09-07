@@ -23,7 +23,7 @@ no está levantado.
     python -m pytest tests/test_tracing.py -v
 """
 import json
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import httpx
@@ -923,3 +923,45 @@ class TestFixesV17:
         c.begin_step("tool_call", tool="agregar_expedientes", arguments={})
         c.end_step()
         assert c.finish().decisions.tools_expected_not_called == []
+
+
+class TestBordeDelCalendario:
+    """
+    Qué pasa cuando una fecha rebasa el rango del archivo de días inhábiles.
+
+    El catálogo no cubre lo mismo para las dos instituciones: COFECE llega
+    hasta el 17-nov-2025 y CNA arranca el 18-oct-2025. Fuera de su rango, el
+    archivo simplemente no tiene los días —tampoco los fines de semana, que
+    están cargados como registros— así que preguntar `d not in cofece_holidays`
+    devolvía True para todo y el plazo degradaba a contar días naturales.
+    """
+
+    def test_fin_de_semana_fuera_de_rango_sigue_siendo_inhabil(self):
+        cal = HolidayCalendar("data/dias_inhabiles.xlsx")
+        tope = date.fromisoformat(cal.coverage_ranges()["COFECE"][1])
+        sabado = tope + timedelta(days=(5 - tope.weekday()) % 7 + 7)
+        assert sabado.weekday() == 5
+        assert not cal.is_covered(sabado, "COFECE"), "el test necesita una fecha fuera de rango"
+        assert cal.is_business_day(sabado, "COFECE") is False
+
+    def test_plazo_fuera_de_rango_no_degrada_a_dias_naturales(self):
+        """
+        Cuatro semanas completas fuera del rango de COFECE son 20 días
+        hábiles, no 28. Antes devolvía 28 —los 28 naturales— porque contaba
+        los ocho días de fin de semana como hábiles.
+        """
+        cal = HolidayCalendar("data/dias_inhabiles.xlsx")
+        ini, fin = date(2026, 2, 2), date(2026, 3, 2)
+        assert not cal.is_covered(fin, "COFECE")
+        habiles = cal.business_days_between(ini, fin, "COFECE")
+        assert habiles == cal.business_days_between(ini, fin), (
+            "fuera de su rango, la institución debe caer al calendario combinado"
+        )
+        assert habiles < (fin - ini).days
+
+    def test_dentro_de_rango_manda_el_calendario_de_la_institucion(self):
+        """El contrapeso: dentro de su rango no se toca nada."""
+        cal = HolidayCalendar("data/dias_inhabiles.xlsx")
+        d = date.fromisoformat(cal.coverage_ranges()["COFECE"][1])
+        assert cal.is_covered(d, "COFECE")
+        assert cal.is_business_day(d, "COFECE") == (d not in cal.cofece_holidays)
