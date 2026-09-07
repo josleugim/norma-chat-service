@@ -869,6 +869,46 @@ class TestFixesV17:
         assert r["anomalia"] == "fecha_inicio_igual_a_fin"
         assert r["dias_habiles"] is None
 
+    def test_no_se_exige_calcular_plazos_sin_fecha_de_inicio(self):
+        """
+        q03 (v1.13): "cuántos días inhábiles tardó COFECE en resolver el
+        VCN-002-2020". El expediente no tiene startAgreementDate ni
+        notificationDate —solo fecha de resolución— así que el plazo no es
+        calculable. El agente lo dijo y no llamó la herramienta, que es lo
+        correcto; el evaluador lo marcaba como "tool esperada no llamada".
+        """
+        from core.tracing import Request as TR, TraceCollector, Versions
+        q = "cuántos días inhábiles tardó cofece en resolver el VCN-002-2020"
+        c = TraceCollector(conversation_id="s", versions=Versions(),
+                           request=TR(query=q))
+        c.set_interpretation(interpret(q))
+        c.begin_step("tool_call", tool="buscar_expedientes", arguments={})
+        c.record_stage(stage="in_context", method="serialize_full", docs=[{
+            "id": 1, "caseLink": "VCN-002-2020", "authority": "COFECE",
+            "startAgreementDate": None, "notificationDate": None,
+            "resolutionDate": "16-04-2020", "senseOfResolution": "Sanciona",
+        }])
+        c.end_step()
+        d = c.finish().decisions
+        assert "calcular_plazos" not in (d.tools_expected_not_called or [])
+
+    def test_si_hay_fecha_de_inicio_si_se_exige_calcular_plazos(self):
+        """El contrapeso: con fecha de inicio, saltarse la herramienta sí es
+        una falla y tiene que seguir marcándose."""
+        from core.tracing import Request as TR, TraceCollector, Versions
+        q = "cuántos días inhábiles tardó cofece en resolver el CNT-095-2013"
+        c = TraceCollector(conversation_id="s", versions=Versions(),
+                           request=TR(query=q))
+        c.set_interpretation(interpret(q))
+        c.begin_step("tool_call", tool="buscar_expedientes", arguments={})
+        c.record_stage(stage="in_context", method="serialize_full", docs=[{
+            "id": 2, "caseLink": "CNT-095-2013", "authority": "COFECE",
+            "notificationDate": "10-05-2013", "resolutionDate": "20-06-2013",
+        }])
+        c.end_step()
+        d = c.finish().decisions
+        assert "calcular_plazos" in (d.tools_expected_not_called or [])
+
     def test_una_tool_puede_satisfacer_la_expectativa_de_otra(self):
         """
         FIX 5, segunda parte: agregar_expedientes recorre expedientes y

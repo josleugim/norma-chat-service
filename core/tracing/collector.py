@@ -148,6 +148,28 @@ class TraceCollector:
         except Exception as e:
             logger.warning(f"No se pudo registrar la etapa {stage}: {e}")
 
+    def _sin_fecha_de_inicio(self) -> bool:
+        """
+        True cuando ningún expediente que llegó al contexto trae una fecha que
+        pueda abrir un plazo. Devuelve False si no hubo expedientes: ahí el
+        problema es otro y no hay que taparlo.
+        """
+        try:
+            vistos = 0
+            for step in self.steps:
+                for stage in getattr(step, "stages", []) or []:
+                    for doc in stage.docs or []:
+                        meta = doc.metadata or {}
+                        if not any(k in meta for k in EXPEDIENTE_KEYS):
+                            continue  # es un criterio, no un expediente
+                        vistos += 1
+                        if any(meta.get(k) for k in CAMPOS_INICIO_PLAZO):
+                            return False
+            return vistos > 0
+        except Exception as e:
+            logger.warning(f"No se pudo evaluar la fecha de inicio: {e}")
+            return False
+
     def record_coverage(
         self,
         total_available: Optional[int],
@@ -335,6 +357,20 @@ class TraceCollector:
             cubiertas |= equivalentes.get(usada, set())
 
         esperadas = expected_tools(self.request.query)
+
+        # No se puede calcular un plazo sin fecha de inicio. Si la evidencia
+        # que llegó al contexto no trae ninguna, la expectativa de
+        # `calcular_plazos` no es exigible: el agente hizo lo correcto al
+        # decir que no era determinable. Marcar eso como "tool no llamada" es
+        # el mismo falso positivo que COFECE pidió expresamente no producir.
+        # En q03 (VCN-002-2020) el expediente no tiene startAgreementDate ni
+        # notificationDate: solo fecha de resolución.
+        sin_fecha_inicio = self._sin_fecha_de_inicio()
+        if sin_fecha_inicio and "calcular_plazos" in esperadas:
+            esperadas = [t for t in esperadas if t != "calcular_plazos"]
+            self.set_decision(
+                "plazo_no_exigible_sin_fecha_inicio", True, "derived")
+
         self.set_decision("tools_expected", esperadas, "heuristic")
         self.set_decision(
             "tools_expected_not_called",
@@ -454,10 +490,24 @@ CRITERIO_KEYS = (
     "title", "article", "nombre_expediente", "caseName", "paginas_parrafos",
     "grounding",
 )
+# Todos los campos de fecha que alimentan el cómputo de plazos —los de
+# `temporal.analyzer.CAMPOS_FECHA`—, no solo tres. Faltaba
+# `startAgreementDate`, que es justo el inicio de los VCN: sin él, la traza
+# no permitía saber si un plazo era incalculable por falta de dato o porque
+# el agente se saltó la herramienta.
 EXPEDIENTE_KEYS = (
     "name", "authority", "typeOfProcedure", "senseOfResolution",
-    "notificationDate", "admissionDate", "resolutionDate",
+    "startAgreementDate", "notificationDate", "basicInfoRequestDate",
+    "admissionDate", "additionalInfoRequestDate", "resolutionDate",
+    "ResolutionIssueDate",
     "economicAgents", "relevantMarkets", "agentFines", "resolutionFileUrl",
+)
+
+# Campos que pueden abrir un plazo. Si ninguno viene con valor, el plazo no
+# es calculable y exigir `calcular_plazos` sería un falso positivo.
+CAMPOS_INICIO_PLAZO = (
+    "startAgreementDate", "notificationDate", "admissionDate",
+    "basicInfoRequestDate", "additionalInfoRequestDate",
 )
 
 

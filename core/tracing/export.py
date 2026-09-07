@@ -22,6 +22,7 @@ COLUMNS = [
     "retrieval_retries", "abstained", "coverage_strategy", "docs_retrieved",
     "coverage_truncated", "exhaustive_but_truncated", "deadline_tool_called",
     "plazo_cases", "plazo_inputs_missing", "plazo_out_of_coverage",
+    "coverage_truncation_reasons",
     "second_retrieval", "exhausted_tools", "context_condensed",
     "final_answer_path", "scope_expected", "scope_observed", "scope_mismatch",
     "citations_emitted", "citations_unresolved", "answer_chars",
@@ -117,7 +118,16 @@ def print_report(rows: list[dict]) -> None:
         return f"{k}/{n} ({100 * k // n if n else 0}%)"
 
     print(f"\nTrazas: {n}")
+    def truncada_por(motivo) -> str:
+        k = sum(1 for r in rows
+                if motivo in (r.get("coverage_truncation_reasons") or []))
+        return f"{k}/{n} ({100 * k // n if n else 0}%)"
+
     print(f"  Cobertura truncada        : {pct(lambda r: r.get('coverage_truncated'))}")
+    # Desglosado, porque las dos mitades significan cosas distintas: el top_k
+    # de una búsqueda semántica es el diseño funcionando, no una falla.
+    print(f"    · top-k semántico       : {truncada_por('top_k')}")
+    print(f"    · universo cortado      : {truncada_por('returned==limit')}")
     print(f"  Contexto condensado       : {pct(lambda r: r.get('context_condensed'))}")
     print(f"  Agotó tool calls          : {pct(lambda r: r.get('exhausted_tools'))}")
     print(f"  Desajuste de scope        : {pct(lambda r: r.get('scope_mismatch'))}")

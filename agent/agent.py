@@ -1028,17 +1028,37 @@ class NormaPlusAgent:
             procesados = resultado.get("procesados", len(registros))
             con_valor = resultado.get("con_valor", procesados)
             sin_valor = resultado.get("sin_valor", 0)
+            # Los expedientes fuera del rango del calendario de días inhábiles
+            # SÍ entran al cálculo, pero con un calendario incompleto: los
+            # días inhábiles anteriores a su cobertura no se conocen, así que
+            # el conteo de días hábiles queda inflado. Callarlo repetiría el
+            # error del fix 3 —la respuesta describiendo mal su propio
+            # cálculo—, esta vez sobre la calidad del insumo y no sobre el
+            # denominador.
+            fuera_cobertura = sum(
+                1 for c in anomalias_calculo if c.get("fuera_de_cobertura")
+            )
+            aviso_cobertura = ""
+            if fuera_cobertura:
+                aviso_cobertura = (
+                    f" Advierte además que {fuera_cobertura} de esos "
+                    f"expedientes caen fuera del rango del calendario de días "
+                    f"inhábiles, así que su plazo en días hábiles es "
+                    f"aproximado y puede estar sobreestimado."
+                )
             resultado["COMO_DEBES_DESCRIBIR_LA_COBERTURA"] = (
                 f"Se analizaron {procesados} expedientes; {con_valor} tenían la "
                 f"información necesaria y el {operacion} se obtuvo sobre esos "
                 f"{con_valor}"
                 + (f" ({sin_valor} quedaron fuera por falta de datos)." if sin_valor
                    else ".")
+                + aviso_cobertura
                 + " USA EXACTAMENTE ESTAS CIFRAS: no digas que el cálculo se "
                   "hizo sobre los expedientes procesados si el denominador real "
                   "es menor."
             )
             resultado["denominador_real"] = con_valor
+            resultado["fuera_de_cobertura_del_calendario"] = fuera_cobertura
         else:
             resultado["ADVERTENCIA_COBERTURA_PARCIAL"] = (
                 f"NO se recorrió el universo completo: se revisaron "

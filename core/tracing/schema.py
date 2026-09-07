@@ -268,6 +268,18 @@ class Trace(BaseModel):
         truncated = any(
             s.coverage.truncated for s in self.steps if s.coverage is not None
         )
+        # Por qué se truncó, que no es lo mismo en los dos casos. `top_k` es
+        # el comportamiento normal de una búsqueda semántica: se pidió el
+        # top-15 de una lista ordenada y eso es lo que llegó. `returned==limit`
+        # sí es una señal de que el universo de una consulta determinista pudo
+        # quedar cortado. Contarlos juntos hace que el reporte a COFECE
+        # muestre como defecto algo que funciona por diseño.
+        motivos = sorted({
+            s.coverage.truncation_reason
+            for s in self.steps
+            if s.coverage is not None and s.coverage.truncated
+            and s.coverage.truncation_reason
+        })
         plazo_cases = [
             case
             for s in self.steps
@@ -306,6 +318,7 @@ class Trace(BaseModel):
             "exhaustive_but_truncated": self.decisions.exhaustive_but_truncated,
             "docs_retrieved": retrieval_docs,
             "coverage_truncated": truncated,
+            "coverage_truncation_reasons": motivos,
             "deadline_tool_called": self.decisions.tool_deadline_calculator,
             "plazo_out_of_coverage": out_of_coverage,
             "plazo_cases": len(plazo_cases),
