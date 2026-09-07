@@ -156,14 +156,26 @@ class TestEstadisticaClientIntegration:
             assert r.authority == "CFC"
 
     @pytest.mark.asyncio
-    async def test_filter_sense_of_resolution(self, client):
-        """Filtro por sentido de resolución."""
+    async def test_sense_of_resolution_no_viaja_a_la_api(self, client):
+        """
+        `senseOfResolution` se filtra localmente, no en la API.
+
+        Su alias está roto: pedir SANCION expande a tres valores que casi no
+        existen en los datos, mientras el sentido dominante es `Sanciona`, con
+        35 de los 37 sancionados. La consulta devolvía 2 de 37 con 200 OK, que
+        es indistinguible de un universo vacío. Mandar el filtro sería peor
+        que no mandarlo, así que el cliente lo omite y el agente lo resuelve
+        con match tolerante.
+        """
         results = await client.search(
             filters={"senseOfResolution": "CONDICIONADA"}
         )
+        # No se filtró en el servidor: llegan también otros sentidos.
+        sentidos = {(r.senseOfResolution or "").upper() for r in results}
         assert len(results) > 0
-        for r in results:
-            assert "CONDICIONADA" in (r.senseOfResolution or "").upper()
+        assert sentidos - {"CONDICIONADA"}, (
+            "si el filtro hubiera viajado, solo habría CONDICIONADA"
+        )
 
     @pytest.mark.asyncio
     async def test_agentfines_types(self, client):
@@ -229,11 +241,11 @@ class TestMockServerFormat:
         # grounding puede ser None
 
     @pytest.mark.asyncio
-    async def test_cases_search_searchdata_param(self):
-        """GET /cases/search acepta searchData."""
+    async def test_agent_search_acepta_searchdata(self):
+        """GET /cases/agent-search acepta searchData."""
         import httpx
         async with httpx.AsyncClient() as c:
-            r = await c.get(f"{MOCK_BASE}/cases/search",
+            r = await c.get(f"{MOCK_BASE}/cases/agent-search",
                           params={"searchData": "Scotiabank"})
             data = r.json()
 
@@ -242,17 +254,32 @@ class TestMockServerFormat:
         assert len(data["data"]) > 0
 
     @pytest.mark.asyncio
-    async def test_cases_search_paginated_structure(self):
-        """La respuesta tiene estructura {data, meta}."""
+    async def test_endpoint_viejo_esta_retirado(self):
+        """
+        `/cases/search` responde 401 desde el 7-sep-2026. Si algún camino
+        volviera a apuntar ahí, tiene que fallar de inmediato y no degradarse
+        en silencio a cero resultados.
+        """
         import httpx
         async with httpx.AsyncClient() as c:
-            r = await c.get(f"{MOCK_BASE}/cases/search",
-                          params={"page": 1, "limit": 2})
+            r = await c.get(f"{MOCK_BASE}/cases/search", params={"limit": 3})
+        assert r.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_meta_no_trae_total_ni_paginacion(self):
+        """
+        `meta` trae solo `returned` y `limit`. No hay `total`, `page` ni
+        `totalPages`: la paginación desapareció y el truncamiento hay que
+        inferirlo de `returned == limit`.
+        """
+        import httpx
+        async with httpx.AsyncClient() as c:
+            r = await c.get(f"{MOCK_BASE}/cases/agent-search",
+                          params={"limit": 2})
             data = r.json()
 
         assert "data" in data
-        assert "meta" in data
         meta = data["meta"]
-        assert "total" in meta
-        assert "page" in meta
-        assert "totalPages" in meta
+        assert set(meta) == {"returned", "limit"}
+        assert meta["limit"] == 2
+        assert meta["returned"] == len(data["data"])

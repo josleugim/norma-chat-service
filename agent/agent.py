@@ -718,45 +718,54 @@ class NormaPlusAgent:
         prefijo = args.get("prefijo_expediente")
         filters = self._build_expediente_filters(args)
 
-        # La API une sus filtros con OR (verificado): pedir VCN + COFECE
-        # devuelve 1,839 en vez de 36. Por eso, con prefijo se manda un solo
-        # filtro y el resto se cuenta localmente sobre el universo real.
+        # `agent-search` intersecta con AND y no expone `meta.total`, así que
+        # contar es traer el universo que cumple los filtros y medirlo. Cabe
+        # en una petición: 4,662 registros en ~3 s. La ruta con prefijo dejó
+        # de ser especial —existía solo para esquivar el OR de la API vieja—.
         if prefijo:
             registros = await self.estadistica.fetch_by_prefix(
-                prefijo, collector=collector
+                prefijo, filters=filters, collector=collector
             )
-            locales = self._filtrar_local(
-                [r.model_dump() for r in registros], args, state
+        else:
+            registros, _, _ = await self.estadistica.fetch_universe(
+                text_search=args.get("text_search"),
+                filters=filters if filters else None,
+                collector=collector,
             )
-            return {
-                "total": len(locales),
-                "total_del_prefijo_sin_otros_filtros": len(registros),
-                "exacto": True,
-                "filtros_aplicados": {**filters, "prefijo_expediente": prefijo},
-                "metodo": (
-                    "Universo completo del prefijo traído por paginación y "
-                    "filtrado localmente."
-                ),
-            }
 
-        # Sin prefijo, meta.total solo es confiable con un filtro o ninguno.
-        await self.estadistica.search(
-            text_search=args.get("text_search"),
-            filters=filters if filters else None,
-            limit=1,
-            collector=collector,
+        # El sentido de resolución no lo filtra el servidor (alias roto), así
+        # que el conteo se cierra localmente. El resto de condiciones ya
+        # vinieron aplicadas y este paso es idempotente.
+        locales = self._filtrar_local(
+            [r.model_dump() for r in registros], args, state
         )
-        confiable = len(filters) + (1 if args.get("text_search") else 0) <= 1
+
+        # Sin `meta.total`, "exacto" solo se puede afirmar cuando la API
+        # devolvió menos filas que el tope pedido. Si topó, el universo pudo
+        # quedar cortado y el conteo es un piso, no un total.
+        exacto = not self.estadistica.last_truncado
         salida = {
-            "total": self.estadistica.last_total,
-            "exacto": confiable,
-            "filtros_aplicados": filters,
+            "total": len(locales),
+            "exacto": exacto,
+            "filtros_aplicados": (
+                {**filters, "prefijo_expediente": prefijo} if prefijo else filters
+            ),
+            "metodo": (
+                "Universo completo traído con AND del servidor y cerrado con "
+                "el filtro local de sentido de resolución."
+            ),
         }
-        if not confiable:
+        # Antes se reportaba `total_del_prefijo_sin_otros_filtros`, que tenía
+        # sentido cuando el prefijo se traía solo y todo lo demás se acotaba
+        # aquí. Ahora los filtros viajan con él, así que ese número sería el
+        # del universo YA filtrado bajo una etiqueta que dice lo contrario.
+        if not exacto:
             salida["ADVERTENCIA"] = (
-                "Este total NO es confiable: la API combina varios filtros con "
-                "OR en vez de AND, así que el número está inflado. Vuelve a "
-                "contar con un solo filtro, o usa prefijo_expediente."
+                f"La API devolvió exactamente el tope pedido "
+                f"({self.estadistica.last_limit}), así que pudo haber cortado "
+                f"resultados. Este número es un mínimo, no un total. La API no "
+                f"expone meta.total; para afirmar un conteo hay que repetir "
+                f"con un tope mayor."
             )
         return salida
 
@@ -846,8 +855,13 @@ class NormaPlusAgent:
         # Universo completo. Nunca una muestra: los primeros registros del
         # acervo son casi todos de CFC, así que cortar por arriba sesga el
         # resultado y lo vuelve falso, no solo incompleto.
+        # Con AND del servidor, el prefijo viaja como filtro de `caseLink`
+        # (match parcial) en vez de como texto libre: `searchData` es
+        # cross-field y podía colar un expediente que solo *mencionaba* el
+        # prefijo en su mercado relevante.
         crudos, total_en_base, completo = await self.estadistica.fetch_universe(
-            text_search=f"{prefijo}-" if prefijo else args.get("text_search"),
+            text_search=None if prefijo else args.get("text_search"),
+            filters={"caseLink": f"{prefijo}-"} if prefijo else None,
             collector=collector,
         )
         registros = [r.model_dump() for r in crudos]
@@ -1065,6 +1079,14 @@ class NormaPlusAgent:
         return resultado
 
     def _build_expediente_filters(self, args: dict) -> dict:
+        """
+        Filtros con nombres de la API.
+
+        `sentido_resolucion` se incluye pero el cliente NO lo manda al
+        servidor: el match es de valor completo y el alias de SANCION está
+        roto (devuelve 2 de 37). Se resuelve localmente con el matcher
+        tolerante. `has_multas` sí viaja, porque `agentFines` sí funciona.
+        """
         filter_keys = {
             "autoridad": "authority",
             "tipo_procedimiento": "typeOfProcedure",
@@ -1072,6 +1094,7 @@ class NormaPlusAgent:
             "id_expediente": "caseLink",
             "fecha_resolucion_desde": "senseOfResolutionFrom",
             "fecha_resolucion_hasta": "senseOfResolutionTo",
+            "has_multas": "agentFines",
         }
         return {
             api_key: args[agent_key]
@@ -1088,15 +1111,16 @@ class NormaPlusAgent:
         prefijo = args.get("prefijo_expediente")
         exhaustivo = args.get("exhaustivo", False)
 
-        # Si piden multas, traer más resultados para filtrar después
-        fetch_limit = limit * 3 if has_multas is not None else limit
+        # El sentido de resolución se filtra localmente (alias roto en la API),
+        # así que ahí sí hay que traer de más para no quedarse corto. Las
+        # multas ya las intersecta el servidor con `agentFines`.
+        fetch_limit = limit * 3 if args.get("sentido_resolucion") else limit
 
         if prefijo:
-            # La API une filtros con OR, así que combinar prefijo con autoridad
-            # o tipo devolvería MÁS resultados, no menos. Se trae el universo
-            # completo del prefijo con un solo filtro y se acota localmente.
+            # Con AND del servidor, el prefijo viaja junto con los demás
+            # filtros en vez de traerse el universo entero y acotar aquí.
             registros = await self.estadistica.fetch_by_prefix(
-                prefijo, max_results=500, collector=collector
+                prefijo, filters=filters, collector=collector
             )
             serialized = self._filtrar_local(
                 [r.model_dump() for r in registros], args, state
@@ -1104,20 +1128,26 @@ class NormaPlusAgent:
             # Se recorrió el universo completo del prefijo: no hay que
             # advertir de cobertura parcial aunque los filtros locales
             # hayan reducido el conjunto.
-            state.universo_completo = True
+            state.universo_completo = not self.estadistica.last_truncado
             state.universo_tamano = len(registros)
             if not exhaustivo:
                 serialized = serialized[:fetch_limit]
-                state.universo_completo = len(serialized) == len(registros)
+                state.universo_completo = (
+                    state.universo_completo
+                    and len(serialized) == len(registros)
+                )
         elif exhaustivo:
             results = await self.estadistica.search_all_pages(
                 text_search=text_search,
                 filters=filters if filters else None,
-                max_results=500,
                 collector=collector,
             )
             serialized = [r.model_dump() for r in results]
-            state.universo_completo = False
+            # Ya no es una página de 500 sobre un universo mayor: el tope es
+            # el universo completo, así que la exhaustividad se sostiene
+            # salvo que la API haya topado con el límite.
+            state.universo_completo = not self.estadistica.last_truncado
+            state.universo_tamano = len(serialized)
         else:
             # text_search se envía como searchData (búsqueda libre cross-field
             # en caseLink, nombre, agentes económicos y mercados relevantes)
@@ -1130,13 +1160,21 @@ class NormaPlusAgent:
             serialized = [r.model_dump() for r in results]
             state.universo_completo = False
 
-        # La API une filtros con OR, así que TODA ruta tiene que intersectar
-        # localmente, no solo la del prefijo. En q09 "fideicomiso + COFECE"
-        # devolvió expedientes de CFC presentados como si fueran de COFECE.
+        # El servidor ya intersecta, pero esta pasada sigue haciendo falta: es
+        # la única que aplica `sentido_resolucion`, que no se manda a la API
+        # porque su alias está roto. Sobre lo demás es idempotente, y deja el
+        # linaje de filtros que pidió COFECE. En q09 "fideicomiso + COFECE"
+        # devolvió expedientes de CFC presentados como si fueran de COFECE
+        # porque esta ruta no pasaba por aquí.
         if not prefijo and filters:
             serialized = self._filtrar_local(serialized, args, state)
 
-        # Post-filtro de multas. Es triestado y hay que respetarlo:
+        # Verificación de multas. Desde sep-2026 el servidor ya intersecta con
+        # `agentFines` (true → 191, false → 4,471, suman el universo exacto),
+        # así que esta pasada es idempotente; se conserva porque es la que
+        # deja el linaje del filtro en la traza y porque comprueba que la
+        # noción de "tiene multa" del servidor coincide con la nuestra.
+        # Sigue siendo triestado y hay que respetarlo:
         #   True  → solo expedientes CON multa
         #   False → solo expedientes SIN multa
         #   None  → no filtrar
@@ -1168,7 +1206,8 @@ class NormaPlusAgent:
                         if has_multas is not None else "serialize_full"),
                 docs=serialized,
                 notes=(
-                    "has_multas se filtra localmente: la API no tiene ese filtro."
+                    "has_multas lo intersecta la API con agentFines; esta "
+                    "pasada local lo verifica y deja el linaje."
                     if has_multas is not None else None
                 ),
             )

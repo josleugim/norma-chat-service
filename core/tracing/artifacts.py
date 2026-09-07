@@ -208,9 +208,18 @@ def _retrieval_config(stage: Path, repo: Path, manifest: dict) -> None:
             "realmente entró al prompt, ya truncado)."
         ),
         "nota_filtros_api": (
-            "La API de casos une sus filtros con OR, no los intersecta "
-            "(verificado: CFC=2793, VCN=36, ambos=2829). Por eso el agente "
-            "manda un solo filtro y acota localmente."
+            "Desde sep-2026 el agente usa GET /cases/agent-search, que sí "
+            "intersecta con AND (verificado: COFECE=1842, VCN=46, ambos=39). "
+            "Tres salvedades que afectan cómo leer las trazas: (1) la API no "
+            "expone meta.total, así que el truncamiento se infiere de "
+            "returned==limit y es una estimación, no un dato; (2) los nombres "
+            "de parámetro desconocidos se ignoran en silencio con 200 OK, por "
+            "lo que el cliente los valida y falla antes de llamar; (3) el "
+            "filtro senseOfResolution NO se manda: su alias de SANCION "
+            "devuelve 2 de 37 casos sancionados porque el valor dominante en "
+            "los datos es 'Sanciona', que el alias no cubre. El sentido de "
+            "resolución se resuelve localmente con match tolerante a "
+            "negaciones."
         ),
     }
     _escribir(d / "parametros.json", json.dumps(config, ensure_ascii=False, indent=2))

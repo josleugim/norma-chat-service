@@ -4,16 +4,22 @@ Censo del acervo al inicio de cada corrida.
 Por qué existe: el acervo se está cargando mientras probamos, así que el
 universo es un blanco móvil. Si el corpus crece entre dos corridas, las
 preguntas de exhaustividad dejan de ser comparables y no hay forma de saber si
-una mejora vino de un fix nuestro o de documentos nuevos.
+una mejora vino de un fix nuestro o de documentos nuevos. No es hipotético:
+entre el 18-ago y el 7-sep-2026 el acervo pasó de 4,632 a 4,662 expedientes,
+los VCN de 36 a 46, y aparecieron 18 documentos judiciales que antes no
+existían.
 
 Eso lo resolvería `index_version` del lado de la API, que hoy no se expone
 (ver docs/solicitud-jose-miguel.md). Mientras tanto, cada corrida se toma su
-propia foto del universo con `meta.total` de /cases/search y la guarda en el
-manifiesto. Con eso, comparar dos corridas es comparar también sus censos: si
-difieren, lo sabemos antes de sacar conclusiones.
+propia foto del universo y la guarda en el manifiesto. Con eso, comparar dos
+corridas es comparar también sus censos: si difieren, lo sabemos antes de
+sacar conclusiones.
 
-Es barato —una consulta por prefijo, `limit=1`— y se hace una sola vez por
-corrida.
+Cómo se toma. Antes era una consulta por prefijo leyendo `meta.total`.
+`agent-search` no expone `meta.total`, así que ahora se trae el universo
+completo en una sola petición —4,662 registros, 2.1 MB, ~3 s— y se cuenta
+localmente. Sale más barato que las siete consultas anteriores y el conteo es
+exacto en vez de depender de un campo que ya no existe.
 """
 import logging
 from datetime import datetime, timezone
@@ -24,70 +30,68 @@ logger = logging.getLogger(__name__)
 PREFIXES = ("VCN", "IO", "CNT", "DE", "RA", "CON")
 
 
+def _prefijo_de(case_link: str) -> str:
+    """
+    Prefijo de un expediente. Los documentos judiciales que aparecieron en
+    sep-2026 no lo usan (`1244_2017_2JD`, `480_2018_2SCJN`), así que se
+    agrupan aparte en vez de inventarles uno.
+    """
+    link = (case_link or "").strip().upper()
+    if "-" not in link:
+        return "JUDICIAL/OTRO"
+    prefijo = link.split("-", 1)[0]
+    return prefijo if prefijo.isalpha() else "JUDICIAL/OTRO"
+
+
 async def take_census(estadistica_client, prefixes: tuple[str, ...] = PREFIXES) -> dict:
     """
-    Cuenta expedientes por prefijo vía meta.total. Nunca lanza: si algo falla,
-    devuelve lo que alcanzó a medir y lo deja anotado.
+    Cuenta expedientes por prefijo sobre el universo completo. Nunca lanza: si
+    algo falla, devuelve lo que alcanzó a medir y lo deja anotado.
     """
     census: dict = {
         "taken_at": datetime.now(timezone.utc).isoformat(),
-        "source": "meta.total de /cases/search",
+        "source": "conteo local sobre el universo de /cases/agent-search",
         "by_prefix": {},
         "total": None,
         "errors": [],
     }
 
-    # En serie y con reintento. La API devuelve 500 ante peticiones
-    # concurrentes: el censo en paralelo perdía VCN y CON, y un censo
-    # incompleto es peor que uno lento, porque se usa para decidir si dos
-    # corridas son comparables.
-    import asyncio
+    try:
+        registros, total, completo = await estadistica_client.fetch_universe()
+    except Exception as e:
+        census["errors"].append(f"universo: {type(e).__name__}: {e}")
+        census["completo"] = False
+        return census
 
-    async def contar(etiqueta: str, search: str | None) -> None:
-        for intento in range(3):
-            try:
-                valor = await _count(estadistica_client, search)
-                if etiqueta == "total":
-                    census["total"] = valor
-                else:
-                    census["by_prefix"][etiqueta] = valor
-                return
-            except Exception as e:
-                if intento == 2:
-                    census["errors"].append(f"{etiqueta}: {e}")
-                else:
-                    await asyncio.sleep(0.5 * (intento + 1))
+    if not registros:
+        census["errors"].append("universo: la API no devolvió registros")
+        census["completo"] = False
+        return census
 
-    await contar("total", None)
+    conteos: dict[str, int] = {}
+    for r in registros:
+        link = getattr(r, "caseLink", None) or ""
+        conteos[_prefijo_de(link)] = conteos.get(_prefijo_de(link), 0) + 1
+
+    census["total"] = len(registros)
+    # Los prefijos esperados se reportan siempre, aunque den cero: que un
+    # prefijo desaparezca del acervo es justo el cambio que hay que ver.
     for prefijo in prefixes:
-        await contar(prefijo, f"{prefijo}-")
+        census["by_prefix"][prefijo] = conteos.get(prefijo, 0)
+    # Y lo que no esperábamos también, para que un tipo documental nuevo no
+    # entre en silencio.
+    for prefijo, n in sorted(conteos.items()):
+        if prefijo not in census["by_prefix"]:
+            census["by_prefix"][prefijo] = n
+
+    if not completo:
+        census["errors"].append(
+            "la API devolvió exactamente el tope pedido: el censo pudo "
+            "quedar cortado"
+        )
 
     census["completo"] = not census["errors"]
     return census
-
-
-async def _count(client, search: str | None) -> int | None:
-    """
-    Pide una sola fila y lee meta.total. El cliente no expone `meta`, así que
-    se replica la llamada mínima con su misma configuración.
-    """
-    import httpx
-
-    params = {"page": 1, "limit": 1}
-    if search:
-        params["searchData"] = search
-
-    headers = {"x-api-key": client.api_key} if client.api_key else {}
-    async with httpx.AsyncClient(timeout=client.timeout) as http:
-        resp = await http.get(
-            f"{client.base_url}/cases/search", params=params, headers=headers
-        )
-        resp.raise_for_status()
-        data = resp.json()
-
-    if isinstance(data, dict):
-        return (data.get("meta") or {}).get("total")
-    return None
 
 
 def diff_census(before: dict, after: dict) -> list[dict]:

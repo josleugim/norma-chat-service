@@ -4,13 +4,14 @@ Actualizado mayo 2026: refleja el formato real confirmado.
 
 - /paragraphs/vector-search: caseName, caseLink, articleNames, titleNames 
   como campos de PRIMER NIVEL (fuera de metadata)
-- /cases/search: soporta searchData (ILIKE + unaccent)
+- /cases/agent-search: filtros con AND, sin paginación, meta{returned,limit}
+- /cases/search: retirado (401), como en staging desde el 7-sep-2026
 
 Ejecutar: uvicorn mock_search_server:app --port 3000
 """
 import random
 import unicodedata
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 
 app = FastAPI(title="Mock Search API — Norma+")
 
@@ -265,10 +266,9 @@ async def search_criterios(payload: dict):
     return results[:top_k]
 
 
-@app.get("/cases/search")
-async def search_cases(
-    page: int = 1,
-    limit: int = 50,
+@app.get("/cases/agent-search")
+async def agent_search_cases(
+    limit: int = 10,
     searchData: str | None = None,
     name: str | None = None,
     authority: str | None = None,
@@ -277,46 +277,86 @@ async def search_cases(
     caseLink: str | None = None,
     economicAgents: str | None = None,
     relevantMarkets: str | None = None,
+    applicableLaw: str | None = None,
     agentFines: str | None = None,
     senseOfResolutionFrom: int | None = None,
     senseOfResolutionTo: int | None = None,
 ):
     """
-    Formato real confirmado. searchData usa ILIKE + unaccent
-    sobre caseLink, name, economicAgents, relevantMarkets.
+    Endpoint de sep-2026. Reproduce el comportamiento verificado contra
+    staging, incluidas las asperezas, porque son justo lo que el cliente
+    tiene que sortear:
+
+    - Los filtros se combinan con AND.
+    - `caseLink` es match PARCIAL, no igualdad.
+    - No hay `page`; `limit` no tiene tope y su default es 10.
+    - `meta` trae solo `returned` y `limit`: no hay `total`.
+    - Un parámetro con nombre desconocido se ignora en silencio (FastAPI ya
+      lo hace por su cuenta) y devuelve el universo sin filtrar.
+    - El alias de SANCION expande a tres valores que casi no existen en los
+      datos: el sentido dominante es `Sanciona`, y no lo cubre.
     """
+    if (senseOfResolutionFrom is None) != (senseOfResolutionTo is None):
+        raise HTTPException(
+            status_code=400,
+            detail="Sense of resolution is missing a date",
+        )
+    if limit <= 0:
+        raise HTTPException(status_code=400, detail="limit must be positive")
+    if agentFines is not None and agentFines.strip().lower() not in ("true", "false"):
+        raise HTTPException(status_code=400, detail="agentFines must be true or false")
+
     results = list(ESTADISTICA_DB)
 
-    # searchData: ILIKE + unaccent cross-field
     if searchData:
-        filtered = []
-        for r in results:
-            fields = [
+        results = [
+            r for r in results
+            if any(ilike_match(f, searchData) for f in (
                 r.get("caseLink") or "",
                 r.get("name") or "",
                 " ".join(r.get("economicAgents") or []),
-                r.get("relevantMarkets") or "" if isinstance(r.get("relevantMarkets"), str) else "",
-            ]
-            if any(ilike_match(f, searchData) for f in fields):
-                filtered.append(r)
-        results = filtered
-
+                r.get("relevantMarkets") if isinstance(r.get("relevantMarkets"), str) else "",
+            ))
+        ]
     if name:
         results = [r for r in results if ilike_match(r.get("name") or "", name)]
     if authority:
-        results = [r for r in results if (r.get("authority") or "").upper() == authority.upper()]
+        results = [r for r in results
+                   if unaccent((r.get("authority") or "").upper()) == unaccent(authority.upper())]
     if typeOfProcedure:
-        results = [r for r in results if r.get("typeOfProcedure") == typeOfProcedure]
+        results = [r for r in results
+                   if unaccent((r.get("typeOfProcedure") or "").upper()) == unaccent(typeOfProcedure.upper())]
     if senseOfResolution:
-        results = [r for r in results if senseOfResolution.upper() in (r.get("senseOfResolution") or "").upper()]
+        objetivo = unaccent(senseOfResolution.upper())
+        if objetivo == "SANCION":
+            aceptados = {
+                "SANCION",
+                "SANCION/ACREDITACION DEL INCUMPLIMIENTO",
+                "ACREDITACION DEL INCUMPLIMIENTO",
+            }
+        else:
+            aceptados = {objetivo}
+        results = [r for r in results
+                   if unaccent((r.get("senseOfResolution") or "").upper()) in aceptados]
     if caseLink:
-        results = [r for r in results if r["caseLink"] == caseLink]
+        # Parcial, no igualdad: es lo que permite pedir un prefijo entero.
+        results = [r for r in results if ilike_match(r.get("caseLink") or "", caseLink)]
     if economicAgents:
         results = [r for r in results
                    if any(ilike_match(a, economicAgents) for a in (r.get("economicAgents") or []))]
     if relevantMarkets:
-        rm = r.get("relevantMarkets") or ""
-        results = [r for r in results if ilike_match(rm if isinstance(rm, str) else "", relevantMarkets)]
+        results = [
+            r for r in results
+            if ilike_match(
+                r.get("relevantMarkets") if isinstance(r.get("relevantMarkets"), str) else "",
+                relevantMarkets,
+            )
+        ]
+    if applicableLaw:
+        results = [r for r in results if ilike_match(r.get("applicableLaw") or "", applicableLaw)]
+    if agentFines is not None:
+        quiere = agentFines.strip().lower() == "true"
+        results = [r for r in results if bool(r.get("agentFines")) is quiere]
     if senseOfResolutionFrom:
         results = [r for r in results if r.get("resolutionDate") and
                    int(r["resolutionDate"].split("-")[-1]) >= senseOfResolutionFrom]
@@ -324,19 +364,30 @@ async def search_cases(
         results = [r for r in results if r.get("resolutionDate") and
                    int(r["resolutionDate"].split("-")[-1]) <= senseOfResolutionTo]
 
-    total = len(results)
-    start = (page - 1) * limit
-    page_results = results[start:start + limit]
+    # Resolución más reciente primero; sin fecha al final; desempate por
+    # caseLink para que dos peticiones idénticas den lo mismo.
+    def orden(r):
+        fecha = r.get("resolutionDate") or ""
+        partes = fecha.split("-")
+        clave = (partes[2], partes[1], partes[0]) if len(partes) == 3 else ("",)
+        return (fecha == "", tuple(-ord(c) for c in "".join(clave)), r.get("caseLink") or "")
 
-    return {
-        "data": page_results,
-        "meta": {
-            "total": total,
-            "page": page,
-            "limit": limit,
-            "totalPages": max(1, (total + limit - 1) // limit),
-        },
-    }
+    results.sort(key=orden)
+    recortado = results[:limit]
+    return {"data": recortado, "meta": {"returned": len(recortado), "limit": limit}}
+
+
+@app.get("/cases/search")
+async def search_cases_retirado():
+    """
+    Retirado. Staging responde 401 a este endpoint desde el 7-sep-2026; el
+    mock lo reproduce para que ningún camino se quede colgado del contrato
+    viejo sin que se note.
+    """
+    raise HTTPException(
+        status_code=401,
+        detail="Endpoint retirado: usa GET /cases/agent-search",
+    )
 
 
 @app.get("/health")

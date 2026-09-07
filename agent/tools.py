@@ -60,17 +60,18 @@ TOOLS = [
                     "enum": [
                         "Concentración",
                         "Concentración no notificada",
-                        "Concentración ilícita",
+                        "Amparo en revisión",
+                        "Amparo indirecto",
                     ],
-                    "description": "Filtrar por tipo de procedimiento",
+                    "description": "Filtrar por tipo de procedimiento. La API compara el valor COMPLETO, así que solo sirven estos valores exactos (verificados en el acervo el 7-sep-2026).",
                 },
                 "sentido_resolucion": {
                     "type": "string",
-                    "description": "Filtrar por sentido de resolución: AUTORIZADA, CONDICIONADA, NO AUTORIZADA, OBJETADA, SANCIÓN/ACREDITACIÓN DEL INCUMPLIMIENTO, etc.",
+                    "description": "Filtrar por sentido de resolución. Valores reales en el acervo: AUTORIZADA, CONDICIONADA, NO AUTORIZADA, Sanciona, No sanciona, CIERRE POR DESISTIMIENTO, SIN OBLIGACIÓN DE NOTIFICAR. Ojo: los casos sancionados están mayormente como 'Sanciona', no como 'SANCIÓN'. El filtro se aplica localmente con match tolerante, así que una variante cercana funciona.",
                 },
                 "has_multas": {
                     "type": "boolean",
-                    "description": "true para filtrar solo expedientes que tienen multas. Se aplica después de la búsqueda, filtrando los que tienen agentFines no vacío.",
+                    "description": "true → solo expedientes con multas; false → solo los que no tienen. Lo resuelve la API con agentFines (true=191, false=4471). Omitirlo no filtra.",
                 },
                 "fecha_resolucion_desde": {
                     "type": "integer",
