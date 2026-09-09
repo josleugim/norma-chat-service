@@ -14,12 +14,15 @@ su cuenta, y que ya nos costó caro antes:
 5. La búsqueda exhaustiva hace UNA petición. La API no tiene `page`, así que
    el bucle anterior habría pedido la misma página una y otra vez,
    duplicando registros sin un solo error.
+6. Un fallo HTTP revienta en vez de devolver cero resultados. Es el error más
+   caro que puede cometer este agente: afirmar que algo no existe porque la
+   consulta falló.
 """
 import httpx
 import pytest
 
 from retrieval.estadistica_client import (
-    EstadisticaSearchClient, FiltroDesconocidoError,
+    BusquedaFallidaError, EstadisticaSearchClient, FiltroDesconocidoError,
 )
 
 
@@ -239,3 +242,53 @@ def _instalar(monkeypatch, handler):
         original_init(self, *args, **kwargs)
 
     monkeypatch.setattr(httpx.AsyncClient, "__init__", init)
+
+
+# ── 7. Un fallo de la API no es "no hay resultados" ──────────────────
+
+@pytest.mark.asyncio
+async def test_error_http_revienta_en_vez_de_devolver_vacio(monkeypatch):
+    """
+    Visto en producción el 9-sep-2026: `/cases/search` empezó a responder 401,
+    el cliente lo tragaba devolviendo `[]`, y el chat contestó *"es posible que
+    el expediente no exista"* sobre IO-001-2019 — un caso real con multas por
+    más de 15 millones que el explorador de normaplus.ai muestra sin problema.
+
+    Afirmar inexistencia a partir de una falla de infraestructura es el error
+    que COFECE nos marcó desde la primera ronda.
+    """
+    def handler(request):
+        return httpx.Response(401, json={"message": "Unauthorized"})
+
+    _instalar(monkeypatch, handler)
+    client = EstadisticaSearchClient("https://api.test", "1.k")
+
+    with pytest.raises(BusquedaFallidaError) as exc:
+        await client.search(filters={"caseLink": "IO-001-2019"})
+    assert "no se puede concluir" in str(exc.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_error_de_conexion_tambien_revienta(monkeypatch):
+    def handler(request):
+        raise httpx.ConnectError("sin ruta al host")
+
+    _instalar(monkeypatch, handler)
+    client = EstadisticaSearchClient("https://api.test", "1.k")
+
+    with pytest.raises(BusquedaFallidaError):
+        await client.search()
+
+
+@pytest.mark.asyncio
+async def test_cero_resultados_reales_si_devuelven_lista_vacia(monkeypatch):
+    """El contrapeso: una consulta que sí corrió y no encontró nada."""
+    def handler(request):
+        return httpx.Response(200, json={"data": [], "meta": {"returned": 0, "limit": 50}})
+
+    _instalar(monkeypatch, handler)
+    client = EstadisticaSearchClient("https://api.test", "1.k")
+
+    assert await client.search(filters={"caseLink": "NO-EXISTE-9999"}) == []
+    assert client.last_total == 0
+    assert client.last_truncado is False

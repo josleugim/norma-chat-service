@@ -34,6 +34,14 @@ from models.schemas import ExpedienteRecord
 logger = logging.getLogger(__name__)
 
 
+class BusquedaFallidaError(RuntimeError):
+    """
+    La búsqueda no se completó. Se levanta en vez de devolver una lista vacía
+    porque "la API falló" y "no hay resultados" son cosas distintas, y
+    confundirlas hace que el agente afirme que un expediente no existe.
+    """
+
+
 class FiltroDesconocidoError(ValueError):
     """
     Un filtro que la API no conoce. Se levanta en vez de reenviarlo porque la
@@ -221,19 +229,32 @@ class EstadisticaSearchClient:
                 resp = await client.get(url, params=params, headers=headers)
                 resp.raise_for_status()
                 data = resp.json()
-        except httpx.ConnectError:
-            logger.warning("Endpoint de casos no disponible.")
+        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+            # Un fallo de la búsqueda NO es "no hay resultados".
+            #
+            # Antes esto devolvía `[]` y el agente concluía que el expediente
+            # no existía. Visto en producción el 9-sep-2026: `/cases/search`
+            # empezó a responder 401, el cliente lo tragó, y el chat contestó
+            # *"es posible que el expediente no exista"* sobre IO-001-2019, un
+            # caso real con multas por más de 15 millones que el propio
+            # explorador de normaplus.ai muestra sin problema.
+            #
+            # Afirmar inexistencia a partir de una falla de infraestructura es
+            # el peor error que puede cometer este agente, y es el que COFECE
+            # nos marcó desde la primera ronda. Ahora se levanta la excepción:
+            # el despachador de herramientas la convierte en un error visible
+            # para el modelo y para la traza, y el agente dice que la búsqueda
+            # falló en vez de inventar un vacío.
+            detalle = f"{type(e).__name__}: {e}".rstrip(": ")
+            logger.error(f"Búsqueda de expedientes fallida: {detalle}")
             if collector is not None:
-                collector.add_error("estadistica_client", "ConnectError")
+                collector.add_error("estadistica_client", detalle)
             self._reset_cobertura()
-            return []
-        except httpx.HTTPStatusError as e:
-            logger.warning(f"Error en endpoint de casos: {e}")
-            if collector is not None:
-                collector.add_error("estadistica_client",
-                                    f"{type(e).__name__}: {e}")
-            self._reset_cobertura()
-            return []
+            raise BusquedaFallidaError(
+                f"La búsqueda de expedientes falló ({detalle}). NO se puede "
+                f"concluir que no existan resultados: la consulta nunca se "
+                f"completó."
+            ) from e
 
         items = data.get("data", []) if isinstance(data, dict) else data
         meta = data.get("meta", {}) if isinstance(data, dict) else {}
