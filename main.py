@@ -98,6 +98,16 @@ async def lifespan(app: FastAPI):
             f"Censo del acervo: {census.get('total')} expedientes — "
             + ", ".join(f"{k}:{v}" for k, v in census.get("by_prefix", {}).items())
         )
+        # Un campo que la API deja de mandar no produce ningún error: el
+        # registro se parsea igual, el campo queda en None y el agente
+        # responde "no hay dato" sobre información que sí existe. Tiene que
+        # gritar al arrancar.
+        if census.get("campos_ausentes"):
+            logger.error(
+                "CAMPOS AUSENTES en la respuesta de la API: "
+                + ", ".join(census["campos_ausentes"])
+                + ". El agente va a reportar esos datos como inexistentes."
+            )
         logger.info(
             f"Corrida '{settings.run_id}' — prompt {versions.prompt_sha256}, "
             f"tools {versions.tools_sha256}, agente {versions.agent_git_sha}"

@@ -29,6 +29,21 @@ logger = logging.getLogger(__name__)
 # Prefijos que importan para las preguntas de exhaustividad de la batería.
 PREFIXES = ("VCN", "IO", "CNT", "DE", "RA", "CON")
 
+# Campos que el agente necesita y que la API venía mandando. Se vigilan porque
+# un campo que desaparece del endpoint no produce ningún error: el registro se
+# parsea igual, el campo queda en None, y el agente concluye "no hay dato"
+# cuando lo que pasó es que dejó de llegar.
+#
+# No es hipotético. Al migrar a `/cases/agent-search` el 7-sep-2026 se perdió
+# `startAgreementDate` —el campo que abre el plazo en VCN e IO— y el agente
+# empezó a responder "no se puede calcular el plazo" sobre expedientes cuya
+# fecha sí existe: el propio frontend de normaplus.ai la muestra.
+CAMPOS_VIGILADOS = (
+    "startAgreementDate", "notificationDate", "admissionDate",
+    "basicInfoRequestDate", "additionalInfoRequestDate", "resolutionDate",
+    "senseOfResolution", "agentFines", "authority",
+)
+
 
 def _prefijo_de(case_link: str) -> str:
     """
@@ -74,6 +89,27 @@ async def take_census(estadistica_client, prefixes: tuple[str, ...] = PREFIXES) 
         conteos[_prefijo_de(link)] = conteos.get(_prefijo_de(link), 0) + 1
 
     census["total"] = len(registros)
+
+    # Cobertura de campos: cuáles llegan con valor, cuáles llegan siempre
+    # vacíos, y cuáles la API directamente ya no incluye en su respuesta.
+    presentes: dict[str, int] = {}
+    for r in registros:
+        crudo = r.model_dump() if hasattr(r, "model_dump") else dict(r)
+        for campo in CAMPOS_VIGILADOS:
+            if crudo.get(campo):
+                presentes[campo] = presentes.get(campo, 0) + 1
+    census["field_coverage"] = {c: presentes.get(c, 0) for c in CAMPOS_VIGILADOS}
+    ausentes = [c for c in CAMPOS_VIGILADOS if presentes.get(c, 0) == 0]
+    # Va en su propia clave, no en `errors`: el censo SÍ contó todo, lo que
+    # falla es la respuesta de la API. Mezclarlos marcaría el censo como
+    # incompleto y ensuciaría la comparación entre corridas.
+    if ausentes:
+        census["campos_ausentes"] = ausentes
+        census["avisos"] = [
+            "la API no devolvió ningún valor para: " + ", ".join(ausentes)
+            + ". Un campo que desaparece no da error: el agente responde "
+              "'no hay dato' sobre información que sí existe."
+        ]
     # Los prefijos esperados se reportan siempre, aunque den cero: que un
     # prefijo desaparezca del acervo es justo el cambio que hay que ver.
     for prefijo in prefixes:
