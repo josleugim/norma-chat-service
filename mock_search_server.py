@@ -4,7 +4,7 @@ Actualizado mayo 2026: refleja el formato real confirmado.
 
 - /paragraphs/vector-search: caseName, caseLink, articleNames, titleNames 
   como campos de PRIMER NIVEL (fuera de metadata)
-- /cases/agent-search: filtros con AND, sin paginación, meta{returned,limit}
+- /cases/agent-search: filtros con AND, sin paginación, meta{total,returned,limit}
 - /cases/search: retirado (401), como en staging desde el 7-sep-2026
 
 Ejecutar: uvicorn mock_search_server:app --port 3000
@@ -290,7 +290,8 @@ async def agent_search_cases(
     - Los filtros se combinan con AND.
     - `caseLink` es match PARCIAL, no igualdad.
     - No hay `page`; `limit` no tiene tope y su default es 10.
-    - `meta` trae solo `returned` y `limit`: no hay `total`.
+    - `meta` trae `total`, `returned` y `limit`. El `total` volvió el
+      9-sep-2026: con él, el truncamiento es un hecho y no una inferencia.
     - Un parámetro con nombre desconocido se ignora en silencio (FastAPI ya
       lo hace por su cuenta) y devuelve el universo sin filtrar.
     - El alias de SANCION expande a tres valores que casi no existen en los
@@ -374,7 +375,10 @@ async def agent_search_cases(
 
     results.sort(key=orden)
     recortado = results[:limit]
-    return {"data": recortado, "meta": {"returned": len(recortado), "limit": limit}}
+    return {
+        "data": recortado,
+        "meta": {"total": len(results), "returned": len(recortado), "limit": limit},
+    }
 
 
 @app.get("/cases/search")

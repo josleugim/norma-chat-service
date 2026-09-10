@@ -13,11 +13,11 @@ llave. Tres diferencias del endpoint nuevo cambian el diseño del cliente:
 2. **No existe `page`.** La paginación desapareció. En cambio `limit` no tiene
    tope: `limit=5000` devuelve los 4,662 expedientes en ~3 s y 2.1 MB.
 
-3. **No existe `meta.total`.** `meta` trae solo `returned` y `limit`, así que
-   el truncamiento se infiere de `returned == limit`. Es una estimación, no un
-   dato: si el universo mide exactamente `limit`, se ve truncado sin estarlo.
-   Por eso `last_total` solo se llena cuando la respuesta es demostrablemente
-   completa, y queda en None cuando pudo haberse cortado.
+3. **`meta.total` volvió el 9-sep-2026**, a petición nuestra. Entre el 7 y el 9
+   el endpoint solo traía `returned` y `limit`, y el truncamiento había que
+   inferirlo de `returned == limit` — una estimación, no un dato. Ahora se lee
+   el total real. El camino de respaldo sigue ahí por si desaparece otra vez, y
+   la traza registra en `truncation_reason` cuál de los dos se usó.
 
 Y una trampa que obliga a validar de este lado: **los nombres de parámetro mal
 escritos se ignoran en silencio.** Verificado: `?aplicableLaw=...` (con una
@@ -118,10 +118,10 @@ class EstadisticaSearchClient:
         self.api_key = api_key
         self.timeout = timeout
 
-        # Total EXACTO del universo que cumple los filtros, o None si la
-        # respuesta pudo quedar truncada. Sin `meta.total` no hay forma de
-        # saberlo cuando `returned == limit`, y afirmar cobertura completa a
-        # partir de una estimación es justo el error que perseguimos.
+        # Total de coincidencias que cumplen los filtros, leído de
+        # `meta.total`. Queda en None solo si la API dejara de mandarlo y la
+        # respuesta pudo cortarse: afirmar cobertura completa a partir de una
+        # estimación es justo el error que perseguimos.
         self.last_total: int | None = None
         self.last_returned: int = 0
         self.last_limit: int | None = None
@@ -277,12 +277,26 @@ class EstadisticaSearchClient:
         tope = int(meta.get("limit", limit) or limit)
         self.last_returned = devueltos
         self.last_limit = tope
-        # Sin `meta.total`, la igualdad con el tope es la única señal de corte.
-        self.last_truncado = devueltos >= tope
-        # Solo se afirma un total cuando la API demostró haber devuelto todo
-        # lo que cumple los filtros: `returned < limit`.
-        self.last_total = None if self.last_truncado else devueltos
         self.last_pages_fetched = 1
+
+        # `meta.total` volvió el 9-sep-2026, a petición nuestra. Es el número
+        # de coincidencias reales, independiente del tope, así que el
+        # truncamiento deja de ser una inferencia y pasa a ser un hecho: se
+        # sabe cuánto quedó fuera, no solo que *pudo* quedar algo.
+        total = meta.get("total")
+        if total is not None:
+            self.last_total = int(total)
+            self.last_truncado = devueltos < self.last_total
+        else:
+            # Respaldo por si la API vuelve a dejar de mandarlo: `returned ==
+            # limit` es lo único que queda, y es una estimación. No se afirma
+            # un total que no se puede sostener.
+            self.last_truncado = devueltos >= tope
+            self.last_total = None if self.last_truncado else devueltos
+            logger.warning(
+                "La API no devolvió meta.total; el truncamiento vuelve a ser "
+                "una estimación basada en returned==limit."
+            )
 
         if collector is not None:
             collector.record_stage(
@@ -292,10 +306,10 @@ class EstadisticaSearchClient:
                 notes=(
                     "Filtros combinados con AND por el servidor. searchData "
                     "usa ILIKE + unaccent sobre caseLink, name, "
-                    "economicAgents y relevantMarkets; no es fuzzy. La API no "
-                    "expone meta.total, así que el truncamiento se infiere de "
-                    "returned==limit y es una estimación: un universo que mida "
-                    "exactamente el tope se marca truncado sin estarlo."
+                    "economicAgents y relevantMarkets; no es fuzzy. El "
+                    "truncamiento sale de meta.total, así que es un hecho y no "
+                    "una inferencia; si la API dejara de mandarlo se degrada a "
+                    "returned==limit y la traza lo dice en truncation_reason."
                 ),
             )
             collector.record_coverage(
@@ -304,7 +318,10 @@ class EstadisticaSearchClient:
                 returned=len(results),
                 pages_fetched=1,
                 truncated=self.last_truncado,
-                truncation_reason="returned==limit",
+                truncation_reason=(
+                    "meta.total" if meta.get("total") is not None
+                    else "returned==limit"
+                ),
             )
 
         logger.debug(
@@ -338,8 +355,8 @@ class EstadisticaSearchClient:
         el resultado de forma sistemática.
 
         Retorna (registros, total, universo_completo). El tercer valor es el
-        que decide si se puede afirmar un máximo o hay que advertir: con la
-        API nueva se sostiene en `returned < limit`, no en un `meta.total`.
+        que decide si se puede afirmar un máximo o hay que advertir, y desde
+        que volvió `meta.total` se sostiene en el total real.
         """
         registros = await self.search(
             text_search=text_search,

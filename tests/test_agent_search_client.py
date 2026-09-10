@@ -33,7 +33,7 @@ def peticiones(monkeypatch):
 
     def handler(request: httpx.Request) -> httpx.Response:
         registro.append(request)
-        return httpx.Response(200, json={"data": [], "meta": {"returned": 0, "limit": 50}})
+        return httpx.Response(200, json={"data": [], "meta": {"total": 0, "returned": 0, "limit": 50}})
 
     _instalar(monkeypatch, handler)
     return registro, None
@@ -120,10 +120,31 @@ async def test_agent_fines_none_no_filtra(peticiones):
 # ── 4. Truncamiento sin meta.total ───────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_returned_igual_a_limit_no_afirma_total(monkeypatch):
+async def test_con_meta_total_el_truncamiento_es_un_hecho(monkeypatch):
     """
-    Si la API devolvió justo el tope, el universo pudo quedar cortado. No hay
-    `meta.total` para desempatar, así que no se afirma ningún total.
+    Con `meta.total` se sabe cuánto quedó fuera, no solo que pudo quedar algo.
+    Volvió el 9-sep-2026 a petición nuestra.
+    """
+    def handler(request):
+        return httpx.Response(200, json={
+            "data": [{"caseLink": f"CNT-{i:03d}-2024"} for i in range(50)],
+            "meta": {"total": 4662, "returned": 50, "limit": 50},
+        })
+
+    _instalar(monkeypatch, handler)
+    client = EstadisticaSearchClient("https://api.test", "1.k")
+    await client.search(limit=50)
+
+    assert client.last_truncado is True
+    assert client.last_total == 4662
+
+
+@pytest.mark.asyncio
+async def test_sin_meta_total_se_degrada_sin_inventar_un_total(monkeypatch):
+    """
+    Respaldo por si la API vuelve a dejar de mandarlo, como entre el 7 y el 9
+    de septiembre: se marca truncado por `returned == limit` y NO se afirma un
+    total que no se puede sostener.
     """
     def handler(request):
         return httpx.Response(200, json={
@@ -144,7 +165,7 @@ async def test_returned_menor_a_limit_si_afirma_total(monkeypatch):
     def handler(request):
         return httpx.Response(200, json={
             "data": [{"caseLink": f"VCN-{i:03d}-2024"} for i in range(39)],
-            "meta": {"returned": 39, "limit": 5000},
+            "meta": {"total": 39, "returned": 39, "limit": 5000},
         })
 
     _instalar(monkeypatch, handler)
@@ -172,7 +193,7 @@ async def test_busqueda_exhaustiva_no_pagina(monkeypatch):
         llamadas.append(request)
         return httpx.Response(200, json={
             "data": [{"caseLink": f"CNT-{i:03d}-2024"} for i in range(100)],
-            "meta": {"returned": 100, "limit": 100},
+            "meta": {"total": 100, "returned": 100, "limit": 100},
         })
 
     _instalar(monkeypatch, handler)
@@ -199,7 +220,7 @@ async def test_prefijo_va_como_case_link_con_los_demas_filtros(monkeypatch):
         llamadas.append(request)
         return httpx.Response(200, json={
             "data": [{"caseLink": "VCN-004-2024", "authority": "COFECE"}],
-            "meta": {"returned": 1, "limit": 5000},
+            "meta": {"total": 1, "returned": 1, "limit": 5000},
         })
 
     _instalar(monkeypatch, handler)
@@ -221,7 +242,7 @@ async def test_guarda_de_prefijo_descarta_lo_que_no_coincide(monkeypatch):
                 {"caseLink": "VCN-004-2024"},
                 {"caseLink": "CNT-VCN-99-2020"},
             ],
-            "meta": {"returned": 2, "limit": 5000},
+            "meta": {"total": 2, "returned": 2, "limit": 5000},
         })
 
     _instalar(monkeypatch, handler)
@@ -284,7 +305,7 @@ async def test_error_de_conexion_tambien_revienta(monkeypatch):
 async def test_cero_resultados_reales_si_devuelven_lista_vacia(monkeypatch):
     """El contrapeso: una consulta que sí corrió y no encontró nada."""
     def handler(request):
-        return httpx.Response(200, json={"data": [], "meta": {"returned": 0, "limit": 50}})
+        return httpx.Response(200, json={"data": [], "meta": {"total": 0, "returned": 0, "limit": 50}})
 
     _instalar(monkeypatch, handler)
     client = EstadisticaSearchClient("https://api.test", "1.k")
