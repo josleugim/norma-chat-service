@@ -105,6 +105,14 @@ CAMPOS_TEXTO = frozenset({
 # El universo completo cabe en una petición; este es el techo por defecto.
 LIMIT_UNIVERSO = 5000
 
+# A partir de este tope, la petición trae el acervo entero y necesita otro
+# timeout. No es un detalle de afinación: cuando José Miguel repuso los seis
+# campos que faltaban, la respuesta pasó de 2.1 MB a 7.6 MB y de ~3 s a 7-18 s,
+# con el arranque en frío en el extremo alto. Con el timeout de 10 s que
+# traíamos, el censo del acervo empezó a fallar por ReadTimeout.
+LIMIT_PETICION_GRANDE = 1000
+TIMEOUT_PETICION_GRANDE = 120.0
+
 
 class EstadisticaSearchClient:
 
@@ -113,10 +121,14 @@ class EstadisticaSearchClient:
         base_url: str,
         api_key: str = "",
         timeout: float = 15.0,
+        timeout_grande: float = TIMEOUT_PETICION_GRANDE,
     ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
+        # Traer el universo completo es otra clase de petición que buscar diez
+        # expedientes; medirlas con el mismo reloj hacía fallar la primera.
+        self.timeout_grande = timeout_grande
 
         # Total de coincidencias que cumplen los filtros, leído de
         # `meta.total`. Queda en None solo si la API dejara de mandarlo y la
@@ -224,8 +236,12 @@ class EstadisticaSearchClient:
         if collector is not None:
             collector.record_http_request("GET", url, params=dict(params))
 
+        espera = (
+            self.timeout_grande if limit >= LIMIT_PETICION_GRANDE
+            else self.timeout
+        )
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(timeout=espera) as client:
                 resp = await client.get(url, params=params, headers=headers)
                 resp.raise_for_status()
                 data = resp.json()
