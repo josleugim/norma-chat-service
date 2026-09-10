@@ -34,6 +34,17 @@ class Settings(BaseSettings):
     # --- Temporal ---
     holidays_path: str = "data/dias_inhabiles.xlsx"
 
+    # --- Trazabilidad ---
+    # Una corrida = un baseline congelado. Cambiar run_id abre una corrida nueva.
+    tracing_enabled: bool = True
+    traces_dir: str = "traces"
+    run_id: str = "dev"
+    run_label: str = ""
+    question_set: str = ""
+    # Guarda el texto completo de cada documento recuperado en vez de los
+    # primeros 2000 caracteres. Útil para depurar un caso puntual.
+    tracing_full_text: bool = False
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 

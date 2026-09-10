@@ -12,6 +12,9 @@ from typing import Optional
 
 class ReferenceItem(BaseModel):
     """Referencia citada en la respuesta — usado por CitationBuilder."""
+    # Marcador exacto que emitió el modelo ([E3]). Cierra la cadena
+    # afirmación → evidencia → registro → expediente → fuente visible.
+    marker: Optional[str] = None
     id_expediente: str
     nombre_expediente: str = ""
     source_type: str  # "criterio" | "estadistica"
@@ -45,6 +48,11 @@ class ChatRequest(BaseModel):
     model: str = "gpt-4.1"
     chat_history: list[dict] = Field(default_factory=list)
     is_first_message: bool = False
+
+    # --- Trazabilidad (opcionales, para corridas de prueba) ---
+    turn_index: Optional[int] = None      # si no viene, se infiere del historial
+    question_set_id: Optional[str] = None  # id de la pregunta en la batería
+    client: str = "frontend"               # "frontend" | "test_harness" | "curl"
 
 
 class ModelInfo(BaseModel):

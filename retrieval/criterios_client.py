@@ -32,6 +32,7 @@ class CriteriosSearchClient:
         top_k: int = 15,
         max_distance: float = 0.7,
         filters: dict | None = None,
+        collector=None,
     ) -> list[CriterioResult]:
         """
         Búsqueda vectorial en criterios vía endpoint de José Miguel.
@@ -44,6 +45,8 @@ class CriteriosSearchClient:
             filters: Filtros opcionales con nombres de la API real:
                      caseLink, authority, typeOfProcedure,
                      senseOfResolution, economicAgents, etc.
+            collector: TraceCollector opcional. Si viene, se registran las
+                       etapas de retrieval. No altera el resultado.
         """
         payload = {
             "question": query,
@@ -78,9 +81,13 @@ class CriteriosSearchClient:
 
         logger.debug(f"Buscando criterios: question='{query}', limit={top_k}")
 
+        url = f"{self.base_url}/paragraphs/vector-search"
+        if collector is not None:
+            collector.record_http_request("POST", url, body=payload)
+
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.post(
-                f"{self.base_url}/paragraphs/vector-search",
+                url,
                 json=payload,
                 headers=headers,
             )
@@ -90,12 +97,23 @@ class CriteriosSearchClient:
         # La API retorna un array directo
         items = data if isinstance(data, list) else data.get("results", data)
 
+        # Etapa 1 — lo que devolvió la API, crudo, antes de tocar nada.
+        if collector is not None:
+            collector.record_stage(
+                stage="candidates",
+                method="vector_search:/paragraphs/vector-search",
+                docs=list(items),
+                notes=f"limit={top_k} enviado a la API.",
+            )
+
         results = []
+        dropped_ids: list[str] = []
         for item in items:
             distance = item.get("distance", 1.0)
 
             # Filtrar por distancia máxima (menor = más similar)
             if distance > max_distance:
+                dropped_ids.append(str(item.get("id", "")))
                 continue
 
             # Convertir distance a score (1 - distance)
@@ -147,6 +165,31 @@ class CriteriosSearchClient:
             ))
 
         results.sort(key=lambda r: r.score, reverse=True)
+
+        # Etapa 2 — tras filtro por distancia y ordenamiento por score.
+        # No hay reranker: esta etapa es filtro + orden, y así se declara.
+        if collector is not None:
+            collector.record_stage(
+                stage="after_ranking",
+                method=f"distance_filter(<{max_distance})+sort_by_score",
+                docs=[
+                    {"id": r.id, "text": r.text, "score": r.score,
+                     "metadata": r.metadata}
+                    for r in results
+                ],
+                dropped_ids=dropped_ids,
+                notes=(
+                    "No hay reranker en el pipeline. Esta etapa descarta por "
+                    "distancia y reordena por score."
+                ),
+            )
+            collector.record_coverage(
+                total_available=None,
+                requested_limit=top_k,
+                returned=len(results),
+                truncated=len(items) >= top_k,
+                truncation_reason="top_k" if len(items) >= top_k else None,
+            )
 
         logger.debug(
             f"Criterios encontrados: {len(results)} "

@@ -38,6 +38,14 @@ async def chat_completions(
     - error: {message} — error durante la ejecución
     """
 
+    # El turno se infiere del historial si el cliente no lo manda; es lo que
+    # ordena las trazas dentro de una conversación.
+    turn_index = (
+        request.turn_index
+        if request.turn_index is not None
+        else len(request.chat_history) // 2
+    )
+
     async def event_generator() -> AsyncIterator[dict]:
         try:
             async for event in agent.run(
@@ -47,6 +55,9 @@ async def chat_completions(
                 model=request.model,
                 chat_history=request.chat_history,
                 is_first_message=request.is_first_message,
+                turn_index=turn_index,
+                question_set_id=request.question_set_id,
+                client=request.client,
             ):
                 yield {
                     "event": event.type,
@@ -75,3 +86,22 @@ async def list_models(
     """Retorna la lista de modelos disponibles."""
     models = agent.llm_registry.all_models()
     return {"models": [m.model_dump() for m in models]}
+
+
+@router.get("/run")
+async def run_info(
+    agent: NormaPlusAgent = Depends(get_agent),
+    settings: Settings = Depends(get_settings),
+):
+    """
+    Estado de la corrida en curso: baseline congelado y drift detectado.
+    Permite verificar antes de empezar que se está midiendo lo que se cree.
+    """
+    store = agent.manifest_store
+    manifest = getattr(store, "_manifest", None) if store else None
+    return {
+        "tracing_enabled": settings.tracing_enabled,
+        "run_id": settings.run_id,
+        "traces_dir": settings.traces_dir,
+        "manifest": manifest.model_dump(mode="json") if manifest else None,
+    }

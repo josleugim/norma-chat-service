@@ -6,14 +6,21 @@ Cada tool call emite un evento SSE de razonamiento para el frontend.
 """
 import json
 import logging
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 from llm.registry import LLMRegistry
 from retrieval.criterios_client import CriteriosSearchClient
 from retrieval.estadistica_client import EstadisticaSearchClient
 from temporal.analyzer import TemporalAnalyzer
 from core.citation_builder import CitationBuilder
+from core.citations import CitationRegistry
 from core.evidence_cache import EvidenceCache
+from agent.turn_state import TurnState
+from core.tracing import (
+    NullSink, Request as TraceRequest, TraceCollector, analyze_answer,
+    build_versions, interpret,
+)
+from core.tracing.versioning import sha256_short
 from agent.tools import TOOLS
 from prompts.system import AGENT_SYSTEM_PROMPT, TITLE_GENERATION_PROMPT
 from models.schemas import (
@@ -21,6 +28,11 @@ from models.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Truncado del texto de criterios al serializarlos para el LLM.
+# Es una de las tres etapas de retrieval: lo que entra al contexto no es lo
+# mismo que lo que devolvió el buscador.
+CRITERIO_CONTEXT_CHARS = 700
 
 
 class NormaPlusAgent:
@@ -34,6 +46,9 @@ class NormaPlusAgent:
         citation_builder: CitationBuilder,
         evidence_cache: EvidenceCache,
         max_tool_calls: int = 6,
+        trace_sink=None,
+        manifest_store=None,
+        settings=None,
     ):
         self.llm_registry = llm_registry
         self.criterios = criterios_client
@@ -43,9 +58,17 @@ class NormaPlusAgent:
         self.evidence_cache = evidence_cache
         self.max_tool_calls = max_tool_calls
 
+        # ── Trazabilidad ────────────────────────────────────
+        # Observa; nunca altera el comportamiento del agente.
+        self.trace_sink = trace_sink or NullSink()
+        self.manifest_store = manifest_store
+        self.settings = settings
+
         self.tool_executors = {
             "buscar_criterios": self._exec_buscar_criterios,
             "buscar_expedientes": self._exec_buscar_expedientes,
+            "contar_expedientes": self._exec_contar_expedientes,
+            "agregar_expedientes": self._exec_agregar_expedientes,
             "calcular_plazos": self._exec_calcular_plazos,
         }
 
@@ -57,14 +80,71 @@ class NormaPlusAgent:
         model: str,
         chat_history: list[dict],
         is_first_message: bool = False,
+        turn_index: int = 0,
+        question_set_id: Optional[str] = None,
+        client: str = "frontend",
     ) -> AsyncIterator[StreamEvent]:
         """
         Ejecuta el agente. Yields StreamEvents para el frontend.
         """
         adapter = self.llm_registry.get_adapter(provider)
 
+        collector = self._new_collector(
+            session_id=session_id,
+            user_query=user_query,
+            provider=provider,
+            model=model,
+            chat_history=chat_history,
+            is_first_message=is_first_message,
+            turn_index=turn_index,
+            question_set_id=question_set_id,
+            client=client,
+        )
+
+        try:
+            async for event in self._run_traced(
+                collector, adapter, session_id, user_query, provider, model,
+                chat_history, is_first_message,
+            ):
+                if collector is not None:
+                    collector.count_sse_event(event.type)
+                yield event
+        finally:
+            # La traza se escribe también si la petición falla o el cliente
+            # corta la conexión — que son justo los casos del comentario #5,
+            # los más valiosos de conservar.
+            self._flush_trace(collector)
+
+    async def _run_traced(
+        self,
+        collector,
+        adapter,
+        session_id: str,
+        user_query: str,
+        provider: str,
+        model: str,
+        chat_history: list[dict],
+        is_first_message: bool,
+    ) -> AsyncIterator[StreamEvent]:
+        # Todo lo que dura este turno. El agente es un singleton, así que
+        # nada de esto puede vivir en self: dos peticiones simultáneas se
+        # pisarían.
+        state = TurnState()
+
+        # Routing: clasificar la consulta antes de buscar, para poder exigir
+        # después que la estrategia haya correspondido al tipo de pregunta.
+        from core.sufficiency import classify
+        routing = classify(user_query)
+        state.query = user_query
+        state.query_type = routing["query_type"]
+        if collector is not None:
+            collector.set_decision("query_type", routing["query_type"], "heuristic")
+            collector.set_decision("routing_strategy", routing["strategy"], "heuristic")
+
         # Construir mensajes para el LLM en formato nativo
-        messages = self._build_messages(user_query, chat_history, provider, session_id)
+        messages = self._build_messages(
+            user_query, chat_history, provider, session_id, collector
+        )
 
         all_criterios_results: list[list] = []
         all_expedientes_results: list[list] = []
@@ -76,6 +156,8 @@ class NormaPlusAgent:
         # ── Agent loop ──────────────────────────────────────
         exhausted_tools = False
         while tool_call_count < self.max_tool_calls:
+            if collector is not None:
+                collector.begin_step("llm_call")
             response = await adapter.completion_with_tools(
                 messages=messages,
                 model=model,
@@ -83,6 +165,11 @@ class NormaPlusAgent:
             )
             total_input_tokens += response.input_tokens
             total_output_tokens += response.output_tokens
+            if collector is not None:
+                collector.end_step(tokens={
+                    "input": response.input_tokens,
+                    "output": response.output_tokens,
+                })
 
             if response.tool_calls:
                 # El LLM quiere usar herramientas
@@ -100,11 +187,27 @@ class NormaPlusAgent:
                     )
 
                     # Ejecutar herramienta
+                    if collector is not None:
+                        collector.begin_step("tool_call", tool=tc.name,
+                                             arguments=tc.arguments)
                     try:
-                        result = await self.tool_executors[tc.name](tc.arguments)
+                        result = await self.tool_executors[tc.name](
+                            tc.arguments, collector, state
+                        )
+                        if collector is not None:
+                            collector.record_result(result)
+                            collector.end_step("ok")
                     except Exception as e:
-                        logger.error(f"Error ejecutando {tc.name}: {e}")
-                        result = {"error": str(e)}
+                        # Algunas excepciones traen mensaje vacío (timeouts,
+                        # KeyError sin args) y un error sin descripción no
+                        # sirve para diagnosticar nada. Se registra siempre
+                        # el tipo.
+                        detalle = f"{type(e).__name__}: {e}".rstrip(": ")
+                        logger.error(f"Error ejecutando {tc.name}: {detalle}")
+                        result = {"error": detalle}
+                        if collector is not None:
+                            collector.end_step("error", error=detalle)
+                            collector.add_error(f"tool:{tc.name}", detalle)
 
                     # Rastrear resultados para citation_builder
                     if tc.name == "buscar_criterios":
@@ -120,7 +223,7 @@ class NormaPlusAgent:
 
                     # Agregar al historial del LLM (formato depende del proveedor)
                     result_str = json.dumps(
-                        self._serialize_tool_result(tc.name, result),
+                        self._serialize_tool_result(tc.name, result, state),
                         ensure_ascii=False, default=str,
                     )
                     messages = self._append_tool_result(
@@ -130,14 +233,19 @@ class NormaPlusAgent:
                 # El LLM tiene la respuesta final — hacer streaming
                 if response.content:
                     # Si ya generó texto sin tools, emitirlo
+                    if collector is not None:
+                        collector.set_decision("final_answer_path", "content")
                     final_text = response.content
                     for chunk in self._chunk_text(final_text):
                         yield StreamEvent(type="token", data={"text": chunk})
                 else:
                     # Hacer streaming de la respuesta final
+                    if collector is not None:
+                        collector.set_decision("final_answer_path", "stream")
+                        collector.begin_step("llm_call")
                     final_parts = []
                     stream_messages = self._prepare_messages_for_stream(
-                        messages, provider
+                        messages, provider, collector
                     )
                     async for chunk in adapter.stream_completion(
                         messages=stream_messages,
@@ -151,6 +259,8 @@ class NormaPlusAgent:
                         if chunk.output_tokens:
                             total_output_tokens += chunk.output_tokens
                     final_text = "".join(final_parts)
+                    if collector is not None:
+                        collector.end_step("ok")
                 break
         else:
             # El while terminó porque tool_call_count >= max_tool_calls
@@ -163,6 +273,8 @@ class NormaPlusAgent:
 
         # ── Fallback: forzar respuesta final si se agotaron tools ──
         if exhausted_tools:
+            if collector is not None:
+                collector.set_decision("final_answer_path", "forced_synthesis")
             yield StreamEvent(
                 type="thinking",
                 data={
@@ -199,7 +311,7 @@ class NormaPlusAgent:
                     # Último recurso: streaming
                     final_parts = []
                     stream_messages = self._prepare_messages_for_stream(
-                        messages, provider
+                        messages, provider, collector
                     )
                     async for chunk in adapter.stream_completion(
                         messages=stream_messages,
@@ -215,6 +327,8 @@ class NormaPlusAgent:
                     final_text = "".join(final_parts)
             except Exception as e:
                 logger.error(f"Error en fallback de respuesta: {e}")
+                if collector is not None:
+                    collector.add_error("fallback_synthesis", str(e))
                 final_text = (
                     "La consulta requirió más búsquedas de las que puedo "
                     "realizar en un solo turno. Por favor, reformula tu "
@@ -233,11 +347,11 @@ class NormaPlusAgent:
                 expedientes=flat_expedientes,
             )
 
-        # ── Parsear citas ───────────────────────────────────
-        _, references = self.citations.build_references(
-            final_text,
-            all_criterios_results,
-            all_expedientes_results,
+        # ── Resolver citas contra el registro del turno ─────
+        # Por diccionario, no por posición: es lo que impide que una cita
+        # termine apuntando a un expediente distinto del que se usó.
+        references, citas_sin_resolver = self.citations.build_from_registry(
+            final_text, state.registry
         )
 
         if references:
@@ -245,6 +359,43 @@ class NormaPlusAgent:
                 type="references",
                 data={"items": [ref.model_dump() for ref in references]},
             )
+
+        # ── Volcar routing y suficiencia a la traza ─────────
+        if collector is not None:
+            collector.set_decision(
+                "sufficiency_checks", state.sufficiency_checks, "heuristic")
+            collector.set_decision(
+                "filter_lineage", state.filtros_aplicados, "derived")
+            collector.set_decision(
+                "computation_audit", state.computation_audit, "derived")
+            collector.set_decision(
+                "data_anomalies", state.anomalias, "derived")
+            collector.set_decision(
+                "retrieval_retries", state.retrieval_retries, "derived")
+            collector.set_decision(
+                "abstained", bool(state.abstention_reason), "derived")
+            collector.set_decision(
+                "abstention_reason", state.abstention_reason, "derived")
+            if state.sufficiency_checks:
+                collector.set_decision(
+                    "sufficiency_passed",
+                    all(c.get("sufficient") for c in state.sufficiency_checks),
+                    "heuristic")
+
+        # ── Analizar la respuesta para la traza ─────────────
+        if collector is not None:
+            try:
+                collector.set_answer(analyze_answer(
+                    text=final_text,
+                    registry=state.registry,
+                    references=references,
+                    unresolved=citas_sin_resolver,
+                    docs_in_context=collector.context.docs_in_context,
+                    expected_prefixes=collector.interpretation.scope.procedure_prefix,
+                ))
+            except Exception as e:
+                logger.warning(f"Error analizando respuesta para la traza: {e}")
+                collector.add_error("analyze_answer", str(e))
 
         # ── Generar título si es primer mensaje ─────────────
         session_title = None
@@ -258,6 +409,8 @@ class NormaPlusAgent:
                 session_title = user_query[:60]
 
         # ── Done ────────────────────────────────────────────
+        # El trace_id viaja al frontend para que un reporte de "esta respuesta
+        # salió mal" apunte a una traza concreta.
         yield StreamEvent(
             type="done",
             data={
@@ -266,14 +419,99 @@ class NormaPlusAgent:
                 "tool_calls_count": tool_call_count,
                 "session_title": session_title,
                 "exhausted_tools": exhausted_tools,
+                "trace_id": collector.trace_id if collector else None,
             },
         )
+
+        if collector is not None:
+            collector.pending_finish = {
+                "status": "ok",
+                "exhausted_tools": exhausted_tools,
+                "tokens_input": total_input_tokens,
+                "tokens_output": total_output_tokens,
+            }
+
+    # ── Trazabilidad ────────────────────────────────────────
+
+    def _new_collector(
+        self, session_id: str, user_query: str, provider: str, model: str,
+        chat_history: list[dict], is_first_message: bool, turn_index: int,
+        question_set_id: Optional[str], client: str,
+    ):
+        """Crea el recolector. Si algo falla, se devuelve None y el agente
+        corre exactamente igual, sin traza."""
+        if isinstance(self.trace_sink, NullSink):
+            return None
+        try:
+            versions = build_versions(
+                self.settings, provider, model,
+                calendar=getattr(self.temporal, "cal", None),
+            )
+            collector = TraceCollector(
+                conversation_id=session_id,
+                versions=versions,
+                request=TraceRequest(
+                    query=user_query,
+                    query_sha256=sha256_short(user_query),
+                    provider=provider,
+                    model=model,
+                    chat_history_len=len(chat_history or []),
+                    is_first_message=is_first_message,
+                    client=client,
+                    question_set_id=question_set_id,
+                ),
+                turn_index=turn_index,
+                run_id=getattr(self.settings, "run_id", None),
+                full_text=getattr(self.settings, "tracing_full_text", False),
+            )
+            collector.pending_finish = {}
+            collector.set_interpretation(interpret(user_query))
+            if self.manifest_store is not None:
+                store = self.manifest_store
+                store.load_or_create(
+                    versions,
+                    label=getattr(self.settings, "run_label", "") or "",
+                    question_set=getattr(self.settings, "question_set", "") or None,
+                )
+                collector.drift = collector.check_drift(store.frozen_versions)
+            return collector
+        except Exception as e:
+            logger.error(f"No se pudo inicializar la traza: {e}")
+            return None
+
+    def _flush_trace(self, collector) -> None:
+        """Cierra y escribe la traza. Nunca propaga excepciones."""
+        if collector is None:
+            return
+        try:
+            pending = getattr(collector, "pending_finish", None) or {}
+            if not pending:
+                # El generador se interrumpió antes del evento `done`:
+                # cliente desconectado o excepción aguas arriba.
+                pending = {"status": "error", "exhausted_tools": False,
+                           "tokens_input": 0, "tokens_output": 0}
+                collector.add_error("run", "turno interrumpido antes de `done`")
+            trace = collector.finish(
+                status=pending.get("status", "ok"),
+                exhausted_tools=pending.get("exhausted_tools", False),
+                tokens_input=pending.get("tokens_input", 0),
+                tokens_output=pending.get("tokens_output", 0),
+            )
+            self.trace_sink.write(trace)
+            if self.manifest_store is not None:
+                self.manifest_store.record_trace(
+                    trace.trace_id,
+                    getattr(collector, "drift", []) or [],
+                    model=trace.versions.model,
+                )
+        except Exception as e:
+            logger.error(f"No se pudo cerrar la traza: {e}")
 
     # ── Constructores de mensajes ───────────────────────────
 
     def _build_messages(
         self, user_query: str, chat_history: list[dict],
-        provider: str, session_id: str,
+        provider: str, session_id: str, collector=None,
     ) -> list[dict]:
         """Construye mensajes en formato dict genérico, incluyendo cache."""
         # Obtener evidencia cacheada relevante
@@ -307,7 +545,41 @@ class NormaPlusAgent:
                 "content": m.get("content", ""),
             })
         messages.append({"role": "user", "content": user_query})
+
+        # El cache inyecta evidencia de turnos anteriores en el system prompt.
+        # Sin registrarla, habría documentos en el contexto que no vienen del
+        # retrieval de este turno y la respuesta parecería salir de la nada.
+        if collector is not None:
+            collector.set_context(
+                system_prompt=system_content,
+                messages_count=len(messages),
+                cached_evidence_used=bool(used_cache and cache_context),
+                cached_evidence_items=self._describe_cached_evidence(
+                    cached_criterios, cached_expedientes
+                ),
+                docs_in_context=[],
+                total_context_chars=len(system_content),
+            )
         return messages
+
+    def _describe_cached_evidence(
+        self, cached_criterios: list, cached_expedientes: list,
+    ) -> list[dict]:
+        items = []
+        for c in cached_criterios or []:
+            meta = c.get("metadata", {}) if isinstance(c, dict) else {}
+            items.append({
+                "doc_id": str(c.get("id", "")) if isinstance(c, dict) else "",
+                "case_link": meta.get("id_expediente", ""),
+                "source_type": "criterio",
+            })
+        for e in cached_expedientes or []:
+            items.append({
+                "doc_id": str(e.get("id", "")) if isinstance(e, dict) else "",
+                "case_link": e.get("id_expediente") or e.get("caseLink", ""),
+                "source_type": "estadistica",
+            })
+        return items
 
     def _append_tool_result(
         self,
@@ -363,78 +635,661 @@ class NormaPlusAgent:
 
     # ── Ejecutores de herramientas ──────────────────────────
 
-    async def _exec_buscar_criterios(self, args: dict) -> list:
+    async def _exec_buscar_criterios(self, args: dict, collector=None, state=None) -> list:
         results = await self.criterios.search(
             query=args["query"],
             top_k=args.get("top_k", 15),
+            collector=collector,
         )
-        return [
+        serialized = [
             {
                 "id": r.id,
-                "text": r.text[:700],  # truncar para no explotar el contexto
+                # truncar para no explotar el contexto
+                "text": r.text[:CRITERIO_CONTEXT_CHARS],
                 "score": r.score,
                 "metadata": r.metadata,
             }
             for r in results
         ]
 
-    async def _exec_buscar_expedientes(self, args: dict) -> list:
-        text_search = args.get("text_search")
-        limit = args.get("limit", 50)
-        has_multas = args.get("has_multas", False)
+        # ── Control de suficiencia ──────────────────────────
+        # ¿Esta evidencia responde exactamente lo preguntado, o solo se le
+        # parece? Es el caso de q14 y q16: se recuperó algo temáticamente
+        # cercano y el modelo llenó el hueco con conocimiento general.
+        if state is not None:
+            from core.sufficiency import INSUFFICIENT, check_evidence
+            chequeo = check_evidence(state.query, serialized)
+            state.sufficiency_checks.append({
+                "tool": "buscar_criterios",
+                "query": args.get("query", ""),
+                "intento": state.retrieval_retries + 1,
+                "retry": state.retrieval_retries > 0,
+                **chequeo,
+            })
+            if not chequeo["sufficient"]:
+                if state.retrieval_retries == 0:
+                    state.retrieval_retries += 1
+                    state.pending_retry_terms = chequeo.get("missing_terms", [])
+                else:
+                    faltantes = [
+                        c["descripcion"] for c in chequeo["components"]
+                        if c["estado"] == INSUFFICIENT
+                    ]
+                    state.abstention_reason = (
+                        "Tras dos búsquedas la evidencia no sostiene: "
+                        + "; ".join(faltantes)
+                    )
 
-        filters = {}
-        # Mapeo de parámetros del agente → filtros del cliente
+        # Etapa 3 — lo que realmente entra al prompt. Es aquí donde se pierde
+        # texto respecto de lo que devolvió el buscador.
+        if collector is not None:
+            collector.record_stage(
+                stage="in_context",
+                method=f"truncate({CRITERIO_CONTEXT_CHARS})",
+                docs=[
+                    {**d, "text_len_in_context": len(d["text"])}
+                    for d in serialized
+                ],
+                notes=(
+                    f"El texto de cada criterio se recorta a "
+                    f"{CRITERIO_CONTEXT_CHARS} caracteres antes de serializarse."
+                ),
+            )
+            collector.add_docs_in_context([
+                {
+                    "doc_id": str(r.id),
+                    "case_link": r.metadata.get("id_expediente", ""),
+                    "source_type": "criterio",
+                    "chars_in_context": min(len(r.text), CRITERIO_CONTEXT_CHARS),
+                    "chars_full": len(r.text),
+                    "truncated": len(r.text) > CRITERIO_CONTEXT_CHARS,
+                }
+                for r in results
+            ])
+        return serialized
+
+    async def _exec_contar_expedientes(self, args: dict, collector=None, state=None) -> dict:
+        """
+        Devuelve el tamaño del universo sin traer los registros.
+
+        Existe porque "¿cuántos?" no se responde con top-k: en el baseline el
+        agente contestó un conteo comparativo con 1 registro de 2,793.
+        """
+        prefijo = args.get("prefijo_expediente")
+        filters = self._build_expediente_filters(args)
+
+        # `agent-search` intersecta con AND y no expone `meta.total`, así que
+        # contar es traer el universo que cumple los filtros y medirlo. Cabe
+        # en una petición: 4,662 registros en ~3 s. La ruta con prefijo dejó
+        # de ser especial —existía solo para esquivar el OR de la API vieja—.
+        if prefijo:
+            registros = await self.estadistica.fetch_by_prefix(
+                prefijo, filters=filters, collector=collector
+            )
+        else:
+            registros, _, _ = await self.estadistica.fetch_universe(
+                text_search=args.get("text_search"),
+                filters=filters if filters else None,
+                collector=collector,
+            )
+
+        # El sentido de resolución no lo filtra el servidor (alias roto), así
+        # que el conteo se cierra localmente. El resto de condiciones ya
+        # vinieron aplicadas y este paso es idempotente.
+        locales = self._filtrar_local(
+            [r.model_dump() for r in registros], args, state
+        )
+
+        # Sin `meta.total`, "exacto" solo se puede afirmar cuando la API
+        # devolvió menos filas que el tope pedido. Si topó, el universo pudo
+        # quedar cortado y el conteo es un piso, no un total.
+        exacto = not self.estadistica.last_truncado
+        salida = {
+            "total": len(locales),
+            "exacto": exacto,
+            "filtros_aplicados": (
+                {**filters, "prefijo_expediente": prefijo} if prefijo else filters
+            ),
+            "metodo": (
+                "Universo completo traído con AND del servidor y cerrado con "
+                "el filtro local de sentido de resolución."
+            ),
+        }
+        # Antes se reportaba `total_del_prefijo_sin_otros_filtros`, que tenía
+        # sentido cuando el prefijo se traía solo y todo lo demás se acotaba
+        # aquí. Ahora los filtros viajan con él, así que ese número sería el
+        # del universo YA filtrado bajo una etiqueta que dice lo contrario.
+        if not exacto:
+            salida["ADVERTENCIA"] = (
+                f"La API devolvió exactamente el tope pedido "
+                f"({self.estadistica.last_limit}), así que pudo haber cortado "
+                f"resultados. Este número es un mínimo, no un total. La API no "
+                f"expone meta.total; para afirmar un conteo hay que repetir "
+                f"con un tope mayor."
+            )
+        return salida
+
+    def _filtrar_local(self, registros: list[dict], args: dict, state=None) -> list[dict]:
+        """
+        Aplica localmente los filtros que la API no sabe intersectar.
+
+        Dos cuidados aprendidos por las malas:
+
+        1. El match NO puede ser exacto. El modelo escribe "NO ACREDITADO EL
+           INCUMPLIMIENTO" y el valor real es "NO SE ACREDITÓ INCUMPLIMIENTO";
+           con igualdad estricta el filtro daba cero y el agente concluía "no
+           existe ningún caso", que es falso y peligroso.
+        2. Si un filtro deja el conjunto vacío, hay que decirlo con los valores
+           que sí existen, para que el agente distinga "no hay ninguno" de
+           "tu filtro no coincidió".
+        """
+        filtro_vacio = None
+        salida = registros
+        # Todas las condiciones se aplican localmente y de forma acumulativa:
+        # es la defensa contra el OR de la API, y tiene que ser transversal.
+        # En q09 una consulta restringida a COFECE devolvió casos de CFC
+        # porque esta ruta no pasaba por aquí.
+        equivalencias = {
+            "autoridad": "authority",
+            "tipo_procedimiento": "typeOfProcedure",
+            "sentido_resolucion": "senseOfResolution",
+            "id_expediente": "caseLink",
+        }
+        for arg_key, campo in equivalencias.items():
+            valor = args.get(arg_key)
+            if not valor:
+                continue
+            antes = salida
+            objetivo = _normalizar(valor)
+            salida = [
+                r for r in antes
+                if _coincide(_normalizar(r.get(campo)), objetivo)
+            ]
+            if state is not None:
+                state.filtros_aplicados.append({
+                    "filtro": arg_key,
+                    "campo": campo,
+                    "valor_solicitado": valor,
+                    "universo_antes": len(antes),
+                    "universo_despues": len(salida),
+                    "descartados": len(antes) - len(salida),
+                    "ejemplos_descartados": [
+                        f"{r.get('caseLink')} → {campo}={r.get(campo)}"
+                        for r in antes if r not in salida
+                    ][:5],
+                })
+            if antes and not salida:
+                disponibles = sorted({
+                    str(r.get(campo)) for r in antes if r.get(campo)
+                })
+                filtro_vacio = {
+                    "filtro": arg_key,
+                    "valor_solicitado": valor,
+                    "valores_disponibles": disponibles[:25],
+                    "nota": (
+                        f"Ningún expediente tiene {arg_key}='{valor}'. Esto NO "
+                        f"significa que no existan casos: significa que ese valor "
+                        f"no coincide con los que usa la base. Revisa la lista de "
+                        f"valores disponibles y vuelve a intentar."
+                    ),
+                }
+                break
+        return salida
+
+    async def _exec_agregar_expedientes(
+        self, args: dict, collector=None, state=None
+    ) -> dict:
+        """
+        Máximos, mínimos y promedios sobre el universo completo.
+
+        Es la respuesta al punto 1 de COFECE: un superlativo no se estima
+        desde una muestra. Aquí se pagina el universo, se calcula de forma
+        determinista y se devuelve cuántos registros se procesaron.
+        """
+        from core.aggregation import agregar, parse_multas, tiene_multa_no_numerica
+
+        operacion = args.get("operacion", "max")
+        metrica = args.get("metrica", "multa")
+        prefijo = args.get("prefijo_expediente")
+
+        # Universo completo. Nunca una muestra: los primeros registros del
+        # acervo son casi todos de CFC, así que cortar por arriba sesga el
+        # resultado y lo vuelve falso, no solo incompleto.
+        # Con AND del servidor, el prefijo viaja como filtro de `caseLink`
+        # (match parcial) en vez de como texto libre: `searchData` es
+        # cross-field y podía colar un expediente que solo *mencionaba* el
+        # prefijo en su mercado relevante.
+        crudos, total_en_base, completo = await self.estadistica.fetch_universe(
+            text_search=None if prefijo else args.get("text_search"),
+            filters={"caseLink": f"{prefijo}-"} if prefijo else None,
+            collector=collector,
+        )
+        registros = [r.model_dump() for r in crudos]
+        if prefijo:
+            p = prefijo.upper().rstrip("-") + "-"
+            registros = [
+                r for r in registros
+                if (r.get("caseLink") or "").upper().startswith(p)
+            ]
+        universo_total = len(registros)
+        registros = self._filtrar_local(registros, args, state)
+
+        # Casos con problemas de fecha; se llena solo en métricas temporales.
+        anomalias_calculo: list[dict] = []
+
+        # Métrica
+        if metrica == "multa":
+            from core.aggregation import parse_monto
+            confidenciales = sum(
+                1 for r in registros if tiene_multa_no_numerica(r.get("agentFines"))
+            )
+            ambiguos = 0
+
+            def extraer(r):
+                nonlocal ambiguos
+                crudo = r.get("agentFines")
+                montos = parse_multas(crudo)
+                valor = max(montos.values()) if montos else None
+
+                # Audit por registro: permite reconstruir el máximo desde los
+                # artifacts sin volver a leer el código, que es justo lo que
+                # COFECE tuvo que hacer para encontrar el bug del parser.
+                estado = "valid" if valor is not None else "excluded"
+                razon = None
+                if valor is None and crudo:
+                    import re as _re
+                    for token in _re.findall(r"[\d][\d,\.]{4,}", str(crudo)):
+                        p = parse_monto(token)
+                        if p["status"] == "ambiguous":
+                            estado, razon = "ambiguous", p["reason"]
+                            ambiguos += 1
+                            if state is not None:
+                                state.anomalias.append({
+                                    "case_link": r.get("caseLink"),
+                                    "field": "agentFines",
+                                    "raw_value": str(crudo)[:120],
+                                    "anomaly_type": "ambiguous_numeric_format",
+                                    "action_taken": "excluded",
+                                })
+                            break
+                if state is not None:
+                    state.computation_audit.append({
+                        "case_link": r.get("caseLink"),
+                        "raw_value": str(crudo)[:120] if crudo else None,
+                        "normalized_value": valor,
+                        "status": estado,
+                        "exclusion_reason": razon,
+                        "value_used": valor is not None,
+                    })
+                return valor
+
+            resultado = agregar(registros, operacion, extraer)
+            if ambiguos:
+                resultado["ADVERTENCIA_VALORES_AMBIGUOS"] = (
+                    f"{ambiguos} expedientes tienen montos con formato ambiguo "
+                    f"(p.ej. '$1,400,000,00', donde no se puede saber si la "
+                    f"última coma es decimal o de millar). Se EXCLUYERON del "
+                    f"cálculo en vez de adivinar. Si el usuario pregunta por un "
+                    f"máximo o mínimo, advierte que esos casos quedaron fuera."
+                )
+            if confidenciales:
+                resultado["ADVERTENCIA_CONFIDENCIALES"] = (
+                    f"{confidenciales} expedientes tienen montos no numéricos "
+                    f"(confidenciales o reservados). El resultado es el "
+                    f"{operacion} de los montos publicados, no necesariamente "
+                    f"el global. Dilo en la respuesta."
+                )
+        else:
+            calculos = self.temporal.compute_between_fields(
+                registros,
+                campo_inicio=args.get("campo_inicio"),
+                campo_fin=args.get("campo_fin", "resolutionDate"),
+            )
+            anomalias_calculo = calculos
+            campo = "dias_habiles" if metrica == "dias_habiles" else "dias_naturales"
+
+            # Audit por registro también para plazos, no solo para montos:
+            # COFECE lo pidió con el formato caseLink | start | end |
+            # business_days | status | exclusion_reason.
+            if state is not None:
+                state.computation_audit.extend([
+                    {
+                        "case_link": c.get("case_link"),
+                        "start_date": c.get("fecha_inicio"),
+                        "end_date": c.get("fecha_fin"),
+                        "campo_inicio": c.get("campo_inicio"),
+                        "campo_fin": c.get("campo_fin"),
+                        "business_days": c.get("dias_habiles"),
+                        "status": "valid" if c.get("calculable") else "excluded",
+                        "exclusion_reason": (
+                            c.get("anomalia")
+                            or (", ".join(c.get("campos_faltantes", []))
+                                if not c.get("calculable") else None)
+                        ),
+                        "value_used": bool(c.get("calculable")),
+                    }
+                    for c in calculos
+                ])
+            por_expediente = {c["case_link"]: c for c in calculos}
+            for r in registros:
+                link = r.get("caseLink", "")
+                r["_calculo"] = por_expediente.get(link, {})
+            resultado = agregar(
+                registros, operacion,
+                lambda r: r.get("_calculo", {}).get(campo),
+            )
+            resultado["campo_inicio"] = args.get("campo_inicio") or "default por tipo"
+            resultado["campo_fin"] = args.get("campo_fin", "resolutionDate")
+            anomalias = [c for c in calculos if c.get("anomalia")]
+            if anomalias:
+                resultado["EXPEDIENTES_CON_FECHAS_INCONSISTENTES"] = {
+                    "count": len(anomalias),
+                    "ejemplos": [c["case_link"] for c in anomalias[:8]],
+                    "nota": (
+                        "Estos expedientes tienen la fecha final ANTES que la "
+                        "inicial en la base. Se excluyeron del cálculo por ser "
+                        "datos inconsistentes, no plazos de cero días. "
+                        "Menciónalo si el usuario pregunta por mínimos."
+                    ),
+                }
+
+        # Los expedientes que ganan un máximo o mínimo necesitan marcador de
+        # cita: si no, el modelo los menciona e inventa [E1]-[E5], que quedan
+        # sin resolver. Pasó en q19.
+        if state is not None and resultado.get("ganadores"):
+            for ganador in resultado["ganadores"]:
+                link = ganador.get("case_link")
+                if not link:
+                    continue
+                original = next(
+                    (r for r in registros if r.get("caseLink") == link), {"caseLink": link}
+                )
+                ganador["ref"] = state.registry.assign(original, "E")
+            resultado["COMO_CITAR"] = (
+                "Los expedientes de 'ganadores' traen su campo `ref`. Cita "
+                "exactamente ese identificador. No inventes [E1], [E2]: si el "
+                "expediente no tiene `ref`, menciónalo sin cita."
+            )
+
+        resultado["universo_recuperado"] = universo_total
+        resultado["universo_tras_filtros"] = len(registros)
+        resultado["total_en_la_base"] = total_en_base
+        resultado["cobertura_completa"] = completo
+        resultado["metrica"] = metrica
+
+        # La afirmación de exhaustividad depende de que el universo se haya
+        # recorrido de verdad. Decir "puedes afirmarlo" cuando la paginación
+        # quedó corta sería fabricar certeza, que es justo lo que se corrige.
+        if completo:
+            # El denominador que se describe en la respuesta tiene que ser el
+            # que usó la herramienta. En v1.7 el promedio se calculó sobre 31
+            # expedientes y la respuesta dijo "35 con ambas fechas": la
+            # matemática estaba bien y el texto la describía mal.
+            procesados = resultado.get("procesados", len(registros))
+            con_valor = resultado.get("con_valor", procesados)
+            sin_valor = resultado.get("sin_valor", 0)
+            # Los expedientes fuera del rango del calendario de días inhábiles
+            # SÍ entran al cálculo, pero con un calendario incompleto: los
+            # días inhábiles anteriores a su cobertura no se conocen, así que
+            # el conteo de días hábiles queda inflado. Callarlo repetiría el
+            # error del fix 3 —la respuesta describiendo mal su propio
+            # cálculo—, esta vez sobre la calidad del insumo y no sobre el
+            # denominador.
+            fuera_cobertura = sum(
+                1 for c in anomalias_calculo if c.get("fuera_de_cobertura")
+            )
+            aviso_cobertura = ""
+            if fuera_cobertura:
+                aviso_cobertura = (
+                    f" Advierte además que {fuera_cobertura} de esos "
+                    f"expedientes caen fuera del rango del calendario de días "
+                    f"inhábiles, así que su plazo en días hábiles es "
+                    f"aproximado y puede estar sobreestimado."
+                )
+            resultado["COMO_DEBES_DESCRIBIR_LA_COBERTURA"] = (
+                f"Se analizaron {procesados} expedientes; {con_valor} tenían la "
+                f"información necesaria y el {operacion} se obtuvo sobre esos "
+                f"{con_valor}"
+                + (f" ({sin_valor} quedaron fuera por falta de datos)." if sin_valor
+                   else ".")
+                + aviso_cobertura
+                + " USA EXACTAMENTE ESTAS CIFRAS: no digas que el cálculo se "
+                  "hizo sobre los expedientes procesados si el denominador real "
+                  "es menor."
+            )
+            resultado["denominador_real"] = con_valor
+            resultado["fuera_de_cobertura_del_calendario"] = fuera_cobertura
+        else:
+            resultado["ADVERTENCIA_COBERTURA_PARCIAL"] = (
+                f"NO se recorrió el universo completo: se revisaron "
+                f"{universo_total} de {total_en_base} expedientes. Este "
+                f"{operacion} es el de la parte revisada, NO el global. "
+                f"Preséntalo así explícitamente y no afirmes 'el mayor' ni "
+                f"'el menor' sin más."
+            )
+        if collector is not None:
+            collector.record_computation({
+                "tool_called": True,
+                "modo": f"agregacion_{operacion}_{metrica}",
+                "convention": {
+                    "excludes_start_day": True, "includes_end_day": True,
+                    "calendar": "por institución del expediente",
+                },
+                # Los casos con fechas inconsistentes tienen que llegar a la
+                # traza: si no, el reporte de anomalías dice "ninguna" cuando
+                # hay 114 expedientes con la resolución antes de la
+                # notificación, y eso es falsa confianza en nuestra propia
+                # herramienta de diagnóstico.
+                "per_case": [
+                    {
+                        "case_link": c.get("case_link"),
+                        "authority": c.get("authority"),
+                        "date_start": c.get("fecha_inicio"),
+                        "date_end": c.get("fecha_fin"),
+                        "business_days": c.get("dias_habiles"),
+                        "anomalia": c.get("anomalia"),
+                        "out_of_coverage": c.get("fuera_de_cobertura", False),
+                        "coverage_note": c.get("nota"),
+                    }
+                    for c in anomalias_calculo
+                    if c.get("anomalia") or c.get("fuera_de_cobertura")
+                ][:200],
+                "stats": {k: v for k, v in resultado.items() if k != "ganadores"},
+            })
+        return resultado
+
+    def _build_expediente_filters(self, args: dict) -> dict:
+        """
+        Filtros con nombres de la API.
+
+        `sentido_resolucion` se incluye pero el cliente NO lo manda al
+        servidor: el match es de valor completo y el alias de SANCION está
+        roto (devuelve 2 de 37). Se resuelve localmente con el matcher
+        tolerante. `has_multas` sí viaja, porque `agentFines` sí funciona.
+        """
         filter_keys = {
             "autoridad": "authority",
             "tipo_procedimiento": "typeOfProcedure",
             "sentido_resolucion": "senseOfResolution",
             "id_expediente": "caseLink",
-            # Rango de años
             "fecha_resolucion_desde": "senseOfResolutionFrom",
             "fecha_resolucion_hasta": "senseOfResolutionTo",
+            "has_multas": "agentFines",
         }
-        for agent_key, api_key in filter_keys.items():
-            if agent_key in args and args[agent_key] is not None:
-                filters[api_key] = args[agent_key]
+        return {
+            api_key: args[agent_key]
+            for agent_key, api_key in filter_keys.items()
+            if args.get(agent_key) is not None
+        }
 
-        # Si piden multas, traer más resultados para filtrar después
-        fetch_limit = limit * 3 if has_multas else limit
+    async def _exec_buscar_expedientes(self, args: dict, collector=None, state=None) -> list:
+        text_search = args.get("text_search")
+        limit = args.get("limit", 50)
+        has_multas = args.get("has_multas")  # triestado: True/False/None
 
-        # text_search se envía como searchData (búsqueda libre cross-field
-        # en caseLink, nombre, agentes económicos y mercados relevantes)
-        results = await self.estadistica.search(
-            text_search=text_search,
-            filters=filters if filters else None,
-            limit=fetch_limit,
-        )
+        filters = self._build_expediente_filters(args)
+        prefijo = args.get("prefijo_expediente")
+        exhaustivo = args.get("exhaustivo", False)
 
-        serialized = [r.model_dump() for r in results]
+        # El sentido de resolución se filtra localmente (alias roto en la API),
+        # así que ahí sí hay que traer de más para no quedarse corto. Las
+        # multas ya las intersecta el servidor con `agentFines`.
+        fetch_limit = limit * 3 if args.get("sentido_resolucion") else limit
 
-        # Post-filtro: has_multas (la API no tiene este filtro nativo,
-        # se filtra localmente por agentFines no vacío)
-        if has_multas:
-            def _has_fines(r: dict) -> bool:
-                fines = r.get("agentFines")
-                if fines is None:
-                    return False
-                if isinstance(fines, dict):
-                    return bool(fines)  # {} = False
-                return str(fines).strip() not in ("", "{}", "None", "null")
+        if prefijo:
+            # Con AND del servidor, el prefijo viaja junto con los demás
+            # filtros en vez de traerse el universo entero y acotar aquí.
+            registros = await self.estadistica.fetch_by_prefix(
+                prefijo, filters=filters, collector=collector
+            )
+            serialized = self._filtrar_local(
+                [r.model_dump() for r in registros], args, state
+            )
+            # Se recorrió el universo completo del prefijo: no hay que
+            # advertir de cobertura parcial aunque los filtros locales
+            # hayan reducido el conjunto.
+            state.universo_completo = not self.estadistica.last_truncado
+            state.universo_tamano = len(registros)
+            if not exhaustivo:
+                serialized = serialized[:fetch_limit]
+                state.universo_completo = (
+                    state.universo_completo
+                    and len(serialized) == len(registros)
+                )
+        elif exhaustivo:
+            results = await self.estadistica.search_all_pages(
+                text_search=text_search,
+                filters=filters if filters else None,
+                collector=collector,
+            )
+            serialized = [r.model_dump() for r in results]
+            # Ya no es una página de 500 sobre un universo mayor: el tope es
+            # el universo completo, así que la exhaustividad se sostiene
+            # salvo que la API haya topado con el límite.
+            state.universo_completo = not self.estadistica.last_truncado
+            state.universo_tamano = len(serialized)
+        else:
+            # text_search se envía como searchData (búsqueda libre cross-field
+            # en caseLink, nombre, agentes económicos y mercados relevantes)
+            results = await self.estadistica.search(
+                text_search=text_search,
+                filters=filters if filters else None,
+                limit=fetch_limit,
+                collector=collector,
+            )
+            serialized = [r.model_dump() for r in results]
+            state.universo_completo = False
 
-            serialized = [r for r in serialized if _has_fines(r)]
+        # El servidor ya intersecta, pero esta pasada sigue haciendo falta: es
+        # la única que aplica `sentido_resolucion`, que no se manda a la API
+        # porque su alias está roto. Sobre lo demás es idempotente, y deja el
+        # linaje de filtros que pidió COFECE. En q09 "fideicomiso + COFECE"
+        # devolvió expedientes de CFC presentados como si fueran de COFECE
+        # porque esta ruta no pasaba por aquí.
+        if not prefijo and filters:
+            serialized = self._filtrar_local(serialized, args, state)
+
+        # Verificación de multas. Desde sep-2026 el servidor ya intersecta con
+        # `agentFines` (true → 191, false → 4,471, suman el universo exacto),
+        # así que esta pasada es idempotente; se conserva porque es la que
+        # deja el linaje del filtro en la traza y porque comprueba que la
+        # noción de "tiene multa" del servidor coincide con la nuestra.
+        # Sigue siendo triestado y hay que respetarlo:
+        #   True  → solo expedientes CON multa
+        #   False → solo expedientes SIN multa
+        #   None  → no filtrar
+        # Antes `if has_multas:` trataba False igual que ausencia, así que al
+        # pedir "VCN sin multa" llegaban los 35 al modelo para que dedujera
+        # cuáles no tenían — y se inventó uno que no estaba en la evidencia.
+        if has_multas is not None:
+            antes = len(serialized)
+            serialized = [
+                r for r in serialized if _tiene_multa(r) is bool(has_multas)
+            ]
+            state.filtros_aplicados.append({
+                "filtro": "has_multas",
+                "valor_recibido": has_multas,
+                "universo_antes": antes,
+                "universo_despues": len(serialized),
+                "descartados": antes - len(serialized),
+            })
             serialized = serialized[:limit]
+
+        # Guardado para usar_ultima_busqueda, que evita que el modelo tenga
+        # que devolver el arreglo completo y truncar sus propios argumentos.
+        state.last_expedientes = serialized
+
+        if collector is not None:
+            collector.record_stage(
+                stage="in_context",
+                method=(f"post_filter(has_multas={has_multas})"
+                        if has_multas is not None else "serialize_full"),
+                docs=serialized,
+                notes=(
+                    "has_multas lo intersecta la API con agentFines; esta "
+                    "pasada local lo verifica y deja el linaje."
+                    if has_multas is not None else None
+                ),
+            )
+            collector.add_docs_in_context([
+                {
+                    "doc_id": str(r.get("id", "")),
+                    "case_link": r.get("caseLink", ""),
+                    "source_type": "estadistica",
+                    "chars_in_context": len(json.dumps(r, default=str)),
+                    "chars_full": len(json.dumps(r, default=str)),
+                    "truncated": False,
+                }
+                for r in serialized
+            ])
 
         return serialized
 
-    async def _exec_calcular_plazos(self, args: dict) -> dict:
-        expedientes = args.get("expedientes", [])
-        enriched = self.temporal.enrich_with_plazos(expedientes)
+    async def _exec_calcular_plazos(self, args: dict, collector=None, state=None) -> dict:
+        # ── Modo A: dos fechas sueltas ──────────────────────
+        # Antes no existía: ante "¿cuántos días hábiles entre X e Y?" el modelo
+        # no tenía herramienta que llamar y estimaba de memoria.
+        f_ini = args.get("fecha_inicio_explicita")
+        f_fin = args.get("fecha_fin_explicita")
+        if f_ini and f_fin:
+            return self._calcular_entre_fechas(
+                f_ini, f_fin, args.get("institucion", "COFECE"), collector
+            )
 
-        plazo_field = "dias_habiles_notif_resol"
-        fecha_inicio = args.get("fecha_inicio", "fecha_notificacion")
-        if fecha_inicio == "fecha_admision":
-            plazo_field = "dias_habiles_admis_resol"
+        # ── Modo B: expedientes ─────────────────────────────
+        expedientes = args.get("expedientes") or []
+        if args.get("usar_ultima_busqueda") or not expedientes:
+            if state and state.last_expedientes:
+                expedientes = state.last_expedientes
+        if not expedientes:
+            return {
+                "error": "No hay expedientes sobre los que calcular.",
+                "sugerencia": (
+                    "Usa fecha_inicio_explicita y fecha_fin_explicita para dos "
+                    "fechas sueltas, o llama primero a buscar_expedientes."
+                ),
+            }
+
+        # Calculadora general entre cualquier par de campos de fecha. Antes
+        # estaba cableada a notificación → resolución, que NO EXISTE en VCN.
+        calculos = self.temporal.compute_between_fields(
+            expedientes,
+            campo_inicio=args.get("campo_inicio"),
+            campo_fin=args.get("campo_fin", "resolutionDate"),
+        )
+        enriched = []
+        for rec, calc in zip(expedientes, calculos):
+            entrada = dict(rec)
+            entrada.update({
+                "dias_habiles": calc["dias_habiles"],
+                "dias_naturales": calc["dias_naturales"],
+                "campo_inicio": calc["campo_inicio"],
+                "campo_fin": calc["campo_fin"],
+                "calculable": calc["calculable"],
+            })
+            enriched.append(entrada)
+
+        plazo_field = "dias_habiles"
 
         result = {"total_expedientes": len(enriched)}
 
@@ -460,20 +1315,272 @@ class NormaPlusAgent:
                 data_for_stats, plazo_field=plazo_field
             )
 
+        no_calculables = [c for c in calculos if not c["calculable"]]
+        if no_calculables:
+            result["NO_CALCULABLES"] = {
+                "count": len(no_calculables),
+                "detalle": no_calculables[:10],
+                "nota": (
+                    "Estos expedientes no tienen alguna de las dos fechas. NO "
+                    "estimes su plazo: repórtalos como no disponibles, o usa "
+                    "otro par de campos si la pregunta lo permite."
+                ),
+            }
+
+        if collector is not None:
+            collector.record_computation({
+                "tool_called": True,
+                "modo": "entre_campos",
+                "convention": {
+                    "excludes_start_day": True,
+                    "includes_end_day": True,
+                    "calendar": "por institución del expediente (authority)",
+                    "campo_inicio": args.get("campo_inicio") or "default por tipo",
+                    "campo_fin": args.get("campo_fin", "resolutionDate"),
+                },
+                "per_case": [
+                    {**c, "date_start": c["fecha_inicio"], "date_end": c["fecha_fin"],
+                     "business_days": c["dias_habiles"],
+                     "calendar_days": c["dias_naturales"],
+                     "out_of_coverage": c.get("fuera_de_cobertura", False),
+                     "coverage_note": None}
+                    for c in calculos[:200]
+                ],
+                "stats": result.get("stats"),
+            })
+
         return result
+
+    def _calcular_entre_fechas(
+        self, f_ini: str, f_fin: str, institucion: str, collector=None,
+    ) -> dict:
+        """Cómputo entre dos fechas sueltas, con el calendario oficial."""
+        d_ini = self.temporal._parse_date(f_ini)
+        d_fin = self.temporal._parse_date(f_fin)
+        if not d_ini or not d_fin:
+            return {"error": f"No pude interpretar las fechas: '{f_ini}', '{f_fin}'."}
+
+        cal = self.temporal.cal
+        habiles = cal.business_days_between(d_ini, d_fin, institucion)
+        naturales = (d_fin - d_ini).days
+        cubierto = cal.is_covered(d_ini, institucion) and cal.is_covered(d_fin, institucion)
+
+        resultado = {
+            "fecha_inicio": d_ini.isoformat(),
+            "fecha_fin": d_fin.isoformat(),
+            "dias_habiles": habiles,
+            "dias_naturales": naturales,
+            "institucion": institucion,
+            "convencion": "excluye el día inicial, incluye el día final",
+            "dentro_de_cobertura_del_calendario": cubierto,
+        }
+        if not cubierto:
+            resultado["ADVERTENCIA"] = (
+                f"Alguna de las fechas cae fuera del rango del catálogo de días "
+                f"inhábiles para {institucion} "
+                f"({cal.coverage_ranges().get(institucion.upper())}). "
+                f"El conteo puede ser incorrecto: avísale al usuario."
+            )
+
+        if collector is not None:
+            collector.record_computation({
+                "tool_called": True,
+                "modo": "fechas_explicitas",
+                "convention": {
+                    "excludes_start_day": True,
+                    "includes_end_day": True,
+                    "calendar": institucion,
+                },
+                "per_case": [{
+                    "case_link": None,
+                    "authority": institucion,
+                    "date_start": d_ini.isoformat(),
+                    "date_field_start": "explicita",
+                    "date_end": d_fin.isoformat(),
+                    "date_field_end": "explicita",
+                    "business_days": habiles,
+                    "calendar_days": naturales,
+                    "out_of_coverage": not cubierto,
+                    "coverage_note": resultado.get("ADVERTENCIA"),
+                }],
+                "stats": None,
+            })
+        return resultado
+
+    def _describe_computation(
+        self, enriched: list[dict], plazo_field: str,
+        fecha_inicio: str, stats: dict | None,
+    ) -> dict:
+        """
+        Audita el cómputo de plazos caso por caso.
+
+        Registra dos cosas que hoy no se pueden ver desde fuera: la convención
+        de conteo vigente, y si la fecha cayó fuera del rango del catálogo de
+        días inhábiles para esa institución — en cuyo caso los fines de semana
+        se cuentan como hábiles y el plazo no es confiable.
+        """
+        cal = getattr(self.temporal, "cal", None)
+        start_field = (
+            "admissionDate" if fecha_inicio == "fecha_admision" else "notificationDate"
+        )
+
+        per_case = []
+        for rec in enriched:
+            authority = rec.get("authority") or rec.get("autoridad")
+            d_start = self.temporal._parse_date(
+                rec.get(start_field) or rec.get(fecha_inicio)
+            )
+            d_end = self.temporal._parse_date(
+                rec.get("resolutionDate") or rec.get("fecha_resolucion")
+            )
+            out_of_coverage = False
+            note = None
+            if cal is not None and d_start and d_end:
+                covered = cal.is_covered(d_start, authority) and \
+                    cal.is_covered(d_end, authority)
+                if not covered:
+                    out_of_coverage = True
+                    ranges = cal.coverage_ranges().get(
+                        (authority or "ALL").upper(), []
+                    )
+                    note = (
+                        f"Fechas fuera del rango del catálogo para "
+                        f"{authority or 'ALL'} ({ranges}); los fines de semana "
+                        f"fuera de rango se contaron como hábiles."
+                    )
+            per_case.append({
+                "case_link": rec.get("caseLink") or rec.get("id_expediente", ""),
+                "authority": authority,
+                "date_start": d_start.isoformat() if d_start else None,
+                "date_field_start": start_field,
+                "date_end": d_end.isoformat() if d_end else None,
+                "date_field_end": "resolutionDate",
+                "business_days": rec.get(plazo_field),
+                "calendar_days": rec.get("dias_calendario_notif_resol"),
+                "out_of_coverage": out_of_coverage,
+                "coverage_note": note,
+            })
+
+        return {
+            "tool_called": True,
+            "convention": {
+                # Regla general confirmada por COFECE: excluir el día inicial,
+                # incluir el final (temporal/holidays.py: business_days_between).
+                "excludes_start_day": True,
+                "includes_end_day": True,
+                "calendar": "por institución del expediente (authority)",
+                "plazo_field": plazo_field,
+            },
+            "per_case": per_case[:200],
+            "stats": stats,
+        }
 
     # ── Helpers ─────────────────────────────────────────────
 
-    def _serialize_tool_result(self, tool_name: str, result) -> dict | list:
-        """Serializa resultado de tool para el LLM."""
+    def _serialize_tool_result(self, tool_name: str, result, state=None) -> dict | list:
+        """
+        Serializa resultado de tool para el LLM.
+
+        Cada documento sale con su marcador de cita ya asignado (`ref`). El
+        modelo cita ese marcador tal cual, así que resolver una cita después
+        es una búsqueda en un diccionario y no una inferencia por posición.
+        Antes se adivinaba, y con dos búsquedas en un turno la cita podía
+        acabar apuntando a otro expediente.
+        """
         if isinstance(result, dict):
             return result
         if isinstance(result, list):
-            return {"results": result, "count": len(result)}
+            if state is not None and tool_name in (
+                "buscar_criterios", "buscar_expedientes"
+            ):
+                kind = "C" if tool_name == "buscar_criterios" else "E"
+                result = [
+                    {"ref": state.registry.assign(doc, kind), **doc}
+                    for doc in result if isinstance(doc, dict)
+                ]
+            payload = {"results": result, "count": len(result)}
+
+            # Suficiencia: si lo recuperado no responde la pregunta, decirlo.
+            # Una segunda búsqueda focalizada; si tampoco alcanza, abstenerse.
+            if tool_name == "buscar_criterios" and state is not None:
+                ultimo = (
+                    state.sufficiency_checks[-1]
+                    if state.sufficiency_checks else None
+                )
+                if ultimo and not ultimo.get("sufficient"):
+                    faltan = ", ".join(ultimo.get("missing_terms", [])[:6])
+                    sin_respaldo = [
+                        c["descripcion"] for c in ultimo.get("components", [])
+                        if c["estado"] != "SUFFICIENT" and c["requiere_evidencia"]
+                    ]
+                    payload["EVIDENCE_CHECK"] = {
+                        "overall": ultimo.get("overall"),
+                        "componentes": ultimo.get("components"),
+                        "intento": ultimo.get("intento"),
+                    }
+                    if state.abstention_reason:
+                        payload["EVIDENCIA_INSUFICIENTE_SEPARA_PROCEDENCIA"] = (
+                            f"Después de dos búsquedas, la evidencia recuperada "
+                            f"NO sostiene: {'; '.join(sin_respaldo)}. "
+                            f"Puedes explicar el concepto con tu conocimiento "
+                            f"general —es útil y está permitido— pero márcalo "
+                            f"como [CONOCIMIENTO GENERAL] y di aparte qué "
+                            f"encontraste en los precedentes. NO escribas "
+                            f"'COFECE ha definido que...' si lo recuperado no "
+                            f"lo demuestra."
+                        )
+                    else:
+                        payload["EVIDENCIA_INSUFICIENTE_REINTENTA"] = (
+                            f"Lo recuperado no sostiene: "
+                            f"{'; '.join(sin_respaldo) or faltan}. Haz UNA "
+                            f"segunda búsqueda focalizada con otros términos "
+                            f"—sinónimos, formulación jurídica— antes de "
+                            f"responder."
+                        )
+
+            # El modelo no tenía forma de saber que su búsqueda estaba
+            # truncada: recibía 50 de 1,796 sin enterarse y respondía con
+            # falsa certeza. Ahora se le dice explícitamente.
+            if tool_name == "buscar_expedientes":
+                # Listado ya numerado y sin duplicados. En v1.3 el agente
+                # recuperó 36 expedientes, escribió 36 renglones y solo tenía
+                # 34 únicos: dos duplicados y una omisión. Se le entrega hecho
+                # para que lo reproduzca en vez de rearmarlo de memoria.
+                if result and len(result) > 5:
+                    from core.aggregation import render_listado
+                    listado = render_listado(result)
+                    payload["LISTADO_CANONICO"] = listado
+                    payload["LISTADO_CANONICO_COUNT"] = listado.count("\n") + 1 if listado else 0
+                    payload["INSTRUCCION_LISTADO"] = (
+                        "Si vas a enumerar estos expedientes, reproduce "
+                        "LISTADO_CANONICO tal cual. Ya está deduplicado y "
+                        "numerado. No lo rearmes tú: en pruebas anteriores eso "
+                        "produjo duplicados y omisiones."
+                    )
+                # Un filtro que no coincidió con nada NO significa "no existen
+                # casos". Sin este aviso el agente concluye que no hay ninguno.
+                vacio = state.filtro_vacio if state else None
+                if vacio:
+                    payload["FILTRO_SIN_COINCIDENCIAS"] = vacio
+                total = getattr(self.estadistica, "last_total", None)
+                if state and state.universo_completo:
+                    payload["universo_completo_revisado"] = True
+                    payload["total_del_universo"] = state.universo_tamano
+                elif total is not None:
+                    payload["total_en_la_base"] = total
+                    if len(result) < total:
+                        payload["ADVERTENCIA_COBERTURA"] = (
+                            f"Solo estás viendo {len(result)} de {total} expedientes "
+                            f"que cumplen estos filtros. NO puedes afirmar 'todos', "
+                            f"'el mayor', 'el menor' ni un conteo con esta muestra. "
+                            f"Vuelve a llamar con exhaustivo=true, o dile al usuario "
+                            f"explícitamente sobre cuántos expedientes te basaste."
+                        )
+            return payload
         return {"result": str(result)}
 
     def _prepare_messages_for_stream(
-        self, messages: list[dict], provider: str,
+        self, messages: list[dict], provider: str, collector=None,
     ) -> list[LLMMessage]:
         """
         Convierte mensajes dict (que pueden contener tool_calls/tool_results
@@ -485,6 +1592,16 @@ class NormaPlusAgent:
         respuesta final.
         """
         clean: list[LLMMessage] = []
+        # Esta ruta condensa cada resultado de herramienta a ~200-500 chars:
+        # el modelo redacta la respuesta final sin ver la evidencia completa
+        # que acababa de recuperar. Se marca en la traza para poder medir su
+        # efecto sobre la calidad de las respuestas.
+        if collector is not None and any(
+            isinstance(m.get("content"), list) or m.get("role") == "tool"
+            or (m.get("content") is None and m.get("tool_calls"))
+            for m in messages
+        ):
+            collector.set_decision("context_condensed", True, "derived")
 
         for m in messages:
             role = m.get("role", "user")
@@ -583,13 +1700,26 @@ class NormaPlusAgent:
             return f"Buscando criterios sobre: {args.get('query', '')}"
         elif name == "buscar_expedientes":
             return self._describe_expedientes_search(args)
+        elif name == "contar_expedientes":
+            prefijo = args.get("prefijo_expediente")
+            return f"Contando expedientes{f' {prefijo}' if prefijo else ''}..."
         elif name == "calcular_plazos":
-            n = len(args.get("expedientes", []))
+            if args.get("fecha_inicio_explicita"):
+                return (
+                    f"Calculando días hábiles entre "
+                    f"{args['fecha_inicio_explicita']} y "
+                    f"{args.get('fecha_fin_explicita', '?')}..."
+                )
+            n = len(args.get("expedientes") or [])
             return f"Calculando plazos en días hábiles para {n} expedientes..."
         return f"Ejecutando {name}"
 
     def _describe_expedientes_search(self, args: dict) -> str:
         parts = ["Buscando expedientes"]
+        if args.get("prefijo_expediente"):
+            parts.append(args["prefijo_expediente"])
+        if args.get("exhaustivo"):
+            parts.append("(universo completo)")
         if args.get("text_search"):
             parts.append(f"con '{args['text_search']}'")
         if args.get("sentido_resolucion"):
@@ -625,3 +1755,60 @@ class NormaPlusAgent:
             max_tokens=20,
         )
         return title.strip()[:100]
+
+
+def _normalizar(valor) -> str:
+    """Minúsculas, sin acentos y sin puntuación, para comparar etiquetas."""
+    import unicodedata
+    s = str(valor or "").strip().lower()
+    s = "".join(
+        c for c in unicodedata.normalize("NFD", s)
+        if unicodedata.category(c) != "Mn"
+    )
+    return " ".join(s.replace("/", " ").replace(",", " ").split())
+
+
+def _coincide(valor: str, objetivo: str) -> bool:
+    """
+    Coincidencia tolerante: igualdad, contención, o que compartan las
+    palabras significativas. El modelo no reproduce las etiquetas literales.
+    """
+    if not valor or not objetivo:
+        return False
+    if valor == objetivo or objetivo in valor or valor in objetivo:
+        return True
+    # La negación decide el sentido de la resolución y NO puede tratarse como
+    # palabra vacía: "NO SE ACREDITÓ INCUMPLIMIENTO" y "SANCIÓN/ACREDITACIÓN
+    # DEL INCUMPLIMIENTO" comparten casi todas las palabras y significan lo
+    # contrario. Si una lado niega y el otro no, no coinciden.
+    NEGACIONES = {"no", "sin", "ningun", "ninguna", "improcedente", "niega"}
+    niega = lambda t: bool(NEGACIONES & set(t.split()))
+    if niega(valor) != niega(objetivo):
+        return False
+
+    # Se compara por raíz de 6 caracteres: el modelo escribe "acreditado"
+    # donde la base dice "acreditó", y palabra completa no las une.
+    vacias = {"de", "del", "la", "el", "los", "las", "en", "se", "al", "y"}
+    raices = lambda t: {
+        p[:6] for p in t.split() if p not in vacias and len(p) > 2
+    }
+    pv, po = raices(valor), raices(objetivo)
+    if not pv or not po:
+        return False
+    return len(pv & po) / len(po) >= 0.6
+
+
+def _tiene_multa(registro: dict) -> bool:
+    """
+    ¿Este expediente tiene multa registrada?
+
+    Con datos legacy, un campo vacío puede significar "sin multa" o "no
+    extraído todavía". Aquí se interpreta como "sin multa", que es lo que
+    permite responder la pregunta; la ambigüedad se advierte en la respuesta.
+    """
+    fines = registro.get("agentFines")
+    if fines is None:
+        return False
+    if isinstance(fines, dict):
+        return bool(fines)
+    return str(fines).strip() not in ("", "{}", "None", "null")

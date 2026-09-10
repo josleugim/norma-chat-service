@@ -9,6 +9,7 @@ Carga desde un archivo XLSX con las columnas:
 El archivo ya incluye fines de semana como registros, por lo que
 is_business_day() solo necesita verificar si la fecha está en el set.
 """
+import hashlib
 import logging
 from datetime import date, timedelta
 from pathlib import Path
@@ -26,11 +27,20 @@ class HolidayCalendar:
         self.cna_holidays: set[date] = set()
         # Metadata por fecha: {date: [{tipo, institucion, fundamento}]}
         self.metadata: dict[date, list[dict]] = {}
+        # Trazabilidad: hash del catálogo cargado, para versionar la corrida
+        self.source_sha256: str | None = None
 
         self._load(holidays_path)
 
     def _load(self, path: str):
         file_path = Path(path)
+        if file_path.exists():
+            try:
+                self.source_sha256 = hashlib.sha256(
+                    file_path.read_bytes()
+                ).hexdigest()[:12]
+            except OSError as e:
+                logger.warning(f"No se pudo hashear {path}: {e}")
         if not file_path.exists():
             logger.warning(
                 f"Archivo de días inhábiles no encontrado: {path}. "
@@ -103,12 +113,27 @@ class HolidayCalendar:
             institucion: "COFECE" o "CNA" para calendario específico.
                          None usa el calendario combinado (ambas).
         """
+        # Calendario de la institución, PERO solo dentro de su rango.
+        #
+        # Antes esta rama hacía `d not in self.cofece_holidays` sin más, y
+        # fuera del rango eso devuelve True para todos los días —sábados y
+        # domingos incluidos—, porque el archivo simplemente no los tiene.
+        # El plazo degradaba a contar días naturales: un periodo de 4 semanas
+        # en feb-2026 daba 28 días hábiles en vez de 20.
+        #
+        # No es hipotético a plazo largo: el catálogo de COFECE termina el
+        # 17-nov-2025 y el acervo se sigue cargando. En cuanto entren
+        # resoluciones posteriores, todos sus plazos salen inflados ~40%.
+        #
+        # Fuera del rango de su institución se cae al calendario combinado,
+        # que sí tiene fallback de fin de semana y que además cubre el hueco
+        # con los registros de la otra institución: CNA cubre
+        # 2025-10-18 → 2026-12-27, justo lo que a COFECE le falta, y los días
+        # festivos nacionales son los mismos.
         if institucion:
-            inst = institucion.strip().upper()
-            if inst == "COFECE":
-                return d not in self.cofece_holidays
-            elif inst == "CNA":
-                return d not in self.cna_holidays
+            dates = self._holidays_for(institucion)
+            if dates and min(dates) <= d <= max(dates):
+                return d not in dates
 
         # Calendario combinado: si está en el set de CUALQUIER
         # institución, es inhábil. Para fechas fuera del rango del
@@ -125,16 +150,29 @@ class HolidayCalendar:
     def business_days_between(
         self, start: date, end: date,
         institucion: str | None = None,
+        include_end: bool = True,
     ) -> int:
         """
         Cuenta días hábiles entre dos fechas.
-        Excluye ambos extremos (convención de plazos procesales mexicanos).
+
+        Convención por defecto (regla general de plazos procesales, confirmada
+        por COFECE el 11-ago-2026): **se excluye el día inicial y se incluye el
+        día final.** El día que origina el plazo no cuenta; el siguiente es el
+        día 1.
+
+        Antes se excluían ambos extremos, lo que subcontaba un día cada vez que
+        la fecha final era hábil. Ejemplo del reporte: del 21-dic-2018 al
+        24-ene-2019 devolvía 13; lo correcto bajo esta regla son 14.
+
+        Args:
+            include_end: False vuelve a la convención anterior (excluir ambos
+                         extremos), para los casos en que se solicite otra cosa.
         """
         if start >= end:
             return 0
         count = 0
         current = start + timedelta(days=1)
-        while current < end:
+        while current < end or (include_end and current == end):
             if self.is_business_day(current, institucion):
                 count += 1
             current += timedelta(days=1)
@@ -156,3 +194,43 @@ class HolidayCalendar:
     def get_holiday_info(self, d: date) -> list[dict] | None:
         """Retorna metadata del día inhábil, o None si es hábil."""
         return self.metadata.get(d)
+
+    # ── Cobertura del catálogo (para trazabilidad) ──────────────
+
+    def _holidays_for(self, institucion: str | None) -> set[date]:
+        if institucion:
+            inst = institucion.strip().upper()
+            if inst == "COFECE":
+                return self.cofece_holidays
+            if inst == "CNA":
+                return self.cna_holidays
+        return self.all_holidays
+
+    def coverage_ranges(self) -> dict[str, list[str]]:
+        """
+        Rango de fechas cubierto por el catálogo, por institución.
+
+        Importa porque la cobertura es desigual (COFECE y CNA no cubren los
+        mismos años) y fuera de rango el cálculo de días hábiles degrada.
+        """
+        ranges: dict[str, list[str]] = {}
+        for name, dates in (
+            ("COFECE", self.cofece_holidays),
+            ("CNA", self.cna_holidays),
+            ("ALL", self.all_holidays),
+        ):
+            if dates:
+                ranges[name] = [min(dates).isoformat(), max(dates).isoformat()]
+        return ranges
+
+    def is_covered(self, d: date, institucion: str | None = None) -> bool:
+        """
+        True si la fecha cae dentro del rango del catálogo para esa institución.
+
+        Fuera de rango, `is_business_day` no tiene datos y los fines de semana
+        pueden contarse como hábiles: el plazo resultante no es confiable.
+        """
+        dates = self._holidays_for(institucion)
+        if not dates:
+            return False
+        return min(dates) <= d <= max(dates)
