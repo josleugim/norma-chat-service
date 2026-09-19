@@ -4,10 +4,10 @@ Pruebas de la trazabilidad estructurada.
 Lo que se garantiza aquí:
 
 1. La traza se escribe con todos sus bloques.
-2. `coverage.truncated` se enciende cuando la respuesta pudo construirse
-   sobre una fracción del universo. Sin `meta.total` en la API nueva, la
-   señal es `returned == limit`, y el total se deja en None en vez de
-   inventarlo.
+2. `coverage.truncated` se enciende cuando la respuesta se construyó sobre una
+   fracción del universo, y `total_available` dice cuánto quedó fuera. Si la
+   API dejara de mandar `meta.total`, se degrada a `returned == limit` y el
+   total queda en None en vez de inventarse.
 3. `context_condensed` se enciende en la ruta de streaming, que es donde el
    modelo redacta sin ver la evidencia completa.
 4. `out_of_coverage` detecta plazos calculados fuera del rango del catálogo.
@@ -427,14 +427,13 @@ class TestAgentTracing:
         trace = read_trace(tmp_path)
         cov = [s for s in trace["steps"] if s["kind"] == "tool_call"][0]["coverage"]
         assert cov["returned"] == 1
-        # `agent-search` no expone `meta.total`, así que no hay un universo
-        # contra el cual comparar: la señal es que la API devolvió justo el
-        # tope pedido. Y precisamente por eso no se afirma ningún total —
-        # inventar uno sería la falsa certeza que este test vigila.
+        # Con `meta.total` de vuelta (9-sep-2026), la traza no solo marca que
+        # la respuesta se cortó: registra cuánto universo quedó fuera. Entre
+        # el 7 y el 9 esto se infería de `returned == limit`, y el motivo
+        # queda anotado para poder distinguir las dos épocas.
         assert cov["truncated"] is True
-        assert cov["total_available"] is None
-        assert cov["truncated"] is True
-        assert cov["truncation_reason"] == "returned==limit"
+        assert cov["total_available"] > 1
+        assert cov["truncation_reason"] == "meta.total"
 
     @pytest.mark.asyncio
     async def test_context_condensed_en_ruta_de_streaming(self, tmp_path):

@@ -266,11 +266,11 @@ class TestMockServerFormat:
         assert r.status_code == 401
 
     @pytest.mark.asyncio
-    async def test_meta_no_trae_total_ni_paginacion(self):
+    async def test_meta_trae_total_pero_no_paginacion(self):
         """
-        `meta` trae solo `returned` y `limit`. No hay `total`, `page` ni
-        `totalPages`: la paginación desapareció y el truncamiento hay que
-        inferirlo de `returned == limit`.
+        `meta` trae `total`, `returned` y `limit`. El `total` volvió el
+        9-sep-2026 a petición nuestra; `page` y `totalPages` no: la paginación
+        desapareció con el endpoint nuevo.
         """
         import httpx
         async with httpx.AsyncClient() as c:
@@ -280,6 +280,6 @@ class TestMockServerFormat:
 
         assert "data" in data
         meta = data["meta"]
-        assert set(meta) == {"returned", "limit"}
+        assert set(meta) == {"total", "returned", "limit"}
         assert meta["limit"] == 2
         assert meta["returned"] == len(data["data"])

@@ -13,11 +13,11 @@ llave. Tres diferencias del endpoint nuevo cambian el diseño del cliente:
 2. **No existe `page`.** La paginación desapareció. En cambio `limit` no tiene
    tope: `limit=5000` devuelve los 4,662 expedientes en ~3 s y 2.1 MB.
 
-3. **No existe `meta.total`.** `meta` trae solo `returned` y `limit`, así que
-   el truncamiento se infiere de `returned == limit`. Es una estimación, no un
-   dato: si el universo mide exactamente `limit`, se ve truncado sin estarlo.
-   Por eso `last_total` solo se llena cuando la respuesta es demostrablemente
-   completa, y queda en None cuando pudo haberse cortado.
+3. **`meta.total` volvió el 9-sep-2026**, a petición nuestra. Entre el 7 y el 9
+   el endpoint solo traía `returned` y `limit`, y el truncamiento había que
+   inferirlo de `returned == limit` — una estimación, no un dato. Ahora se lee
+   el total real. El camino de respaldo sigue ahí por si desaparece otra vez, y
+   la traza registra en `truncation_reason` cuál de los dos se usó.
 
 Y una trampa que obliga a validar de este lado: **los nombres de parámetro mal
 escritos se ignoran en silencio.** Verificado: `?aplicableLaw=...` (con una
@@ -32,6 +32,14 @@ import httpx
 from models.schemas import ExpedienteRecord
 
 logger = logging.getLogger(__name__)
+
+
+class BusquedaFallidaError(RuntimeError):
+    """
+    La búsqueda no se completó. Se levanta en vez de devolver una lista vacía
+    porque "la API falló" y "no hay resultados" son cosas distintas, y
+    confundirlas hace que el agente afirme que un expediente no existe.
+    """
 
 
 class FiltroDesconocidoError(ValueError):
@@ -97,6 +105,14 @@ CAMPOS_TEXTO = frozenset({
 # El universo completo cabe en una petición; este es el techo por defecto.
 LIMIT_UNIVERSO = 5000
 
+# A partir de este tope, la petición trae el acervo entero y necesita otro
+# timeout. No es un detalle de afinación: cuando José Miguel repuso los seis
+# campos que faltaban, la respuesta pasó de 2.1 MB a 7.6 MB y de ~3 s a 7-18 s,
+# con el arranque en frío en el extremo alto. Con el timeout de 10 s que
+# traíamos, el censo del acervo empezó a fallar por ReadTimeout.
+LIMIT_PETICION_GRANDE = 1000
+TIMEOUT_PETICION_GRANDE = 120.0
+
 
 class EstadisticaSearchClient:
 
@@ -105,15 +121,19 @@ class EstadisticaSearchClient:
         base_url: str,
         api_key: str = "",
         timeout: float = 15.0,
+        timeout_grande: float = TIMEOUT_PETICION_GRANDE,
     ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
+        # Traer el universo completo es otra clase de petición que buscar diez
+        # expedientes; medirlas con el mismo reloj hacía fallar la primera.
+        self.timeout_grande = timeout_grande
 
-        # Total EXACTO del universo que cumple los filtros, o None si la
-        # respuesta pudo quedar truncada. Sin `meta.total` no hay forma de
-        # saberlo cuando `returned == limit`, y afirmar cobertura completa a
-        # partir de una estimación es justo el error que perseguimos.
+        # Total de coincidencias que cumplen los filtros, leído de
+        # `meta.total`. Queda en None solo si la API dejara de mandarlo y la
+        # respuesta pudo cortarse: afirmar cobertura completa a partir de una
+        # estimación es justo el error que perseguimos.
         self.last_total: int | None = None
         self.last_returned: int = 0
         self.last_limit: int | None = None
@@ -216,24 +236,41 @@ class EstadisticaSearchClient:
         if collector is not None:
             collector.record_http_request("GET", url, params=dict(params))
 
+        espera = (
+            self.timeout_grande if limit >= LIMIT_PETICION_GRANDE
+            else self.timeout
+        )
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(timeout=espera) as client:
                 resp = await client.get(url, params=params, headers=headers)
                 resp.raise_for_status()
                 data = resp.json()
-        except httpx.ConnectError:
-            logger.warning("Endpoint de casos no disponible.")
+        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+            # Un fallo de la búsqueda NO es "no hay resultados".
+            #
+            # Antes esto devolvía `[]` y el agente concluía que el expediente
+            # no existía. Visto en producción el 9-sep-2026: `/cases/search`
+            # empezó a responder 401, el cliente lo tragó, y el chat contestó
+            # *"es posible que el expediente no exista"* sobre IO-001-2019, un
+            # caso real con multas por más de 15 millones que el propio
+            # explorador de normaplus.ai muestra sin problema.
+            #
+            # Afirmar inexistencia a partir de una falla de infraestructura es
+            # el peor error que puede cometer este agente, y es el que COFECE
+            # nos marcó desde la primera ronda. Ahora se levanta la excepción:
+            # el despachador de herramientas la convierte en un error visible
+            # para el modelo y para la traza, y el agente dice que la búsqueda
+            # falló en vez de inventar un vacío.
+            detalle = f"{type(e).__name__}: {e}".rstrip(": ")
+            logger.error(f"Búsqueda de expedientes fallida: {detalle}")
             if collector is not None:
-                collector.add_error("estadistica_client", "ConnectError")
+                collector.add_error("estadistica_client", detalle)
             self._reset_cobertura()
-            return []
-        except httpx.HTTPStatusError as e:
-            logger.warning(f"Error en endpoint de casos: {e}")
-            if collector is not None:
-                collector.add_error("estadistica_client",
-                                    f"{type(e).__name__}: {e}")
-            self._reset_cobertura()
-            return []
+            raise BusquedaFallidaError(
+                f"La búsqueda de expedientes falló ({detalle}). NO se puede "
+                f"concluir que no existan resultados: la consulta nunca se "
+                f"completó."
+            ) from e
 
         items = data.get("data", []) if isinstance(data, dict) else data
         meta = data.get("meta", {}) if isinstance(data, dict) else {}
@@ -256,12 +293,26 @@ class EstadisticaSearchClient:
         tope = int(meta.get("limit", limit) or limit)
         self.last_returned = devueltos
         self.last_limit = tope
-        # Sin `meta.total`, la igualdad con el tope es la única señal de corte.
-        self.last_truncado = devueltos >= tope
-        # Solo se afirma un total cuando la API demostró haber devuelto todo
-        # lo que cumple los filtros: `returned < limit`.
-        self.last_total = None if self.last_truncado else devueltos
         self.last_pages_fetched = 1
+
+        # `meta.total` volvió el 9-sep-2026, a petición nuestra. Es el número
+        # de coincidencias reales, independiente del tope, así que el
+        # truncamiento deja de ser una inferencia y pasa a ser un hecho: se
+        # sabe cuánto quedó fuera, no solo que *pudo* quedar algo.
+        total = meta.get("total")
+        if total is not None:
+            self.last_total = int(total)
+            self.last_truncado = devueltos < self.last_total
+        else:
+            # Respaldo por si la API vuelve a dejar de mandarlo: `returned ==
+            # limit` es lo único que queda, y es una estimación. No se afirma
+            # un total que no se puede sostener.
+            self.last_truncado = devueltos >= tope
+            self.last_total = None if self.last_truncado else devueltos
+            logger.warning(
+                "La API no devolvió meta.total; el truncamiento vuelve a ser "
+                "una estimación basada en returned==limit."
+            )
 
         if collector is not None:
             collector.record_stage(
@@ -271,10 +322,10 @@ class EstadisticaSearchClient:
                 notes=(
                     "Filtros combinados con AND por el servidor. searchData "
                     "usa ILIKE + unaccent sobre caseLink, name, "
-                    "economicAgents y relevantMarkets; no es fuzzy. La API no "
-                    "expone meta.total, así que el truncamiento se infiere de "
-                    "returned==limit y es una estimación: un universo que mida "
-                    "exactamente el tope se marca truncado sin estarlo."
+                    "economicAgents y relevantMarkets; no es fuzzy. El "
+                    "truncamiento sale de meta.total, así que es un hecho y no "
+                    "una inferencia; si la API dejara de mandarlo se degrada a "
+                    "returned==limit y la traza lo dice en truncation_reason."
                 ),
             )
             collector.record_coverage(
@@ -283,7 +334,10 @@ class EstadisticaSearchClient:
                 returned=len(results),
                 pages_fetched=1,
                 truncated=self.last_truncado,
-                truncation_reason="returned==limit",
+                truncation_reason=(
+                    "meta.total" if meta.get("total") is not None
+                    else "returned==limit"
+                ),
             )
 
         logger.debug(
@@ -317,8 +371,8 @@ class EstadisticaSearchClient:
         el resultado de forma sistemática.
 
         Retorna (registros, total, universo_completo). El tercer valor es el
-        que decide si se puede afirmar un máximo o hay que advertir: con la
-        API nueva se sostiene en `returned < limit`, no en un `meta.total`.
+        que decide si se puede afirmar un máximo o hay que advertir, y desde
+        que volvió `meta.total` se sostiene en el total real.
         """
         registros = await self.search(
             text_search=text_search,
