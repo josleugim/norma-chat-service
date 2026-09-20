@@ -141,6 +141,11 @@ class Decisions(BaseModel):
     computation_audit: list[dict[str, Any]] = Field(default_factory=list)
     # Anomalías de datos en formato analizable.
     data_anomalies: list[dict[str, Any]] = Field(default_factory=list)
+    # Cuántas resoluciones de la autoridad de competencia y cuántas sentencias
+    # del poder judicial entraron al contexto. Una respuesta sobre "los
+    # criterios de la COFECE" construida con 17 sentencias de 60 fuentes tiene
+    # que verse distinta de una construida sólo con resoluciones.
+    composicion_fuentes: Optional[dict[str, int]] = None
     used_cached_evidence: bool = False
     answered_without_retrieval: bool = False
     final_answer_path: Optional[str] = None

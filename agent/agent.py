@@ -23,6 +23,7 @@ from core.tracing import (
 from core.tracing.versioning import sha256_short
 from agent.tools import TOOLS
 from prompts.system import AGENT_SYSTEM_PROMPT, TITLE_GENERATION_PROMPT
+from core.fuentes import case_link_de, clasificar_fuente, composicion
 from models.schemas import (
     StreamEvent, LLMMessage,
 )
@@ -370,6 +371,8 @@ class NormaPlusAgent:
                 "computation_audit", state.computation_audit, "derived")
             collector.set_decision(
                 "data_anomalies", state.anomalias, "derived")
+            collector.set_decision(
+                "composicion_fuentes", state.composicion_fuentes, "derived")
             collector.set_decision(
                 "retrieval_retries", state.retrieval_retries, "derived")
             collector.set_decision(
@@ -1495,10 +1498,31 @@ class NormaPlusAgent:
             ):
                 kind = "C" if tool_name == "buscar_criterios" else "E"
                 result = [
-                    {"ref": state.registry.assign(doc, kind), **doc}
+                    {
+                        "ref": state.registry.assign(doc, kind),
+                        # De quién es el documento. Va junto al marcador porque
+                        # es la misma clase de dato: sin él, un criterio de un
+                        # juez federal revisando a la COFECE se lee igual que
+                        # uno de la propia Comisión. Medido en q10: 17 de 60
+                        # criterios recuperados eran sentencias.
+                        "tipo_fuente": clasificar_fuente(case_link_de(doc)),
+                        **doc,
+                    }
                     for doc in result if isinstance(doc, dict)
                 ]
             payload = {"results": result, "count": len(result)}
+
+            # Composición de la evidencia, explícita para el modelo y para la
+            # traza: una respuesta que mezcla resoluciones con sentencias no
+            # puede verse igual que una que sólo usó resoluciones.
+            if state is not None and tool_name in (
+                "buscar_criterios", "buscar_expedientes"
+            ):
+                comp = composicion(
+                    case_link_de(d) for d in result if isinstance(d, dict)
+                )
+                payload["composicion_fuentes"] = comp
+                state.composicion_fuentes = comp
 
             # Suficiencia: si lo recuperado no responde la pregunta, decirlo.
             # Una segunda búsqueda focalizada; si tampoco alcanza, abstenerse.

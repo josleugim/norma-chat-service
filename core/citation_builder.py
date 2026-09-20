@@ -10,6 +10,7 @@ y resuelve con fallback a la lista aplanada.
 """
 import re
 import logging
+from core.fuentes import case_link_de, clasificar_fuente
 from models.schemas import ReferenceItem, sentido_texto
 
 logger = logging.getLogger(__name__)
@@ -201,7 +202,11 @@ class CitationBuilder:
         self, item: dict, ref_idx: int, seen_keys: set[str]
     ) -> ReferenceItem | None:
         meta = item.get("metadata", {}) if isinstance(item, dict) else {}
-        id_exp = meta.get("id_expediente") or meta.get("caseLink") or ""
+        # El cliente deja el expediente en metadata, pero el documento ya
+        # serializado para el modelo lo trae también arriba. Se miran los dos:
+        # de este identificador cuelga la cita y el tipo de fuente, así que
+        # perderlo convierte una sentencia en un documento sin atribuir.
+        id_exp = case_link_de(item)
         item_id = item.get("id", ref_idx) if isinstance(item, dict) else ref_idx
         ref_key = f"C:{id_exp or item_id}:{ref_idx}"
         if ref_key in seen_keys:
@@ -219,6 +224,7 @@ class CitationBuilder:
             id_expediente=id_exp,
             nombre_expediente=meta.get("nombre_expediente") or "",
             source_type="criterio",
+            tipo_fuente=clasificar_fuente(id_exp),
             relevance_score=item.get("score", 0) if isinstance(item, dict) else 0,
             url=self._build_url(id_exp),
             title=title,
@@ -246,6 +252,7 @@ class CitationBuilder:
             id_expediente=id_exp,
             nombre_expediente=item.get("name") or str(agentes)[:80],
             source_type="estadistica",
+            tipo_fuente=clasificar_fuente(id_exp),
             url=self._build_url(id_exp),
             autoridad=item.get("authority") or item.get("autoridad"),
             tipo_procedimiento=item.get("typeOfProcedure") or item.get("tipo_procedimiento"),

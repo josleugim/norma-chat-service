@@ -49,6 +49,10 @@ class ReferenceItem(BaseModel):
     id_expediente: str
     nombre_expediente: str = ""
     source_type: str  # "criterio" | "estadistica"
+    # Quién emitió el documento: "resolucion" (autoridad de competencia) o
+    # "sentencia" (poder judicial). Sin esto, un criterio de un juez federal
+    # revisando a la COFECE se cita igual que uno de la propia Comisión.
+    tipo_fuente: Optional[str] = None
     relevance_score: float = 0.0
     url: str = ""
 

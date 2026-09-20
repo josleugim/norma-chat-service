@@ -597,3 +597,72 @@ class TestNegacionAntesDeContencion:
             _normalizar("NO SE ACREDITÓ INCUMPLIMIENTO"),
             _normalizar("NO ACREDITADO EL INCUMPLIMIENTO"),
         )
+
+
+class TestClasificacionDeFuente:
+    """
+    Medido el 19-sep-2026: el top-60 del índice de criterios para q10
+    ("¿cuáles son los criterios que usa la COFECE para determinar el monto de
+    las multas?") trae 43 párrafos de resoluciones VCN y **17 de sentencias
+    judiciales**, de 9 expedientes entre juzgados de distrito y tribunales
+    colegiados. El agente los citaba juntos, así que criterios de un juez
+    federal revisando a la COFECE salían como criterios de la COFECE.
+
+    Es el fix 2 de §20 otra vez: lo incorrecto no es usar la fuente, es
+    atribuírsela a la Comisión.
+    """
+
+    def test_resoluciones_administrativas(self):
+        from core.fuentes import clasificar_fuente, RESOLUCION
+        for link in ("VCN-004-2024", "CNT-090-2025", "IO-003-2018",
+                     "DE-001-2020", "CON-001-2015"):
+            assert clasificar_fuente(link) == RESOLUCION, link
+
+    def test_sentencias_judiciales(self):
+        from core.fuentes import clasificar_fuente, SENTENCIA
+        for link in ("1244_2017_2JD", "480_2018_2SCJN", "93_2018_2TCC",
+                     "565_2023_1TCC_2025_04_24", "184_2018 1JD"):
+            assert clasificar_fuente(link) == SENTENCIA, link
+
+    def test_cumplimiento_de_amparo_sigue_siendo_resolucion(self):
+        """
+        `VCN-002-2023_2025_10_09` es una resolución en cumplimiento de amparo:
+        la emitió la Comisión, aunque nazca de una sentencia. El prefijo manda.
+        """
+        from core.fuentes import clasificar_fuente, RESOLUCION
+        assert clasificar_fuente("VCN-002-2023_2025_10_09") == RESOLUCION
+        assert clasificar_fuente("VCN-001-2017_2019_03_14") == RESOLUCION
+
+    def test_no_adivina(self):
+        from core.fuentes import clasificar_fuente, DESCONOCIDA
+        for link in ("", None, "algo-raro-sin-convencion", "XYZ-001-2020"):
+            assert clasificar_fuente(link) == DESCONOCIDA, link
+
+    def test_composicion(self):
+        from core.fuentes import composicion, RESOLUCION, SENTENCIA
+        c = composicion(["VCN-004-2024", "VCN-005-2020",
+                         "1244_2017_2JD", "480_2018_2SCJN", ""])
+        assert c[RESOLUCION] == 2
+        assert c[SENTENCIA] == 2
+        assert sum(c.values()) == 5
+
+    def test_la_cita_lleva_el_tipo(self):
+        from core.citation_builder import CitationBuilder
+        from core.fuentes import SENTENCIA, RESOLUCION
+        cb = CitationBuilder()
+        # Forma real que produce criterios_client: el expediente va dentro
+        # de metadata.
+        doc_jud = {"metadata": {"id_expediente": "1244_2017_2JD",
+                                "title": "Individualización de las multas"}}
+        doc_cof = {"metadata": {"id_expediente": "VCN-004-2024",
+                                "title": "Gradación de las multas"}}
+        assert cb._build_criterio_ref(doc_jud, 0, set()).tipo_fuente == SENTENCIA
+        assert cb._build_criterio_ref(doc_cof, 0, set()).tipo_fuente == RESOLUCION
+
+    def test_la_cita_tambien_lo_toma_del_nivel_superior(self):
+        """El documento ya serializado para el modelo trae caseLink arriba."""
+        from core.citation_builder import CitationBuilder
+        from core.fuentes import SENTENCIA
+        cb = CitationBuilder()
+        doc = {"caseLink": "480_2018_2SCJN", "metadata": {}}
+        assert cb._build_criterio_ref(doc, 0, set()).tipo_fuente == SENTENCIA
