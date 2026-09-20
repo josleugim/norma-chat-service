@@ -803,7 +803,7 @@ class NormaPlusAgent:
             objetivo = _normalizar(valor)
             salida = [
                 r for r in antes
-                if _coincide(_normalizar(r.get(campo)), objetivo)
+                if _coincide_campo(r.get(campo), objetivo)
             ]
             if state is not None:
                 state.filtros_aplicados.append({
@@ -1796,6 +1796,21 @@ def _coincide(valor: str, objetivo: str) -> bool:
     if not pv or not po:
         return False
     return len(pv & po) / len(po) >= 0.6
+
+
+def _coincide_campo(valor, objetivo: str) -> bool:
+    """
+    Igual que `_coincide`, pero sobre un campo que puede traer varios valores.
+
+    `senseOfResolution` es un arreglo desde sep-2026 y un expediente puede
+    tener dos sentidos a la vez (`["sobresee", "niega"]`). Cada elemento se
+    evalúa por separado y basta con que uno coincida: unirlos en una sola
+    cadena metería la negación de un sentido en el otro, que es justo lo que
+    `_coincide` existe para impedir.
+    """
+    if isinstance(valor, (list, tuple)):
+        return any(_coincide(_normalizar(v), objetivo) for v in valor)
+    return _coincide(_normalizar(valor), objetivo)
 
 
 def _tiene_multa(registro: dict) -> bool:

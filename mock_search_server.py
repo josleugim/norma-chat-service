@@ -138,7 +138,7 @@ ESTADISTICA_DB = [
         "startAgreementDate": None, "notificationDate": "21-09-1993",
         "basicInfoRequestDate": None, "admissionDate": "01-10-1993",
         "additionalInfoRequestDate": None, "resolutionDate": "11-11-1993",
-        "senseOfResolution": "CONDICIONADA", "resource": None, "agentFines": {},
+        "senseOfResolution": ["CONDICIONADA"], "resource": None, "agentFines": {},
     },
     {
         "id": 10002, "name": "Restaurantes", "caseLink": "CNT-095-2013",
@@ -150,7 +150,7 @@ ESTADISTICA_DB = [
         "startAgreementDate": None, "notificationDate": "15-08-2013",
         "basicInfoRequestDate": None, "admissionDate": "30-08-2013",
         "additionalInfoRequestDate": None, "resolutionDate": "20-12-2013",
-        "senseOfResolution": "AUTORIZADA", "resource": None, "agentFines": {},
+        "senseOfResolution": ["AUTORIZADA"], "resource": None, "agentFines": {},
     },
     {
         "id": 10003, "name": "Gasolineras", "caseLink": "IO-001-2019",
@@ -163,7 +163,7 @@ ESTADISTICA_DB = [
         "startAgreementDate": "25-09-2019", "notificationDate": None,
         "basicInfoRequestDate": None, "admissionDate": None,
         "additionalInfoRequestDate": None, "resolutionDate": "25-04-2024",
-        "senseOfResolution": "SANCIÓN/ACREDITACIÓN DEL INCUMPLIMIENTO",
+        "senseOfResolution": ["SANCIÓN/ACREDITACIÓN DEL INCUMPLIMIENTO"],
         "resource": None,
         "agentFines": "{'Servicios Gasolineros de Mexico, S.A. de C.V.':'$3,792,079.86'}",
     },
@@ -177,7 +177,7 @@ ESTADISTICA_DB = [
         "startAgreementDate": None, "notificationDate": "10-03-2020",
         "basicInfoRequestDate": None, "admissionDate": "25-03-2020",
         "additionalInfoRequestDate": None, "resolutionDate": "15-07-2020",
-        "senseOfResolution": "CONDICIONADA", "resource": None, "agentFines": {},
+        "senseOfResolution": ["CONDICIONADA"], "resource": None, "agentFines": {},
     },
     {
         "id": 10005, "name": "Sector Energético", "caseLink": "CNT-112-2018",
@@ -189,7 +189,7 @@ ESTADISTICA_DB = [
         "startAgreementDate": None, "notificationDate": "20-05-2018",
         "basicInfoRequestDate": None, "admissionDate": "05-06-2018",
         "additionalInfoRequestDate": None, "resolutionDate": "30-09-2018",
-        "senseOfResolution": "AUTORIZADA", "resource": None, "agentFines": {},
+        "senseOfResolution": ["AUTORIZADA"], "resource": None, "agentFines": {},
     },
     {
         "id": 10006, "name": "Scotiabank-Credijusto", "caseLink": "CNT-200-2022",
@@ -201,7 +201,7 @@ ESTADISTICA_DB = [
         "startAgreementDate": None, "notificationDate": "15-01-2022",
         "basicInfoRequestDate": None, "admissionDate": "01-02-2022",
         "additionalInfoRequestDate": None, "resolutionDate": "10-04-2022",
-        "senseOfResolution": "AUTORIZADA", "resource": None, "agentFines": {},
+        "senseOfResolution": ["AUTORIZADA"], "resource": None, "agentFines": {},
     },
     {
         "id": 10007, "name": "Fármacos", "caseLink": "VCN-001-2018",
@@ -213,7 +213,7 @@ ESTADISTICA_DB = [
         "startAgreementDate": "10-11-2018", "notificationDate": None,
         "basicInfoRequestDate": None, "admissionDate": None,
         "additionalInfoRequestDate": None, "resolutionDate": "20-08-2019",
-        "senseOfResolution": "SANCIÓN/ACREDITACIÓN DEL INCUMPLIMIENTO",
+        "senseOfResolution": ["SANCIÓN/ACREDITACIÓN DEL INCUMPLIMIENTO"],
         "resource": None,
         "agentFines": "{'GRUPO FÁRMACOS ESPECIALIZADOS, S.A. DE C.V.':'$5,000,000.00'}",
     },
@@ -328,17 +328,24 @@ async def agent_search_cases(
         results = [r for r in results
                    if unaccent((r.get("typeOfProcedure") or "").upper()) == unaccent(typeOfProcedure.upper())]
     if senseOfResolution:
+        # La columna es un arreglo y coincide si CUALQUIER elemento es igual
+        # al valor pedido (doc v1.1). El alias incluye `Sanciona`, que es la
+        # etiqueta dominante en los datos reales.
         objetivo = unaccent(senseOfResolution.upper())
         if objetivo == "SANCION":
             aceptados = {
                 "SANCION",
                 "SANCION/ACREDITACION DEL INCUMPLIMIENTO",
                 "ACREDITACION DEL INCUMPLIMIENTO",
+                "SANCIONA",
             }
         else:
             aceptados = {objetivo}
-        results = [r for r in results
-                   if unaccent((r.get("senseOfResolution") or "").upper()) in aceptados]
+        results = [
+            r for r in results
+            if any(unaccent(str(s).upper()) in aceptados
+                   for s in (r.get("senseOfResolution") or []))
+        ]
     if caseLink:
         # Parcial, no igualdad: es lo que permite pedir un prefijo entero.
         results = [r for r in results if ilike_match(r.get("caseLink") or "", caseLink)]

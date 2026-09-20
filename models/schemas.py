@@ -1,8 +1,39 @@
 """
 Schemas Pydantic para request/response del Chat Agent Service.
 """
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
+
+
+# ── Sentido de resolución ───────────────────────────────────
+# La API cambió este campo de string a arreglo (verificado el 19-sep-2026:
+# 4,514 de 4,696 registros vienen como lista, 182 como null). El modelo lo
+# declaraba como `str` desde junio, así que Pydantic rechazaba el registro
+# COMPLETO —no solo el campo— y `estadistica_client` lo descartaba. El censo
+# cargaba 182 expedientes de 4,696 y **cero VCN**: el agente contestaba que los
+# expedientes no existían.
+#
+# Se normaliza a lista porque un expediente puede tener dos sentidos a la vez
+# (`["sobresee", "niega"]`). Aplanarlos a una sola cadena volvería a mezclar
+# sentidos opuestos en el matcher tolerante, que es el error que ya cometimos
+# una vez: "NO SE ACREDITÓ INCUMPLIMIENTO" contra "SANCIÓN/ACREDITACIÓN DEL
+# INCUMPLIMIENTO" comparten casi todas las palabras y significan lo contrario.
+
+
+def sentidos_de(valor) -> list[str]:
+    """Sentido(s) de resolución como lista, venga como string, lista o None."""
+    if valor is None:
+        return []
+    if isinstance(valor, str):
+        valor = [valor]
+    if not isinstance(valor, (list, tuple)):
+        return [str(valor).strip()] if str(valor).strip() else []
+    return [str(v).strip() for v in valor if str(v).strip()]
+
+
+def sentido_texto(valor) -> str:
+    """Los sentidos como una sola cadena, sólo para mostrar o buscar texto."""
+    return "; ".join(sentidos_de(valor))
 
 
 # ── SSE Events ──────────────────────────────────────────────
@@ -91,9 +122,21 @@ class ExpedienteRecord(BaseModel):
     admissionDate: Optional[str] = None                  # DD-MM-YYYY
     additionalInfoRequestDate: Optional[str] = None      # DD-MM-YYYY
     resolutionDate: Optional[str] = None                 # DD-MM-YYYY
-    senseOfResolution: Optional[str] = None              # "AUTORIZADA", "CONDICIONADA", etc.
+    # Arreglo desde sep-2026: ["Sanciona"], ["sobresee", "niega"]. Acepta
+    # también el string suelto del vocabulario anterior. Ver `sentidos_de`.
+    senseOfResolution: Optional[list[str]] = None
     resource: Optional[str] = None
     agentFines: Optional[str | dict] = None              # String con dict O dict vacío {}
+
+    @field_validator("senseOfResolution", mode="before")
+    @classmethod
+    def _sentido_a_lista(cls, v):
+        """
+        Envuelve el string suelto del vocabulario anterior. Sin esto, un
+        cambio de forma de la API descarta el expediente entero y el agente
+        lo reporta como inexistente.
+        """
+        return sentidos_de(v) or None
 
     # --- Propiedades de conveniencia para el agente ---
 

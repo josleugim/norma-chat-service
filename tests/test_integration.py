@@ -171,7 +171,11 @@ class TestEstadisticaClientIntegration:
             filters={"senseOfResolution": "CONDICIONADA"}
         )
         # No se filtró en el servidor: llegan también otros sentidos.
-        sentidos = {(r.senseOfResolution or "").upper() for r in results}
+        # El campo es un arreglo desde sep-2026, así que se aplana para
+        # comparar; un expediente puede traer más de un sentido.
+        sentidos = {
+            s.upper() for r in results for s in (r.senseOfResolution or [])
+        }
         assert len(results) > 0
         assert sentidos - {"CONDICIONADA"}, (
             "si el filtro hubiera viajado, solo habría CONDICIONADA"

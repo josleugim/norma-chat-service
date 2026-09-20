@@ -488,3 +488,69 @@ class TestSearchDataBehavior:
         needle = "Scotiabnak"
         haystack = "SCOTIABANK INVERLAT"
         assert needle.lower() not in haystack.lower()
+
+
+class TestSentidoDeResolucionArreglo:
+    """
+    El 19-sep-2026 la API cambió `senseOfResolution` de string a arreglo.
+
+    El modelo lo declaraba como `str`, así que Pydantic rechazaba el registro
+    COMPLETO y `estadistica_client` lo descartaba: el censo cargó 182
+    expedientes de 4,696 y **cero VCN**. En el chat eso no se ve como un error,
+    se ve como que el expediente no existe.
+
+    Estas pruebas fijan las dos mitades del arreglo: que el registro
+    sobreviva, y que varios sentidos no se aplanen en una sola cadena.
+    """
+
+    def test_arreglo_no_descarta_el_expediente(self):
+        from models.schemas import ExpedienteRecord
+        r = ExpedienteRecord(caseLink="VCN-004-2024",
+                             senseOfResolution=["Sanciona"])
+        assert r.caseLink == "VCN-004-2024"
+        assert r.senseOfResolution == ["Sanciona"]
+
+    def test_string_suelto_sigue_funcionando(self):
+        """El vocabulario anterior no se rompe: se envuelve en lista."""
+        from models.schemas import ExpedienteRecord
+        r = ExpedienteRecord(caseLink="CNT-001-2020",
+                             senseOfResolution="AUTORIZADA")
+        assert r.senseOfResolution == ["AUTORIZADA"]
+
+    def test_varios_sentidos_se_conservan(self):
+        from models.schemas import ExpedienteRecord
+        r = ExpedienteRecord(caseLink="X-1", senseOfResolution=["sobresee", "niega"])
+        assert r.senseOfResolution == ["sobresee", "niega"]
+
+    def test_vacios_y_nulos(self):
+        from models.schemas import ExpedienteRecord
+        assert ExpedienteRecord(caseLink="X-1").senseOfResolution is None
+        assert ExpedienteRecord(caseLink="X-1",
+                                senseOfResolution=[]).senseOfResolution is None
+        assert ExpedienteRecord(caseLink="X-1",
+                                senseOfResolution=["", "  "]).senseOfResolution is None
+
+    def test_match_por_elemento_no_aplana(self):
+        """
+        Aplanar `["sobresee", "niega"]` a una cadena metería la negación de
+        un elemento en el otro. Es el error de §16: "NO SE ACREDITÓ
+        INCUMPLIMIENTO" y "SANCIÓN/ACREDITACIÓN DEL INCUMPLIMIENTO" comparten
+        casi todas las palabras y significan lo contrario.
+        """
+        from agent.agent import _coincide_campo, _normalizar
+        assert _coincide_campo(["sobresee", "niega"], _normalizar("sobresee"))
+        assert _coincide_campo(["sobresee", "niega"], _normalizar("niega"))
+        assert not _coincide_campo(["sobresee", "niega"], _normalizar("autorizada"))
+
+    def test_la_negacion_sigue_separando_sentidos_opuestos(self):
+        from agent.agent import _coincide_campo, _normalizar
+        acreditado = ["SANCIÓN/ACREDITACIÓN DEL INCUMPLIMIENTO"]
+        assert not _coincide_campo(
+            acreditado, _normalizar("NO SE ACREDITÓ INCUMPLIMIENTO")
+        )
+
+    def test_sentido_texto_para_mostrar(self):
+        from models.schemas import sentido_texto
+        assert sentido_texto(["sobresee", "niega"]) == "sobresee; niega"
+        assert sentido_texto("AUTORIZADA") == "AUTORIZADA"
+        assert sentido_texto(None) == ""
