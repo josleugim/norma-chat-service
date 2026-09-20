@@ -74,7 +74,13 @@ def classify(query: str) -> dict[str, Any]:
     if señales["agregado"] and not sobre_un_expediente:
         tipo = MIXED if semantica else EXHAUSTIVE_QUERY
     elif señales["lista_universo"]:
-        tipo = EXHAUSTIVE_QUERY
+        # "cuáles" dispara la señal de lista, pero "cuáles son los CRITERIOS"
+        # no pide recorrer el acervo: pide sintetizar doctrina. El universo de
+        # esa pregunta es la ley y el precedente, no la tabla de expedientes.
+        # Todas las demás ramas ya degradaban a MIXED ante señal de concepto;
+        # ésta no, y por eso q10 salía ruteada como "recorrer el universo
+        # completo y agregar sin muestreo".
+        tipo = MIXED if semantica else EXHAUSTIVE_QUERY
     elif señales["conteo"] or (señales["plazo"] and sobre_un_expediente):
         tipo = MIXED if semantica else DETERMINISTIC_TOOL
     elif señales["plazo"]:

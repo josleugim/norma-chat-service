@@ -666,3 +666,55 @@ class TestClasificacionDeFuente:
         cb = CitationBuilder()
         doc = {"caseLink": "480_2018_2SCJN", "metadata": {}}
         assert cb._build_criterio_ref(doc, 0, set()).tipo_fuente == SENTENCIA
+
+
+class TestRuteoDeConsultaDoctrinal:
+    """
+    q10 —"¿cuáles son los criterios que usa la COFECE para determinar el monto
+    de las multas?"— salía desde agosto como "exhaustiva sobre universo
+    truncado", el último criterio de COFECE que seguía abierto.
+
+    Eran dos heurísticas equivocándose sobre lo mismo:
+
+    1. `classify` veía "cuáles" y la ruteaba a "recorrer el universo completo
+       y agregar sin muestreo". Pero el universo de una pregunta doctrinal es
+       la ley y el precedente, no la tabla de expedientes. Todas las demás
+       ramas ya degradaban a MIXED ante señal de concepto; ésa no.
+    2. `exhaustive_but_truncated` miraba el booleano crudo de truncamiento.
+       La distinción entre topar con `top_k` (búsqueda semántica funcionando)
+       y topar con el techo de un universo enumerable ya se había establecido
+       para `coverage_truncated` en v1.14, pero este indicador se quedó atrás.
+    """
+
+    def test_pregunta_doctrinal_no_es_exhaustiva(self):
+        from core.sufficiency import classify, MIXED
+        c = classify("¿cuáles son los criterios que usa la COFECE "
+                     "para determinar el monto de las multas?")
+        assert c["query_type"] == MIXED
+        assert c["signals"]["concepto"] and c["signals"]["lista_universo"]
+
+    def test_enumerar_expedientes_sigue_siendo_exhaustiva(self):
+        """Lo que NO debe cambiar: listar un universo cerrado."""
+        from core.sufficiency import classify, EXHAUSTIVE_QUERY
+        for q in ("dame la lista completa de los procedimientos VCN resueltos "
+                  "por la COFECE",
+                  "¿en cuáles expedientes VCN la COFECE no acreditó el "
+                  "incumplimiento?",
+                  "¿en qué expedientes VCN la COFECE nunca impuso una multa?"):
+            assert classify(q)["query_type"] == EXHAUSTIVE_QUERY, q
+
+    def test_top_k_no_cuenta_como_universo_truncado(self):
+        from core.tracing.schema import Coverage
+        cob = [Coverage(requested_limit=15, returned=15, truncated=True,
+                        truncation_reason="top_k")]
+        assert not any(
+            c.truncated and c.truncation_reason != "top_k" for c in cob
+        )
+
+    def test_topar_con_el_techo_del_universo_si_cuenta(self):
+        from core.tracing.schema import Coverage
+        cob = [Coverage(requested_limit=50, returned=50, truncated=True,
+                        truncation_reason="meta.total")]
+        assert any(
+            c.truncated and c.truncation_reason != "top_k" for c in cob
+        )

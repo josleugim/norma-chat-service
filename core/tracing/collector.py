@@ -389,8 +389,15 @@ class TraceCollector:
             if s.coverage and s.tool not in deterministas
         ]
         truncada = any(c.truncated for c in coberturas)
+        solo_top_k = truncada and all(
+            c.truncation_reason == "top_k" for c in coberturas if c.truncated
+        )
         if not coberturas:
             estrategia = "sin_busqueda"
+        elif solo_top_k:
+            # Ni completa ni truncada por quedarse corta: trajo sus N más
+            # cercanos, que es lo que hace una búsqueda semántica.
+            estrategia = "top_k_semantico"
         elif truncada:
             estrategia = "una_pagina_truncada"
         elif len(retrieval_tools) > 1:
@@ -398,9 +405,22 @@ class TraceCollector:
         else:
             estrategia = "una_busqueda_completa"
         self.set_decision("coverage_strategy", estrategia, "derived")
+        # Truncar por `top_k` no es quedarse corto: es una búsqueda semántica
+        # trayendo sus N más cercanos, que es lo que hace por diseño. Lo que sí
+        # es señal es toparse con el techo de un universo enumerable
+        # (`returned == limit` sobre expedientes, o `meta.total` mayor).
+        #
+        # La distinción ya se había establecido para `coverage_truncated` en la
+        # ronda v1.14 —las tres "coberturas truncadas" de v1.13 eran las tres
+        # top-k— pero este indicador se quedó mirando el booleano crudo. Por eso
+        # q10, que es una pregunta doctrinal sobre criterios, aparecía desde
+        # agosto como "exhaustiva sobre universo truncado".
+        truncada_real = any(
+            c.truncated and c.truncation_reason != "top_k" for c in coberturas
+        )
         self.set_decision(
             "exhaustive_but_truncated",
-            bool(self.interpretation.constraints.exhaustive and truncada),
+            bool(self.interpretation.constraints.exhaustive and truncada_real),
             "derived",
         )
 
