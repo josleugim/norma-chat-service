@@ -554,3 +554,46 @@ class TestSentidoDeResolucionArreglo:
         assert sentido_texto(["sobresee", "niega"]) == "sobresee; niega"
         assert sentido_texto("AUTORIZADA") == "AUTORIZADA"
         assert sentido_texto(None) == ""
+
+
+class TestNegacionAntesDeContencion:
+    """
+    La guarda de negación de `_coincide` estaba DESPUÉS del chequeo de
+    contención, así que no servía para el par que la motivó: "sanciona" es
+    subcadena de "no sanciona", `valor in objetivo` retornaba True y la guarda
+    quedaba como código muerto.
+
+    Medido en q17 el 19-sep-2026: pedir sentido "No sanciona" sobre los 36 VCN
+    de COFECE descartaba 0 y devolvía los 36, incluidos los 33 que sí fueron
+    sancionados. El filtro determinista no filtraba nada y el modelo tenía que
+    hacerlo leyendo el contexto — que es justo la máquina de falsa certeza que
+    estos filtros existen para eliminar.
+    """
+
+    def test_sanciona_no_es_no_sanciona(self):
+        from agent.agent import _coincide_campo, _normalizar
+        assert not _coincide_campo(["Sanciona"], _normalizar("No sanciona"))
+
+    def test_no_sanciona_si_es_no_sanciona(self):
+        from agent.agent import _coincide_campo, _normalizar
+        assert _coincide_campo(["No sanciona"], _normalizar("No sanciona"))
+
+    def test_sanciona_sigue_coincidiendo_consigo_mismo(self):
+        from agent.agent import _coincide_campo, _normalizar
+        assert _coincide_campo(["Sanciona"], _normalizar("Sanciona"))
+
+    def test_el_par_de_la_ronda_v1_4(self):
+        """El caso original: acreditación contra NO acreditación."""
+        from agent.agent import _coincide, _normalizar
+        assert not _coincide(
+            _normalizar("SANCIÓN/ACREDITACIÓN DEL INCUMPLIMIENTO"),
+            _normalizar("NO SE ACREDITÓ INCUMPLIMIENTO"),
+        )
+
+    def test_variante_tolerante_sigue_funcionando(self):
+        """Lo que el matcher tolerante sí debe unir: misma polaridad."""
+        from agent.agent import _coincide, _normalizar
+        assert _coincide(
+            _normalizar("NO SE ACREDITÓ INCUMPLIMIENTO"),
+            _normalizar("NO ACREDITADO EL INCUMPLIMIENTO"),
+        )

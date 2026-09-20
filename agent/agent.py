@@ -1775,16 +1775,25 @@ def _coincide(valor: str, objetivo: str) -> bool:
     """
     if not valor or not objetivo:
         return False
-    if valor == objetivo or objetivo in valor or valor in objetivo:
-        return True
+
     # La negación decide el sentido de la resolución y NO puede tratarse como
     # palabra vacía: "NO SE ACREDITÓ INCUMPLIMIENTO" y "SANCIÓN/ACREDITACIÓN
     # DEL INCUMPLIMIENTO" comparten casi todas las palabras y significan lo
-    # contrario. Si una lado niega y el otro no, no coinciden.
+    # contrario. Si un lado niega y el otro no, no coinciden.
+    #
+    # Va ANTES de la contención, no después. Estaba después y por eso no
+    # servía justo para el par que la motivó: "sanciona" es subcadena de
+    # "no sanciona", así que `valor in objetivo` retornaba True y la guarda
+    # quedaba como código muerto. Medido en q17 el 19-sep: pedir el sentido
+    # "No sanciona" sobre 36 VCN descartaba 0 y devolvía los 36, incluidos
+    # los 33 que sí fueron sancionados.
     NEGACIONES = {"no", "sin", "ningun", "ninguna", "improcedente", "niega"}
     niega = lambda t: bool(NEGACIONES & set(t.split()))
     if niega(valor) != niega(objetivo):
         return False
+
+    if valor == objetivo or objetivo in valor or valor in objetivo:
+        return True
 
     # Se compara por raíz de 6 caracteres: el modelo escribe "acreditado"
     # donde la base dice "acreditó", y palabra completa no las une.
