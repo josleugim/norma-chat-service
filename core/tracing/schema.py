@@ -146,6 +146,11 @@ class Decisions(BaseModel):
     # criterios de la COFECE" construida con 17 sentencias de 60 fuentes tiene
     # que verse distinta de una construida sólo con resoluciones.
     composicion_fuentes: Optional[dict[str, int]] = None
+    # Una búsqueda devolvió cero y su ruta complementaria nunca se ejerció.
+    # Si la respuesta afirma ausencia sobre esa base, es falsa exhaustividad:
+    # `buscar_expedientes` es léxica sobre metadatos y `buscar_criterios`
+    # semántica sobre el texto, así que una vacía no dice nada de la otra.
+    ausencia_sin_complemento: bool = False
     used_cached_evidence: bool = False
     answered_without_retrieval: bool = False
     final_answer_path: Optional[str] = None
@@ -325,6 +330,7 @@ class Trace(BaseModel):
             # `compare.py` y el XLSX, así que un indicador que sólo vive en la
             # traza completa no se puede comparar entre corridas — que es
             # justo para lo que se construyó.
+            "ausencia_sin_complemento": self.decisions.ausencia_sin_complemento,
             "fuentes_resolucion": (self.decisions.composicion_fuentes or {}).get(
                 "resolucion"),
             "fuentes_sentencia": (self.decisions.composicion_fuentes or {}).get(
