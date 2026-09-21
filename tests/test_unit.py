@@ -718,3 +718,44 @@ class TestRuteoDeConsultaDoctrinal:
         assert any(
             c.truncated and c.truncation_reason != "top_k" for c in cob
         )
+
+
+class TestExpectativaDeBuscarExpedientes:
+    """
+    q10 aparecía como "tool esperada no llamada" porque la pregunta dice
+    "multas" y eso bastaba para esperar `buscar_expedientes`.
+
+    Verificado contra staging el 20-sep-2026: `searchData` busca en caseLink,
+    name, economicAgents y relevantMarkets —donde no viven los criterios
+    jurídicos— y devuelve `total: 0` para los términos de q10. El agente
+    tampoco la eligió en cinco corridas teniéndola disponible. No se saltaba
+    una herramienta útil: la expectativa estaba mal.
+    """
+
+    def test_doctrinal_no_espera_metadatos(self):
+        from core.tracing.heuristics import expected_tools
+        e = expected_tools("¿cuáles son los criterios que usa la COFECE "
+                           "para determinar el monto de las multas?")
+        assert "buscar_criterios" in e
+        assert "buscar_expedientes" not in e
+
+    def test_un_hecho_sobre_expedientes_si_la_espera(self):
+        """q05 y q11: dicen "multa" y SÍ necesitan los metadatos."""
+        from core.tracing.heuristics import expected_tools
+        for q in ("¿cuál es la multa máxima impuesta en expedientes VCN y a "
+                  "qué agente económico se le impuso?",
+                  "¿cuál es la multa máxima que ha impuesto la COFECE?"):
+            assert "buscar_expedientes" in expected_tools(q), q
+
+    def test_doctrinal_con_superlativo_sigue_esperandola(self):
+        """Si pide doctrina Y un máximo, necesita las dos."""
+        from core.tracing.heuristics import expected_tools
+        e = expected_tools("¿qué criterios usa la COFECE para las multas y "
+                           "cuál es la multa máxima que ha impuesto?")
+        assert "buscar_expedientes" in e and "buscar_criterios" in e
+
+    def test_un_expediente_concreto_siempre_la_espera(self):
+        from core.tracing.heuristics import expected_tools
+        e = expected_tools("¿qué criterios aplicó la COFECE en la multa "
+                           "del expediente VCN-004-2024?")
+        assert "buscar_expedientes" in e
