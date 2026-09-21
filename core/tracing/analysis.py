@@ -94,8 +94,20 @@ def analyze_answer(
     observed = extract_case_link_prefixes(text)
     for d in docs_in_context:
         link = d.get("case_link") or ""
+        # El prefijo sólo existe en los procedimientos administrativos.
+        # `1259-1260_2017_2JD` tiene guion pero su "prefijo" sería "1259", que
+        # no es un tipo de procedimiento: es el número de un amparo. Al
+        # contarlo como scope, una pregunta sobre VCN-005-2020 que además
+        # recuperaba la sentencia que la revisa salía marcada como confusión de
+        # alcance. Medido en el holdout del 21-sep: 2 de 20 preguntas en una
+        # repetición, las dos falsos positivos.
+        #
+        # Recuperar la sentencia que revisa un VCN es lo correcto cuando ambas
+        # están en el universo, así que lo que sobraba era el indicador.
         if "-" in link:
-            observed.add(link.split("-")[0])
+            prefijo = link.split("-")[0]
+            if prefijo.isalpha():
+                observed.add(prefijo.upper())
 
     scope_mismatch = False
     if expected_prefixes:

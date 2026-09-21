@@ -819,3 +819,97 @@ class TestUniversoRestringido:
         ]), encoding="utf-8")
         u = UniversoRestringido.desde_archivo(p)
         assert len(u) == 2 and "480_2018_2SCJN" in u
+
+
+class TestCamposQueLaAPIMandaYElModeloNoDeclaraba:
+    """
+    El holdout del 21-sep-2026 encontró la falla más cara del proyecto: la API
+    devolvía 52 campos, `ExpedienteRecord` declaraba 19, y Pydantic descartaba
+    los 33 restantes en silencio.
+
+    No producía un hueco visible sino una afirmación falsa: ante "¿cuántos días
+    naturales pasaron desde que se presentó la demanda del amparo 275/2023
+    hasta que se admitió?", el agente respondió en las TRES repeticiones que
+    sólo constaba la fecha de sentencia. La API tenía las dos fechas.
+
+    Medido sobre el universo de 63: 57 documentos con al menos un campo
+    invisible, en 36 campos distintos.
+    """
+
+    def test_las_fechas_del_amparo_275_2023(self):
+        from models.schemas import ExpedienteRecord
+        r = ExpedienteRecord(
+            caseLink="275_2023_1JD",
+            complaintFilingDate="12-07-2023",
+            complaintAdmissionDate="26-07-2023",
+            judgmentDate="15-07-2024",
+        )
+        assert r.complaintFilingDate == "12-07-2023"
+        assert r.complaintAdmissionDate == "26-07-2023"
+        assert r.judgmentDate == "15-07-2024"
+
+    def test_los_votos_particulares_llegan(self):
+        """"¿Hubo algún voto que discrepara?" no tenía con qué responderse."""
+        from models.schemas import ExpedienteRecord
+        r = ExpedienteRecord(
+            caseLink="VCN-003-2025",
+            dissentingOpinions=["Oscar Alejandro Gómez Romero (concurrente)",
+                                "Ana María Reséndiz Mora (en contra)"],
+        )
+        assert len(r.dissentingOpinions) == 2
+
+    def test_el_modelo_cubre_los_campos_de_la_doc_v11(self):
+        from models.schemas import ExpedienteRecord
+        declarados = set(ExpedienteRecord.model_fields)
+        de_la_api = {
+            "id", "name", "caseLink", "resolutionFileUrl", "authority",
+            "typeOfProcedure", "relevantMarkets", "originTypeOfProcedure",
+            "economicAgents", "startAgreementDate", "notificationDate",
+            "basicInfoRequestDate", "admissionDate", "additionalInfoRequestDate",
+            "resolutionDate", "senseOfResolution", "resource", "agentFines",
+            "resolutionIssueDate", "applicableLaw", "dissentingOpinions",
+            "notifyingParties", "operationDescription", "natureOfResolution",
+            "modifiedInitialResolutionDate", "amparoComplianceResolutionDate",
+            "amparoComplianceResolutionIssueDate", "scopeOfCompliance",
+            "judgmentImplementation", "accumulatedCaseFiles", "decisionOfficials",
+            "originAdministrativeAuthority", "originAdministrativeResolutionDate",
+            "claimedActs", "challengedNorms", "complaintFilingDate",
+            "complaintAdmissionDate", "expandedComplaintAdmissionDate",
+            "judgmentDate", "senseOfAmparo", "judicialDecisionEffects",
+            "judicialCaseFile", "judicialBody", "reviewResolutionDate",
+            "senseOfReview", "finalAmparoResult", "relatedTccCaseFile",
+            "relatedCollegiateCourt", "relatedTccDecisionDate",
+            "originAmparoCaseFiles", "appealedJudgmentBody",
+            "appealedJudgmentDate", "principalAppellants", "adhesiveAppellants",
+            "dissentingAndConcurringOpinions",
+        }
+        faltan = de_la_api - declarados
+        assert not faltan, f"el modelo no declara: {sorted(faltan)}"
+
+
+class TestAlcanceConIdentificadoresJudiciales:
+    """
+    `1259-1260_2017_2JD` tiene guion, pero su "prefijo" sería `1259`: el número
+    de un amparo, no un tipo de procedimiento. Contarlo como scope marcaba como
+    confusión de alcance una pregunta sobre un VCN que además recuperaba la
+    sentencia que lo revisa — que es lo correcto cuando ambos están en el
+    universo. 2 de 20 preguntas en una repetición del holdout, las dos falsas.
+    """
+
+    def _scope(self, links):
+        from core.tracing.analysis import analyze_answer
+        docs = [{"case_link": l} for l in links]
+        a = analyze_answer(text="x", registry=None, references=[],
+                           unresolved=[], docs_in_context=docs,
+                           expected_prefixes=["VCN"])
+        return set(a.scope_observed), a.scope_mismatch
+
+    def test_una_sentencia_no_es_otro_alcance(self):
+        obs, mismatch = self._scope(["VCN-005-2020", "1259-1260_2017_2JD"])
+        assert obs == {"VCN"}
+        assert not mismatch
+
+    def test_un_procedimiento_de_verdad_si_lo_es(self):
+        obs, mismatch = self._scope(["VCN-005-2020", "CNT-090-2025"])
+        assert obs == {"VCN", "CNT"}
+        assert mismatch

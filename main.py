@@ -146,6 +146,16 @@ async def lifespan(app: FastAPI):
         # registro se parsea igual, el campo queda en None y el agente
         # responde "no hay dato" sobre información que sí existe. Tiene que
         # gritar al arrancar.
+        if census.get("campos_no_declarados"):
+            nd = census["campos_no_declarados"]
+            logger.error(
+                f"CAMPOS QUE LA API MANDA Y EL MODELO NO DECLARA ({len(nd)}): "
+                + ", ".join(f"{k}({v})" for k, v in list(nd.items())[:12])
+                + (" …" if len(nd) > 12 else "")
+                + ". Pydantic los descarta en silencio y el agente los va a "
+                  "reportar como inexistentes."
+            )
+
         if census.get("campos_ausentes"):
             logger.error(
                 "CAMPOS AUSENTES en la respuesta de la API: "

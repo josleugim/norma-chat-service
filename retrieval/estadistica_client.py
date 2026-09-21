@@ -149,6 +149,12 @@ class EstadisticaSearchClient:
         self.universo = None
         self.ultimo_descartados_universo: int = 0
 
+        # Último payload tal como llegó, antes de parsear. Existe para que el
+        # censo pueda comparar los campos que manda la API contra los que el
+        # modelo declara: un campo no declarado se descarta en silencio y el
+        # agente lo reporta como inexistente.
+        self.ultimo_payload_crudo: list = []
+
     # ── Construcción de la petición ──────────────────────────────────
 
     def _build_params(
@@ -297,6 +303,7 @@ class EstadisticaSearchClient:
 
         items = data.get("data", []) if isinstance(data, dict) else data
         meta = data.get("meta", {}) if isinstance(data, dict) else {}
+        self.ultimo_payload_crudo = items if isinstance(items, list) else []
 
         results = []
         for item in items:
