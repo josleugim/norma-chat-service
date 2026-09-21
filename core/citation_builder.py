@@ -10,7 +10,7 @@ y resuelve con fallback a la lista aplanada.
 """
 import re
 import logging
-from models.schemas import ReferenceItem
+from models.schemas import ReferenceItem, sentido_texto
 
 logger = logging.getLogger(__name__)
 
@@ -249,7 +249,10 @@ class CitationBuilder:
             url=self._build_url(id_exp),
             autoridad=item.get("authority") or item.get("autoridad"),
             tipo_procedimiento=item.get("typeOfProcedure") or item.get("tipo_procedimiento"),
-            sentido_resolucion=item.get("senseOfResolution") or item.get("sentido_resolucion"),
+            sentido_resolucion=(
+                sentido_texto(item.get("senseOfResolution"))
+                or item.get("sentido_resolucion")
+            ),
             fecha_resolucion=item.get("resolutionDate") or item.get("fecha_resolucion"),
         )
 

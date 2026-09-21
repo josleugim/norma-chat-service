@@ -18,6 +18,8 @@ import json
 import re
 from typing import Any, Callable, Optional
 
+from models.schemas import sentido_texto
+
 # Los montos vienen como texto con formato contable dentro de agentFines.
 _MONTO_RE = re.compile(r"[\d][\d,\.]*")
 
@@ -214,7 +216,7 @@ def render_listado(registros: list[dict]) -> str:
         if r.get("name"):
             partes.append(str(r["name"]))
         if r.get("senseOfResolution"):
-            partes.append(str(r["senseOfResolution"]))
+            partes.append(sentido_texto(r["senseOfResolution"]))
         if r.get("resolutionDate"):
             partes.append(str(r["resolutionDate"]))
         filas.append(f"{len(filas) + 1}. " + " | ".join(partes))

@@ -26,6 +26,8 @@ suficiencia—; el retry y la abstención los ejecuta el agente.
 import re
 from typing import Any
 
+from models.schemas import sentido_texto
+
 # ── Tipos de consulta (routing) ─────────────────────────────
 
 DETERMINISTIC_TOOL = "deterministic_tool"   # conteos, máximos, plazos
@@ -284,7 +286,9 @@ def _texto_de(doc: dict) -> str:
     for campo in ("name", "relevantMarkets", "economicAgents", "senseOfResolution"):
         valor = doc.get(campo)
         if valor:
-            partes.append(str(valor))
+            partes.append(
+                sentido_texto(valor) if campo == "senseOfResolution" else str(valor)
+            )
     meta = doc.get("metadata")
     if isinstance(meta, dict):
         for campo in ("title", "anchor", "context", "titleNames"):

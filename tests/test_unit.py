@@ -488,3 +488,112 @@ class TestSearchDataBehavior:
         needle = "Scotiabnak"
         haystack = "SCOTIABANK INVERLAT"
         assert needle.lower() not in haystack.lower()
+
+
+class TestSentidoDeResolucionArreglo:
+    """
+    El 19-sep-2026 la API cambió `senseOfResolution` de string a arreglo.
+
+    El modelo lo declaraba como `str`, así que Pydantic rechazaba el registro
+    COMPLETO y `estadistica_client` lo descartaba: el censo cargó 182
+    expedientes de 4,696 y **cero VCN**. En el chat eso no se ve como un error,
+    se ve como que el expediente no existe.
+
+    Estas pruebas fijan las dos mitades del arreglo: que el registro
+    sobreviva, y que varios sentidos no se aplanen en una sola cadena.
+    """
+
+    def test_arreglo_no_descarta_el_expediente(self):
+        from models.schemas import ExpedienteRecord
+        r = ExpedienteRecord(caseLink="VCN-004-2024",
+                             senseOfResolution=["Sanciona"])
+        assert r.caseLink == "VCN-004-2024"
+        assert r.senseOfResolution == ["Sanciona"]
+
+    def test_string_suelto_sigue_funcionando(self):
+        """El vocabulario anterior no se rompe: se envuelve en lista."""
+        from models.schemas import ExpedienteRecord
+        r = ExpedienteRecord(caseLink="CNT-001-2020",
+                             senseOfResolution="AUTORIZADA")
+        assert r.senseOfResolution == ["AUTORIZADA"]
+
+    def test_varios_sentidos_se_conservan(self):
+        from models.schemas import ExpedienteRecord
+        r = ExpedienteRecord(caseLink="X-1", senseOfResolution=["sobresee", "niega"])
+        assert r.senseOfResolution == ["sobresee", "niega"]
+
+    def test_vacios_y_nulos(self):
+        from models.schemas import ExpedienteRecord
+        assert ExpedienteRecord(caseLink="X-1").senseOfResolution is None
+        assert ExpedienteRecord(caseLink="X-1",
+                                senseOfResolution=[]).senseOfResolution is None
+        assert ExpedienteRecord(caseLink="X-1",
+                                senseOfResolution=["", "  "]).senseOfResolution is None
+
+    def test_match_por_elemento_no_aplana(self):
+        """
+        Aplanar `["sobresee", "niega"]` a una cadena metería la negación de
+        un elemento en el otro. Es el error de §16: "NO SE ACREDITÓ
+        INCUMPLIMIENTO" y "SANCIÓN/ACREDITACIÓN DEL INCUMPLIMIENTO" comparten
+        casi todas las palabras y significan lo contrario.
+        """
+        from agent.agent import _coincide_campo, _normalizar
+        assert _coincide_campo(["sobresee", "niega"], _normalizar("sobresee"))
+        assert _coincide_campo(["sobresee", "niega"], _normalizar("niega"))
+        assert not _coincide_campo(["sobresee", "niega"], _normalizar("autorizada"))
+
+    def test_la_negacion_sigue_separando_sentidos_opuestos(self):
+        from agent.agent import _coincide_campo, _normalizar
+        acreditado = ["SANCIÓN/ACREDITACIÓN DEL INCUMPLIMIENTO"]
+        assert not _coincide_campo(
+            acreditado, _normalizar("NO SE ACREDITÓ INCUMPLIMIENTO")
+        )
+
+    def test_sentido_texto_para_mostrar(self):
+        from models.schemas import sentido_texto
+        assert sentido_texto(["sobresee", "niega"]) == "sobresee; niega"
+        assert sentido_texto("AUTORIZADA") == "AUTORIZADA"
+        assert sentido_texto(None) == ""
+
+
+class TestNegacionAntesDeContencion:
+    """
+    La guarda de negación de `_coincide` estaba DESPUÉS del chequeo de
+    contención, así que no servía para el par que la motivó: "sanciona" es
+    subcadena de "no sanciona", `valor in objetivo` retornaba True y la guarda
+    quedaba como código muerto.
+
+    Medido en q17 el 19-sep-2026: pedir sentido "No sanciona" sobre los 36 VCN
+    de COFECE descartaba 0 y devolvía los 36, incluidos los 33 que sí fueron
+    sancionados. El filtro determinista no filtraba nada y el modelo tenía que
+    hacerlo leyendo el contexto — que es justo la máquina de falsa certeza que
+    estos filtros existen para eliminar.
+    """
+
+    def test_sanciona_no_es_no_sanciona(self):
+        from agent.agent import _coincide_campo, _normalizar
+        assert not _coincide_campo(["Sanciona"], _normalizar("No sanciona"))
+
+    def test_no_sanciona_si_es_no_sanciona(self):
+        from agent.agent import _coincide_campo, _normalizar
+        assert _coincide_campo(["No sanciona"], _normalizar("No sanciona"))
+
+    def test_sanciona_sigue_coincidiendo_consigo_mismo(self):
+        from agent.agent import _coincide_campo, _normalizar
+        assert _coincide_campo(["Sanciona"], _normalizar("Sanciona"))
+
+    def test_el_par_de_la_ronda_v1_4(self):
+        """El caso original: acreditación contra NO acreditación."""
+        from agent.agent import _coincide, _normalizar
+        assert not _coincide(
+            _normalizar("SANCIÓN/ACREDITACIÓN DEL INCUMPLIMIENTO"),
+            _normalizar("NO SE ACREDITÓ INCUMPLIMIENTO"),
+        )
+
+    def test_variante_tolerante_sigue_funcionando(self):
+        """Lo que el matcher tolerante sí debe unir: misma polaridad."""
+        from agent.agent import _coincide, _normalizar
+        assert _coincide(
+            _normalizar("NO SE ACREDITÓ INCUMPLIMIENTO"),
+            _normalizar("NO ACREDITADO EL INCUMPLIMIENTO"),
+        )
