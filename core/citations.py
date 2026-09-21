@@ -24,7 +24,10 @@ Reglas:
 - Un marcador que no está en el registro **no se muestra**. COFECE fue
   explícito: es preferible no mostrar cita a mostrar una incorrecta.
 """
+import logging
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class CitationRegistry:
@@ -39,10 +42,27 @@ class CitationRegistry:
 
     def assign(self, doc: dict, kind: str) -> str:
         """
-        Registra un documento y devuelve su marcador ('C3', 'E7').
-        Si ya estaba registrado, devuelve el mismo marcador.
+        Registra un documento y devuelve su marcador ('C3', 'E7'), o cadena
+        vacía si el documento no tiene identidad.
+
+        C07 del diagnóstico de COFECE (21-sep-2026): un objeto de fechas sin
+        `caseLink` producía la clave vacía `E:` y recibía un marcador. Peor
+        aún, **todos** los objetos sin identidad colapsaban en el mismo: cinco
+        registros distintos quedaban bajo un solo `E6`, que no resolvía a
+        ningún documento. Una cita tiene que poder abrirse; un marcador que no
+        apunta a nada es peor que no citar.
+
+        Devolver "" en vez de un marcador deja la decisión donde corresponde:
+        quien llama decide si omite la cita o si consigue la identidad primero.
         """
-        key = f"{kind}:{self._identity(doc, kind)}"
+        identidad = self._identity(doc, kind)
+        if not str(identidad).strip().strip("|"):
+            logger.warning(
+                f"Documento sin identidad, no se le asigna marcador {kind}: "
+                f"{list(doc)[:6] if isinstance(doc, dict) else type(doc).__name__}"
+            )
+            return ""
+        key = f"{kind}:{identidad}"
         if key in self._by_key:
             return self._by_key[key]
 

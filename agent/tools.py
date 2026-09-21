@@ -273,7 +273,16 @@ TOOLS = [
                         "basicInfoRequestDate", "admissionDate",
                         "additionalInfoRequestDate", "resolutionDate",
                         "ResolutionIssueDate",
-                    ],
+                        # Campos judiciales (C07, subcaso H05). Faltaban, así
+                        # que la única vía para un plazo de amparo era que el
+                        # modelo pasara dos fechas sueltas — y esa rama pierde
+                        # la procedencia del expediente.
+                        "complaintFilingDate", "complaintAdmissionDate",
+                        "expandedComplaintAdmissionDate", "judgmentDate",
+                        "reviewResolutionDate", "amparoComplianceResolutionDate",
+                        "relatedTccDecisionDate", "appealedJudgmentDate",
+                        "originAdministrativeResolutionDate",
+                        ],
                     "description": (
                         "Campo de fecha inicial. IMPORTANTE: en VCN e IO la fecha "
                         "de notificación NO EXISTE por diseño; ahí el inicio del "
@@ -287,9 +296,32 @@ TOOLS = [
                     "enum": [
                         "resolutionDate", "ResolutionIssueDate", "admissionDate",
                         "additionalInfoRequestDate", "basicInfoRequestDate",
-                    ],
-                    "description": "Campo de fecha final. Default: resolutionDate.",
+                        "complaintFilingDate", "complaintAdmissionDate",
+                        "expandedComplaintAdmissionDate", "judgmentDate",
+                        "reviewResolutionDate", "amparoComplianceResolutionDate",
+                        "relatedTccDecisionDate", "appealedJudgmentDate",
+                        "originAdministrativeResolutionDate",
+                        ],
+                    "description": (
+                        "Campo de fecha final. Default: resolutionDate. En "
+                        "asuntos judiciales: judgmentDate (sentencia), "
+                        "complaintAdmissionDate (admisión de la demanda)."
+                    ),
                     "default": "resolutionDate",
+                },
+                "unidad": {
+                    "type": "string",
+                    "enum": ["dias_habiles", "dias_naturales"],
+                    "description": (
+                        "Unidad del promedio y demás estadísticas. "
+                        "`dias_habiles` descuenta fines de semana e inhábiles "
+                        "según el calendario de la autoridad; `dias_naturales` "
+                        "es la resta de fechas. Si la pregunta dice "
+                        "explícitamente «días naturales», usa dias_naturales: "
+                        "pedir compute_stats sin esto devolvía siempre hábiles "
+                        "y respondía otra cosa."
+                    ),
+                    "default": "dias_habiles",
                 },
                 "max_dias_habiles": {
                     "type": "integer",

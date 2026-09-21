@@ -1149,7 +1149,9 @@ class NormaPlusAgent:
                 original = next(
                     (r for r in registros if r.get("caseLink") == link), {"caseLink": link}
                 )
-                ganador["ref"] = state.registry.assign(original, "E")
+                _ref = state.registry.assign(original, "E")
+                if _ref:
+                    ganador["ref"] = _ref
             resultado["COMO_CITAR"] = (
                 "Los expedientes de 'ganadores' traen su campo `ref`. Cita "
                 "exactamente ese identificador. No inventes [E1], [E2]: si el "
@@ -1434,7 +1436,13 @@ class NormaPlusAgent:
             })
             enriched.append(entrada)
 
-        plazo_field = "dias_habiles"
+        # Unidad explícita (C07). Estaba cableada a días hábiles, así que una
+        # pregunta por el promedio en días NATURALES recibía el promedio en
+        # hábiles sin que nada lo advirtiera: la cifra era correcta para otra
+        # pregunta.
+        plazo_field = args.get("unidad") or "dias_habiles"
+        if plazo_field not in ("dias_habiles", "dias_naturales"):
+            plazo_field = "dias_habiles"
 
         result = {"total_expedientes": len(enriched)}
 
@@ -1475,10 +1483,16 @@ class NormaPlusAgent:
 
         # Stats si se pidieron
         if args.get("compute_stats"):
-            data_for_stats = result.get("expedientes", enriched)
+            # Sobre el conjunto elegible COMPLETO, no sobre las 50 filas que se
+            # presentan. El recorte es de presentación: calcular después de él
+            # convierte un universo de 51 en un promedio de 50 sin avisar.
+            data_for_stats = enriched
             result["stats"] = self.temporal.compute_stats(
                 data_for_stats, plazo_field=plazo_field
             )
+            result["stats"]["unidad"] = plazo_field
+            result["stats"]["universo_calculado"] = len(enriched)
+            result["stats"]["filas_presentadas"] = len(result.get("expedientes", []))
 
         no_calculables = [c for c in calculos if not c["calculable"]]
         if no_calculables:
@@ -1661,7 +1675,7 @@ class NormaPlusAgent:
                 kind = "C" if tool_name == "buscar_criterios" else "E"
                 result = [
                     {
-                        "ref": state.registry.assign(doc, kind),
+                        "ref": state.registry.assign(doc, kind),  # "" si no tiene identidad
                         # De quién es el documento. Va junto al marcador porque
                         # es la misma clase de dato: sin él, un criterio de un
                         # juez federal revisando a la COFECE se lee igual que

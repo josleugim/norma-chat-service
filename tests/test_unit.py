@@ -1017,3 +1017,69 @@ class TestResolucionDeIdentidades:
     def test_un_expediente_administrativo_no_es_judicial(self):
         from core.identidades import partes_de
         assert partes_de("VCN-004-2024") is None
+
+
+class TestContratoDeCalculo:
+    """
+    C07 del diagnóstico de COFECE. Tres defectos distintos en el mismo
+    contrato:
+
+    1. `CitationRegistry.assign` no rechazaba identidad vacía: cinco objetos de
+       fechas sin `caseLink` colapsaban bajo un mismo `E6` que no resolvía a
+       ningún documento.
+    2. Las estadísticas usaban siempre días hábiles. Una pregunta por el
+       promedio en días NATURALES recibía el de hábiles sin advertencia: la
+       cifra era correcta para otra pregunta.
+    3. El enum de campos no incluía los judiciales, así que un plazo de amparo
+       sólo podía calcularse con fechas sueltas — rama que pierde la
+       procedencia del expediente.
+    """
+
+    def test_identidad_vacia_no_recibe_marcador(self):
+        from core.citations import CitationRegistry
+        reg = CitationRegistry()
+        assert reg.assign({"fecha_inicio": "01-01-2024"}, "E") == ""
+        assert reg.assign({"dias_naturales": 355}, "E") == ""
+        assert reg.markers() == []
+
+    def test_objetos_sin_identidad_no_colapsan_en_uno(self):
+        """El defecto exacto: cinco registros distintos bajo un solo E6."""
+        from core.citations import CitationRegistry
+        reg = CitationRegistry()
+        marcadores = [
+            reg.assign({"fecha_inicio": f"0{i}-01-2024"}, "E") for i in range(1, 6)
+        ]
+        assert marcadores == ["", "", "", "", ""]
+        assert reg.markers() == [], "ninguno debe quedar registrado"
+
+    def test_con_identidad_si_recibe_marcador(self):
+        from core.citations import CitationRegistry
+        reg = CitationRegistry()
+        m = reg.assign({"caseLink": "VCN-004-2024", "dias_naturales": 49}, "E")
+        assert m == "E1"
+        assert reg.case_link_of(m) == "VCN-004-2024"
+
+    def test_la_unidad_es_explicita_en_la_herramienta(self):
+        import agent.tools as t
+        tool = next(
+            d for grp in vars(t).values()
+            if isinstance(grp, list) and grp and isinstance(grp[0], dict)
+            for d in grp
+            if (d.get("function", d)).get("name") == "calcular_plazos"
+        )
+        props = tool.get("function", tool)["parameters"]["properties"]
+        assert props["unidad"]["enum"] == ["dias_habiles", "dias_naturales"]
+
+    def test_los_campos_judiciales_estan_en_el_enum(self):
+        import agent.tools as t
+        tool = next(
+            d for grp in vars(t).values()
+            if isinstance(grp, list) and grp and isinstance(grp[0], dict)
+            for d in grp
+            if (d.get("function", d)).get("name") == "calcular_plazos"
+        )
+        props = tool.get("function", tool)["parameters"]["properties"]
+        for campo in ("complaintFilingDate", "complaintAdmissionDate",
+                      "judgmentDate"):
+            assert campo in props["campo_inicio"]["enum"], campo
+        assert "judgmentDate" in props["campo_fin"]["enum"]
