@@ -1185,3 +1185,107 @@ class TestContinuidadDeCitasEntreTurnos:
                                   "metadata": {"id_expediente": "X-1"}}], [])
         ctx = cache.contexto_para_turno("s1", CitationRegistry())
         assert "CONTENIDO SUSTANTIVO" in ctx
+
+
+class TestRequisitosPorComponente:
+    """
+    C03. El check de suficiencia unía el texto de todos los documentos y medía
+    palabras. `_terminos` usa `[a-z]{4,}`, así que los números de expediente
+    desaparecen:
+
+        _terminos("criterio del amparo 178/2017 del 2TCC") → {'amparo','criterio'}
+
+    Una pregunta sobre un documento exacto se aprobaba con vocabulario de
+    cualquier otro del mismo tema, y evidencia de UNA fuente cubría una
+    consulta que pedía DOS posturas.
+    """
+
+    def _req(self, q):
+        from core.identidades import ResolutorDeIdentidades
+        from core.requisitos import construir_requisitos
+        u = ["VCN-001-2025", "178_2017_2TCC", "353_2024_1TCC"]
+        return construir_requisitos(
+            q, ResolutorDeIdentidades(u).resolver(q))
+
+    def test_una_comparacion_exige_los_dos_lados(self):
+        from core.requisitos import verificar
+        q = ("Compara lo que sostuvo la COFECE en VCN-001-2025 con lo que "
+             "sostuvo el Segundo Tribunal Colegiado en el amparo 178/2017")
+        req = self._req(q)
+        v = verificar(req, [{"caseLink": "VCN-001-2025", "content": "x"}])
+        assert not v["cumple"]
+        assert any("178_2017_2TCC" in f for f in v["faltantes"])
+
+    def test_con_los_dos_lados_cumple(self):
+        from core.requisitos import verificar
+        q = ("Compara lo de VCN-001-2025 con lo del amparo 178/2017 "
+             "del Segundo Tribunal Colegiado")
+        v = verificar(self._req(q), [
+            {"caseLink": "VCN-001-2025", "content": "a"},
+            {"caseLink": "178_2017_2TCC", "content": "b"},
+        ])
+        assert v["cumple"]
+
+    def test_un_voto_no_satisface_una_pregunta_por_la_mayoria(self):
+        from core.requisitos import verificar
+        q = ("En el amparo en revisión 353/2024 del Primer Tribunal "
+             "Colegiado, ¿qué sostuvo el tribunal?")
+        voto = {"caseLink": "353_2024_1TCC", "content": "x", "metadata": {
+            "context": "Magistrada Irma Leticia Flores Díaz. "
+                       "Respetuosamente, formulo voto"}}
+        v = verificar(self._req(q), [voto])
+        assert not v["cumple"]
+        assert any("mayoritaria" in f for f in v["faltantes"])
+
+    def test_cambiar_los_ids_impide_aprobar(self):
+        """Prueba de cierre del diagnóstico: reemplazar todos los IDs de
+        evidencia debe impedir aprobar una pregunta sobre un documento
+        exacto."""
+        from core.requisitos import verificar
+        q = "¿Qué se resolvió en el amparo 178/2017 del Segundo Tribunal?"
+        v = verificar(self._req(q), [{"caseLink": "OTRO-999-2020",
+                                      "content": "mismo tema, otro documento"}])
+        assert not v["cumple"]
+
+
+class TestValidacionAntesDeEmitir:
+    """
+    C06. Las tres rutas de salida emitían tokens antes de resolver las citas.
+    Cuando se descubría que un marcador no estaba en el registro, el texto ya
+    había salido: la defensa existía y llegaba tarde.
+    """
+
+    class _Reg:
+        def __init__(self, validos): self.validos = set(validos)
+        def resolve(self, m): return {"x": 1} if m in self.validos else None
+
+    def test_quita_el_marcador_invalido(self):
+        from core.validacion_salida import validar_borrador
+        r = validar_borrador(
+            "La autoridad debe valorar todo [C1]. El voto discrepó [C14].",
+            self._Reg(["C1"]))
+        assert r["reparado"]
+        assert r["marcadores_invalidos"] == ["C14"]
+        assert "[C14]" not in r["texto"]
+        assert "[C1]" in r["texto"]
+
+    def test_marca_la_afirmacion_que_se_queda_sin_respaldo(self):
+        from core.validacion_salida import validar_borrador
+        r = validar_borrador("El voto lo emitió la magistrada X [C14].",
+                             self._Reg(["C1"]))
+        assert "SIN RESPALDO" in r["texto"]
+        assert len(r["frases_sin_respaldo"]) == 1
+
+    def test_un_borrador_limpio_no_se_toca(self):
+        from core.validacion_salida import validar_borrador
+        texto = "Todo bien [C1] y [E2]."
+        r = validar_borrador(texto, self._Reg(["C1", "E2"]))
+        assert not r["reparado"] and r["texto"] == texto
+
+    def test_quita_el_renglon_de_FUENTES_correspondiente(self):
+        from core.validacion_salida import validar_borrador
+        r = validar_borrador(
+            "Afirmación [C1] y otra [C14].\n\nFUENTES\n[C1] doc uno\n[C14] doc catorce",
+            self._Reg(["C1"]))
+        assert "[C14] doc catorce" not in r["texto"]
+        assert "[C1] doc uno" in r["texto"]

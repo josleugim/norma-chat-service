@@ -91,3 +91,15 @@ class TurnState:
     # mención era ambigua, porque un número compartido por dos órganos son dos
     # asuntos y no se elige uno en silencio.
     identidades_resueltas: list[dict] = field(default_factory=list)
+
+    # Reparación aplicada al borrador antes de emitirlo (C06): qué marcadores
+    # no resolvían y cuántas afirmaciones colgaban sólo de ellos.
+    reparacion_salida: dict | None = None
+
+    # Requisitos verificables de la pregunta (C03): qué documento, qué voz y
+    # si exige comparar dos fuentes. Se comprueban contra la evidencia
+    # identificada, no contra una bolsa de palabras — el check léxico descarta
+    # los números de expediente y aprobaba una pregunta sobre un documento
+    # exacto con vocabulario de cualquier otro del mismo tema.
+    requisitos: list[dict] = field(default_factory=list)
+    requisitos_verificados: dict | None = None

@@ -25,6 +25,8 @@ from agent.tools import TOOLS
 from prompts.system import AGENT_SYSTEM_PROMPT, TITLE_GENERATION_PROMPT
 from core.fuentes import case_link_de, clasificar_fuente, composicion
 from core.identidades import ResolutorDeIdentidades
+from core.requisitos import construir_requisitos, verificar as verificar_requisitos
+from core.validacion_salida import validar_borrador
 from core.voz import clasificar_voz, etiqueta as etiqueta_voz, VOTO_PARTICULAR, NO_IDENTIFICADA
 from models.schemas import (
     StreamEvent, LLMMessage,
@@ -167,6 +169,14 @@ class NormaPlusAgent:
         # corridas. En la novena el modelo adivinó el identificador interno.
         if self.resolutor is not None:
             state.identidades_resueltas = self.resolutor.resolver(user_query)
+            state.requisitos = construir_requisitos(
+                user_query, state.identidades_resueltas
+            )
+            if state.requisitos:
+                logger.info(
+                    "Requisitos de la pregunta: "
+                    + "; ".join(r["descripcion"] for r in state.requisitos)
+                )
             if state.identidades_resueltas:
                 logger.info(
                     "Identidades resueltas: "
@@ -274,7 +284,24 @@ class NormaPlusAgent:
                     # Si ya generó texto sin tools, emitirlo
                     if collector is not None:
                         collector.set_decision("final_answer_path", "content")
-                    final_text = response.content
+                    # Validar ANTES de emitir (C06). El borrador completo ya
+                    # existe; emitirlo y descubrir después que una cita no
+                    # resuelve dejaba el marcador y su afirmación en el texto,
+                    # con la fuente ausente de la lista. La defensa llegaba
+                    # tarde por el orden, no por falta de mecanismo.
+                    revision = validar_borrador(response.content, state.registry)
+                    final_text = revision["texto"]
+                    if revision["reparado"]:
+                        state.reparacion_salida = {
+                            "marcadores_invalidos": revision["marcadores_invalidos"],
+                            "frases_sin_respaldo": len(revision["frases_sin_respaldo"]),
+                        }
+                        if collector is not None:
+                            collector.add_error(
+                                "validacion_salida",
+                                "marcadores fuera del registro: "
+                                + ", ".join(revision["marcadores_invalidos"]),
+                            )
                     for chunk in self._chunk_text(final_text):
                         yield StreamEvent(type="token", data={"text": chunk})
                 else:
@@ -1719,6 +1746,33 @@ class NormaPlusAgent:
                 )
                 payload["composicion_fuentes"] = comp
                 state.composicion_fuentes = comp
+
+            # Requisitos por componente (C03). Se comprueban contra la
+            # evidencia identificada —documento, voz, los dos lados de una
+            # comparación— y no contra la unión de palabras de todos los
+            # textos, que aprobaba una pregunta sobre un documento exacto con
+            # vocabulario de cualquier otro del mismo tema.
+            if (state is not None and state.requisitos
+                    and tool_name in ("buscar_criterios", "buscar_expedientes")):
+                v = verificar_requisitos(state.requisitos, result)
+                state.requisitos_verificados = v
+                payload["REQUISITOS"] = v["componentes"]
+                if not v["cumple"]:
+                    payload["REQUISITOS_INCUMPLIDOS"] = {
+                        "faltan": v["faltantes"],
+                        "regla": (
+                            "La evidencia recuperada NO cubre lo que la "
+                            "pregunta exige. Haz una búsqueda dirigida para lo "
+                            "que falta. Si después de intentarlo sigue "
+                            "faltando, responde SÓLO sobre lo que sí tienes "
+                            "sustentado y di expresamente qué no pudiste "
+                            "cubrir. No completes el hueco con conocimiento "
+                            "general atribuido a la fuente, no afirmes que dos "
+                            "posturas coinciden si sólo recuperaste una, y no "
+                            "presentes un voto individual como la postura del "
+                            "tribunal."
+                        ),
+                    }
 
             # Cobertura por documento pedido. Va al modelo porque es la
             # diferencia entre "los dos criterios coinciden" y "sólo pude
