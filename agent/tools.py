@@ -28,6 +28,27 @@ TOOLS = [
                     "description": "Número máximo de resultados (5-30). Usa 8 para preguntas simples, 15 para medias, 25 para complejas.",
                     "default": 15,
                 },
+                # C01 del diagnóstico de COFECE (21-sep-2026). El cliente ya
+                # sabía serializar este filtro; la herramienta no lo exponía,
+                # así que el alcance documental quedaba en manos de escribir el
+                # expediente dentro de la frase de búsqueda — que no impone
+                # identidad. H15 no recuperó `178_2017_2TCC` en ninguna de las
+                # nueve respuestas.
+                "en_expedientes": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Limita la búsqueda a estos expedientes concretos, por "
+                        "su identificador exacto (VCN-004-2024, 178_2017_2TCC, "
+                        "480_2018_2SCJN). ÚSALO SIEMPRE que la pregunta nombre "
+                        "uno o más documentos: escribir el expediente dentro de "
+                        "`query` NO acota la búsqueda. Para comparar dos "
+                        "documentos, pásalos ambos: se busca en cada uno por "
+                        "separado y se conservan los dos conjuntos de "
+                        "evidencia. Omítelo sólo cuando la pregunta sea "
+                        "temática y no identifique documento."
+                    ),
+                },
             },
             "required": ["query"],
         },

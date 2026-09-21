@@ -24,6 +24,7 @@ from core.tracing.versioning import sha256_short
 from agent.tools import TOOLS
 from prompts.system import AGENT_SYSTEM_PROMPT, TITLE_GENERATION_PROMPT
 from core.fuentes import case_link_de, clasificar_fuente, composicion
+from core.identidades import ResolutorDeIdentidades
 from models.schemas import (
     StreamEvent, LLMMessage,
 )
@@ -67,6 +68,14 @@ class NormaPlusAgent:
         self.citations = citation_builder
         self.evidence_cache = evidence_cache
         self.max_tool_calls = max_tool_calls
+
+        # Resolutor de identidades documentales (C02). Se construye desde el
+        # universo consultable, así que sólo puede devolver expedientes que
+        # existen: nunca fabrica un identificador por concatenación.
+        universo = getattr(estadistica_client, "universo", None)
+        self.resolutor = (
+            ResolutorDeIdentidades(universo.case_links) if universo else None
+        )
 
         # ── Trazabilidad ────────────────────────────────────
         # Observa; nunca altera el comportamiento del agente.
@@ -147,13 +156,32 @@ class NormaPlusAgent:
         routing = classify(user_query)
         state.query = user_query
         state.query_type = routing["query_type"]
+
+        # Resolución de identidades (C02). Va aquí, antes de cualquier
+        # herramienta, y separada de la telemetría: `interpret()` sólo anota lo
+        # que cree entender; esto resuelve contra el universo real.
+        #
+        # Sin este paso, "el amparo en revisión 677/2024" viajaba como texto
+        # libre a una búsqueda léxica y devolvía cero en ocho de nueve
+        # corridas. En la novena el modelo adivinó el identificador interno.
+        if self.resolutor is not None:
+            state.identidades_resueltas = self.resolutor.resolver(user_query)
+            if state.identidades_resueltas:
+                logger.info(
+                    "Identidades resueltas: "
+                    + "; ".join(
+                        f"{i['mencion']} → {', '.join(i['candidatos'])}"
+                        + (" (ambiguo)" if i["ambiguo"] else "")
+                        for i in state.identidades_resueltas
+                    )
+                )
         if collector is not None:
             collector.set_decision("query_type", routing["query_type"], "heuristic")
             collector.set_decision("routing_strategy", routing["strategy"], "heuristic")
 
         # Construir mensajes para el LLM en formato nativo
         messages = self._build_messages(
-            user_query, chat_history, provider, session_id, collector
+            user_query, chat_history, provider, session_id, collector, state
         )
 
         all_criterios_results: list[list] = []
@@ -536,7 +564,7 @@ class NormaPlusAgent:
 
     def _build_messages(
         self, user_query: str, chat_history: list[dict],
-        provider: str, session_id: str, collector=None,
+        provider: str, session_id: str, collector=None, state=None,
     ) -> list[dict]:
         """Construye mensajes en formato dict genérico, incluyendo cache."""
         # Obtener evidencia cacheada relevante
@@ -558,6 +586,33 @@ class NormaPlusAgent:
                 "actual, sin necesidad de volver a buscar. Si necesitas información "
                 "adicional o más reciente, usa las herramientas.\n\n"
                 + cache_context
+            )
+
+        # Identidades resueltas (C02). El modelo recibe la traducción ya
+        # hecha, en vez de tener que adivinar el identificador interno — que es
+        # lo que pasó en la única de nueve corridas que encontró el 677/2024.
+        ident = getattr(state, "identidades_resueltas", None) if state else None
+        if ident:
+            lineas = []
+            for i in ident:
+                if i["ambiguo"]:
+                    lineas.append(
+                        f"- «{i['mencion']}» corresponde a MÁS DE UN asunto: "
+                        + ", ".join(i["candidatos"])
+                        + ". Son documentos distintos: no los mezcles. Si la "
+                          "pregunta no permite distinguirlos, dilo y pide la "
+                          "precisión que falta."
+                    )
+                else:
+                    lineas.append(
+                        f"- «{i['mencion']}» es {i['candidatos'][0]}"
+                    )
+            system_content += (
+                "\n\n## IDENTIDADES DE ESTA CONSULTA\n"
+                "Estas menciones ya se resolvieron contra el acervo. Usa el "
+                "identificador exacto en `en_expedientes` o `id_expediente`; "
+                "escribirlo dentro del texto de búsqueda NO acota nada.\n"
+                + "\n".join(lineas)
             )
 
         messages = [
@@ -660,12 +715,77 @@ class NormaPlusAgent:
 
     # ── Ejecutores de herramientas ──────────────────────────
 
+    async def _buscar_criterios_por_documento(
+        self, query: str, expedientes: list[str], top_k: int, collector, state
+    ) -> list:
+        """
+        Una búsqueda por expediente, con los conjuntos identificados.
+
+        El endpoint acepta un solo `caseLink`, así que comparar dos documentos
+        exige dos búsquedas. Cada resultado queda anotado con el expediente que
+        lo produjo, y los expedientes que no devolvieron nada se registran: una
+        comparación a la que le falta un lado tiene que poder saberse
+        incompleta en vez de presentarse como coincidencia.
+        """
+        universo = getattr(self.estadistica, "universo", None)
+        vistos: set[str] = set()
+        agregados: list = []
+        cobertura: list[dict] = []
+
+        for exp in expedientes:
+            if universo is not None and exp not in universo:
+                cobertura.append({"expediente": exp, "recuperados": 0,
+                                  "motivo": "fuera del universo consultable"})
+                continue
+            parciales = await self.criterios.search(
+                query=query,
+                top_k=top_k,
+                filters={"caseLink": exp},
+                collector=collector,
+            )
+            cobertura.append({"expediente": exp, "recuperados": len(parciales)})
+            for r in parciales:
+                if r.id in vistos:
+                    continue
+                vistos.add(r.id)
+                agregados.append(r)
+
+        if state is not None:
+            state.cobertura_por_documento = cobertura
+            vacios = [c["expediente"] for c in cobertura if not c["recuperados"]]
+            if vacios:
+                logger.warning(
+                    f"Criterios: sin evidencia para {', '.join(vacios)}. "
+                    f"Una comparación que los necesite queda incompleta."
+                )
+        return agregados
+
     async def _exec_buscar_criterios(self, args: dict, collector=None, state=None) -> list:
-        results = await self.criterios.search(
-            query=args["query"],
-            top_k=args.get("top_k", 15),
-            collector=collector,
-        )
+        # Alcance documental (C01). El cliente siempre supo serializar
+        # `caseLink`; lo que faltaba era exponerlo en la herramienta y
+        # transmitirlo. Sin esto, el alcance dependía de que el modelo
+        # escribiera el expediente dentro de la frase de búsqueda, que no
+        # impone identidad: H15 no recuperó `178_2017_2TCC` en nueve
+        # respuestas, y H10 acabó citando el acto original en vez del
+        # cumplimiento.
+        #
+        # Una búsqueda por documento, no un postfiltro sobre un top-k global:
+        # el postfiltro puede descartar todo *después* de haber perdido el
+        # documento requerido, que es justo el caso que hay que evitar.
+        expedientes = [
+            str(e).strip() for e in (args.get("en_expedientes") or [])
+            if str(e or "").strip()
+        ]
+        if expedientes:
+            results = await self._buscar_criterios_por_documento(
+                args["query"], expedientes, args.get("top_k", 15), collector, state
+            )
+        else:
+            results = await self.criterios.search(
+                query=args["query"],
+                top_k=args.get("top_k", 15),
+                collector=collector,
+            )
         serialized = [
             {
                 "id": r.id,
@@ -1565,6 +1685,28 @@ class NormaPlusAgent:
                 )
                 payload["composicion_fuentes"] = comp
                 state.composicion_fuentes = comp
+
+            # Cobertura por documento pedido. Va al modelo porque es la
+            # diferencia entre "los dos criterios coinciden" y "sólo pude
+            # recuperar uno de los dos": en H15 el agente afirmó coincidencia
+            # plena sin haber recuperado el criterio del 178/2017.
+            if (state is not None and tool_name == "buscar_criterios"
+                    and state.cobertura_por_documento):
+                payload["cobertura_por_documento"] = state.cobertura_por_documento
+                vacios = [c["expediente"] for c in state.cobertura_por_documento
+                          if not c["recuperados"]]
+                if vacios:
+                    payload["EVIDENCIA_FALTANTE_POR_DOCUMENTO"] = {
+                        "sin_evidencia": vacios,
+                        "regla": (
+                            "No recuperaste NADA de estos documentos. No los "
+                            "describas, no los compares y no afirmes que "
+                            "coinciden o difieren de otro: di explícitamente "
+                            "que no obtuviste su contenido. Si la pregunta "
+                            "pedía compararlos, la comparación queda "
+                            "incompleta y hay que decirlo."
+                        ),
+                    }
 
             # Cero resultados no es "no existe".
             #

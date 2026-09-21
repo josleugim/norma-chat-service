@@ -949,3 +949,71 @@ class TestMarcadorEnLosPlazos:
         reg = CitationRegistry()
         m = reg.assign({"caseLink": "275_2023_1JD"}, "E")
         assert reg.case_link_of(m) == "275_2023_1JD"
+
+
+class TestResolucionDeIdentidades:
+    """
+    C02 del diagnóstico de COFECE. "El amparo en revisión 677/2024" viajaba
+    intacto como texto libre a una búsqueda léxica y devolvía cero en ocho de
+    nueve corridas. En la novena el modelo eligió por su cuenta
+    `677_2024_1SCJN` y lo encontró: el acierto dependía de que adivinara el
+    identificador interno.
+
+    Las pruebas de cierre que pide el diagnóstico: pares equivalentes resuelven
+    los mismos registros, un número compartido por órganos distintos no se
+    fusiona, y dos actos de un expediente conservan IDs distintos.
+    """
+
+    UNIVERSO = [
+        "VCN-004-2024", "677_2024_1SCJN", "480_2018_2SCJN",
+        "275_2023_1JD", "275_2023_3JD", "178_2017_2TCC",
+        "278_2023_1JD_2024_07_15", "278_2023_1JD_2025_11_19",
+        "1259-1260_2017_2JD",
+    ]
+
+    def _r(self):
+        from core.identidades import ResolutorDeIdentidades
+        return ResolutorDeIdentidades(self.UNIVERSO)
+
+    def test_el_numero_natural_resuelve_al_identificador_interno(self):
+        r = self._r().resolver("En el amparo en revisión 677/2024, ¿la Primera "
+                               "Sala resolvió todos los agravios?")
+        assert len(r) == 1
+        assert r[0]["candidatos"] == ["677_2024_1SCJN"]
+        assert not r[0]["ambiguo"]
+
+    def test_numero_compartido_por_dos_organos_no_se_fusiona(self):
+        r = self._r().resolver("En el amparo 275/2023, ¿qué se resolvió?")
+        assert r[0]["ambiguo"]
+        assert set(r[0]["candidatos"]) == {"275_2023_1JD", "275_2023_3JD"}
+
+    def test_el_organo_desambigua(self):
+        r = self._r().resolver("En el amparo 275/2023 del Juzgado Primero de "
+                               "Distrito, ¿cuántos días naturales pasaron?")
+        assert r[0]["candidatos"] == ["275_2023_1JD"]
+        assert not r[0]["ambiguo"]
+
+    def test_dos_actos_del_mismo_expediente_se_conservan(self):
+        r = self._r().resolver("el amparo 278/2023 del Juzgado Primero")
+        assert set(r[0]["candidatos"]) == {
+            "278_2023_1JD_2024_07_15", "278_2023_1JD_2025_11_19"}
+        assert r[0]["ambiguo"], "dos actos distintos no se colapsan en uno"
+
+    def test_no_fabrica_identificadores(self):
+        """Lo que no existe en el universo no se inventa por concatenación."""
+        assert self._r().resolver("el amparo 999/1999") == []
+
+    def test_numero_con_acumulados(self):
+        r = self._r().resolver("el amparo 1259-1260/2017")
+        assert r[0]["candidatos"] == ["1259-1260_2017_2JD"]
+
+    def test_partes_de_un_identificador_judicial(self):
+        from core.identidades import partes_de
+        p = partes_de("565_2023_1TCC_2025_04_24")
+        assert p["numero"] == "565" and p["anio"] == "2023"
+        assert p["marca_organo"] == "TCC" and p["ordinal_organo"] == "1"
+        assert p["acto"] == "2025_04_24"
+
+    def test_un_expediente_administrativo_no_es_judicial(self):
+        from core.identidades import partes_de
+        assert partes_de("VCN-004-2024") is None
