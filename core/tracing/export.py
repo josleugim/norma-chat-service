@@ -21,6 +21,7 @@ COLUMNS = [
     "tool_call_count", "query_type", "sufficiency_passed",
     "retrieval_retries", "abstained", "coverage_strategy", "docs_retrieved",
     "coverage_truncated", "exhaustive_but_truncated", "deadline_tool_called",
+    "fuentes_resolucion", "fuentes_sentencia",
     "plazo_cases", "plazo_inputs_missing", "plazo_out_of_coverage",
     "coverage_truncation_reasons",
     "second_retrieval", "exhausted_tools", "context_condensed",

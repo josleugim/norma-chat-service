@@ -57,3 +57,10 @@ class TurnState:
     computation_audit: list[dict] = field(default_factory=list)
     # Anomalías de datos encontradas, en formato analizable.
     anomalias: list[dict] = field(default_factory=list)
+
+    # ── Composición de la evidencia ─────────────────────────
+    # Cuántas resoluciones de la autoridad de competencia y cuántas sentencias
+    # del poder judicial entraron al contexto. Sin esto, una respuesta sobre
+    # "los criterios de la COFECE" construida con 17 sentencias de 60 fuentes
+    # se ve idéntica a una construida sólo con resoluciones.
+    composicion_fuentes: dict | None = None

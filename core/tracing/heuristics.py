@@ -124,6 +124,23 @@ def interpret(query: str) -> Interpretation:
     )
 
 
+# Pregunta por doctrina: qué criterio, concepto o metodología se usa. No se
+# contesta con metadatos de expediente.
+DOCTRINAL_RE = re.compile(
+    r"\b(criterio|criterios|concepto|doctrina|metodolog[íi]a|par[áa]metro|"
+    r"par[áa]metros|c[óo]mo (?:se )?(?:define|determina|calcula|pondera))\b",
+    re.IGNORECASE,
+)
+
+# Pregunta por un hecho SOBRE expedientes: un máximo, un conteo, una lista.
+# Aunque sea doctrinal en la forma, necesita los metadatos.
+HECHO_EXPEDIENTE_RE = re.compile(
+    r"\b(expediente|expedientes|caso|casos|m[áa]xim[oa]|m[íi]nim[oa]|mayor|"
+    r"menor|promedio|cu[áa]nt[oa]s|lista|listado|todos|todas)\b",
+    re.IGNORECASE,
+)
+
+
 def expected_tools(query: str) -> list[str]:
     """
     Herramientas que la consulta *debería* haber disparado.
@@ -139,10 +156,31 @@ def expected_tools(query: str) -> list[str]:
     esperadas = []
     if COMPUTATION_RE.search(q):
         esperadas.append("calcular_plazos")
-    if CASE_LINK_RE.search(q) or re.search(
+
+    menciona_dato = bool(re.search(
         r"\b(expediente|expedientes|multa|multas|resoluci[óo]n|agente econ[óo]mico"
         r"|sentido|fecha)\b", q, re.IGNORECASE
-    ):
+    ))
+    # Una pregunta doctrinal no se contesta con metadatos de expediente, y
+    # esperar la herramienta sólo porque aparece un sustantivo del dominio es
+    # un falso positivo. Verificado el 20-sep contra staging sobre q10
+    # ("¿cuáles son los criterios que usa la COFECE para determinar el monto
+    # de las multas?"): `searchData` busca en caseLink, name, economicAgents y
+    # relevantMarkets —donde no viven los criterios jurídicos— y devuelve
+    # `total: 0`. El agente tampoco la eligió en cinco corridas teniéndola
+    # disponible. No se estaba saltando una herramienta útil: la esperábamos mal.
+    #
+    # La supresión es estrecha a propósito. Si la pregunta nombra un expediente
+    # concreto, o pide un hecho SOBRE expedientes (un máximo, un conteo, una
+    # lista), la expectativa se mantiene: así q05 y q11 —"la multa máxima
+    # impuesta en expedientes VCN"— siguen exigiéndola.
+    if menciona_dato and not CASE_LINK_RE.search(q):
+        doctrinal = bool(DOCTRINAL_RE.search(q))
+        hecho_de_expediente = bool(HECHO_EXPEDIENTE_RE.search(q))
+        if doctrinal and not hecho_de_expediente:
+            menciona_dato = False
+
+    if CASE_LINK_RE.search(q) or menciona_dato:
         esperadas.append("buscar_expedientes")
     if re.search(
         r"\b(criterio|criterios|concepto|defini[óc]|mercado relevante|barreras"

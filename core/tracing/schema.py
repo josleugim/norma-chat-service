@@ -141,6 +141,11 @@ class Decisions(BaseModel):
     computation_audit: list[dict[str, Any]] = Field(default_factory=list)
     # Anomalías de datos en formato analizable.
     data_anomalies: list[dict[str, Any]] = Field(default_factory=list)
+    # Cuántas resoluciones de la autoridad de competencia y cuántas sentencias
+    # del poder judicial entraron al contexto. Una respuesta sobre "los
+    # criterios de la COFECE" construida con 17 sentencias de 60 fuentes tiene
+    # que verse distinta de una construida sólo con resoluciones.
+    composicion_fuentes: Optional[dict[str, int]] = None
     used_cached_evidence: bool = False
     answered_without_retrieval: bool = False
     final_answer_path: Optional[str] = None
@@ -316,6 +321,14 @@ class Trace(BaseModel):
             "retrieval_retries": self.decisions.retrieval_retries,
             "abstained": self.decisions.abstained,
             "exhaustive_but_truncated": self.decisions.exhaustive_but_truncated,
+            # Desglosado en columnas propias: el renglón plano es lo que leen
+            # `compare.py` y el XLSX, así que un indicador que sólo vive en la
+            # traza completa no se puede comparar entre corridas — que es
+            # justo para lo que se construyó.
+            "fuentes_resolucion": (self.decisions.composicion_fuentes or {}).get(
+                "resolucion"),
+            "fuentes_sentencia": (self.decisions.composicion_fuentes or {}).get(
+                "sentencia"),
             "docs_retrieved": retrieval_docs,
             "coverage_truncated": truncated,
             "coverage_truncation_reasons": motivos,
