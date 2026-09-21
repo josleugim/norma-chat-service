@@ -45,6 +45,16 @@ class Settings(BaseSettings):
     # primeros 2000 caracteres. Útil para depurar un caso puntual.
     tracing_full_text: bool = False
 
+    # --- Universo consultable ---
+    # Ruta a un JSON con la lista cerrada de expedientes a los que se limita
+    # TODO el acceso del agente. Vacío = acervo completo.
+    #
+    # Existe por el paso 01 del protocolo de holdout de COFECE, que prohíbe
+    # expresamente lograr el alcance por prompt o por prefijo. Es configuración
+    # del entorno, así que queda registrada en el manifiesto de la corrida y no
+    # depende de que el modelo obedezca una instrucción.
+    universo_path: str = ""
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 

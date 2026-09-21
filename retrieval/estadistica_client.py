@@ -140,6 +140,15 @@ class EstadisticaSearchClient:
         self.last_truncado: bool = False
         self.last_pages_fetched: int = 1
 
+        # Universo restringido (paso 01 del holdout). Cuando está puesto, todo
+        # lo que sale de este cliente queda acotado a esa lista cerrada, y la
+        # restricción se registra como un paso más del linaje de filtros.
+        # Va aquí y no en el agente a propósito: es el único punto por el que
+        # pasan search, fetch_universe y fetch_by_prefix, así que ninguna ruta
+        # puede saltárselo por olvido.
+        self.universo = None
+        self.ultimo_descartados_universo: int = 0
+
     # ── Construcción de la petición ──────────────────────────────────
 
     def _build_params(
@@ -224,6 +233,20 @@ class EstadisticaSearchClient:
             search_field: Columna a la que dirigir `text_search`.
             prefijo:     Guarda local de prefijo de expediente (VCN, IO...).
         """
+        # Con universo restringido el tope deja de tener sentido como tope.
+        #
+        # Pedir 50 y quedarnos con los que caen en el universo mezcla dos
+        # cortes distintos: el de la API sobre el acervo y el nuestro sobre la
+        # lista. El resultado no permite afirmar ni cobertura ni truncamiento
+        # del universo, porque el corte ocurrió sobre otra población.
+        #
+        # Se pide el conjunto completo que cumple los filtros —la API los
+        # aplica igual, sólo sube el tope— y el recorte al universo pasa a ser
+        # el único corte. Así la cobertura vuelve a ser un hecho. Cuesta una
+        # respuesta más grande; cuesta menos que una exhaustividad falsa.
+        if self.universo is not None:
+            limit = max(limit, LIMIT_UNIVERSO)
+
         params = self._build_params(text_search, filters, limit, search_field)
 
         headers = {}
@@ -283,6 +306,22 @@ class EstadisticaSearchClient:
                 logger.warning(f"Error parseando caso: {e}")
                 continue
 
+        # Universo restringido. Va ANTES de la guarda de prefijo y antes de
+        # leer la cobertura: `meta.total` describe el acervo entero de la API,
+        # no nuestro universo, así que usarlo como denominador después de
+        # recortar produciría exactamente la falsa exhaustividad que este
+        # proyecto persigue.
+        self.ultimo_descartados_universo = 0
+        if self.universo is not None:
+            antes = len(results)
+            results = self.universo.filtrar(results)
+            self.ultimo_descartados_universo = antes - len(results)
+            if self.ultimo_descartados_universo:
+                logger.debug(
+                    f"Universo restringido: {antes} → {len(results)} "
+                    f"(descartados {self.ultimo_descartados_universo})"
+                )
+
         # Guarda de prefijo. `searchData` es cross-field, así que puede colar
         # registros cuyo caseLink no empieza con el prefijo pedido.
         if prefijo:
@@ -313,6 +352,30 @@ class EstadisticaSearchClient:
                 "La API no devolvió meta.total; el truncamiento vuelve a ser "
                 "una estimación basada en returned==limit."
             )
+
+        # Con universo restringido, el total de la API mide otra cosa.
+        #
+        # `meta.total` cuenta las coincidencias en el acervo completo (4,697).
+        # Si pedimos 50, la API devuelve 50 de 1,800 y nosotros nos quedamos
+        # con los 3 que están en el universo, el truncamiento REAL de nuestro
+        # universo no se puede deducir de esos números: el corte ocurrió sobre
+        # una población que no es la nuestra.
+        #
+        # Afirmar cobertura completa aquí sería la falsa exhaustividad de
+        # siempre, y afirmar truncamiento sería una alarma falsa. Así que el
+        # total queda en None —desconocido— salvo que la respuesta venga
+        # demostrablemente completa desde el servidor, único caso en que sí
+        # vimos todo el acervo y por tanto todo nuestro universo.
+        if self.universo is not None:
+            acervo_completo = (
+                total is not None and devueltos >= int(total)
+            )
+            if acervo_completo:
+                self.last_total = len(results)
+                self.last_truncado = False
+            else:
+                self.last_total = None
+                self.last_truncado = True
 
         if collector is not None:
             collector.record_stage(
