@@ -1333,6 +1333,26 @@ class NormaPlusAgent:
         else:
             result["expedientes"] = enriched[:50]
 
+        # Cada plazo sale con el marcador de su expediente.
+        #
+        # El holdout dejó ver que una respuesta puede ser correcta y aun así
+        # romper la trazabilidad: en H05 el agente calculó bien los 14 y 355
+        # días naturales y nombró la sentencia en FUENTES, pero nunca escribió
+        # un marcador en el cuerpo, así que la cadena afirmación → marcador →
+        # registro → documento se cortaba y `citations_emitted` quedaba en 0.
+        #
+        # La causa no era que faltara el registro —`buscar_expedientes` ya lo
+        # había asignado— sino que la respuesta se arma desde la salida de esta
+        # herramienta, y aquí el marcador no venía. Reusar el que ya existe, en
+        # vez de asignar uno nuevo, mantiene una sola identidad por expediente
+        # en todo el turno.
+        if state is not None and getattr(state, "registry", None) is not None:
+            for e in result.get("expedientes", []):
+                if isinstance(e, dict):
+                    ref = state.registry.assign(e, "E")
+                    if ref:
+                        e["ref"] = ref
+
         # Stats si se pidieron
         if args.get("compute_stats"):
             data_for_stats = result.get("expedientes", enriched)

@@ -913,3 +913,39 @@ class TestAlcanceConIdentificadoresJudiciales:
         obs, mismatch = self._scope(["VCN-005-2020", "CNT-090-2025"])
         assert obs == {"VCN", "CNT"}
         assert mismatch
+
+
+class TestMarcadorEnLosPlazos:
+    """
+    El holdout dejó ver que una respuesta puede ser correcta y aun así romper
+    la trazabilidad. En H05 el agente calculó bien los días naturales y nombró
+    la sentencia en FUENTES, pero no escribió marcador en el cuerpo:
+    `citations_emitted` quedó en 0 y la cadena afirmación → marcador →
+    registro → documento se cortaba.
+
+    El registro ya tenía el expediente; lo que faltaba era que la salida de
+    `calcular_plazos` lo trajera.
+    """
+
+    def test_el_marcador_se_reusa_no_se_duplica(self):
+        from core.citations import CitationRegistry
+        reg = CitationRegistry()
+        doc = {"caseLink": "275_2023_1JD", "judgmentDate": "15-07-2024"}
+        primero = reg.assign(doc, "E")
+        # El mismo expediente, llegando por otra herramienta.
+        otra_vista = {"caseLink": "275_2023_1JD", "dias_naturales": 355}
+        segundo = reg.assign(otra_vista, "E")
+        assert primero == segundo, "un expediente debe tener una sola identidad"
+
+    def test_dos_expedientes_distintos_llevan_marcadores_distintos(self):
+        from core.citations import CitationRegistry
+        reg = CitationRegistry()
+        a = reg.assign({"caseLink": "275_2023_1JD"}, "E")
+        b = reg.assign({"caseLink": "43_2021_3JD"}, "E")
+        assert a != b
+
+    def test_el_marcador_resuelve_al_expediente(self):
+        from core.citations import CitationRegistry
+        reg = CitationRegistry()
+        m = reg.assign({"caseLink": "275_2023_1JD"}, "E")
+        assert reg.case_link_of(m) == "275_2023_1JD"

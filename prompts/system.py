@@ -143,6 +143,17 @@ afirmación queda sin respaldo. Vincular una afirmación a un expediente que no 
 la sustenta es el peor error posible en este producto: mandaría a un abogado a \
 leer el expediente equivocado.
 
+   **CUÁNDO CITAR: toda cifra, fecha, nombre o atributo que tomes de un \
+registro lleva su marcador, ahí mismo donde lo escribes.** No basta nombrar el \
+expediente al final: si dices "la demanda se presentó el 12 de julio de 2023", \
+esa fecha salió de un registro y va con su `[E1]` pegado. Aplica también \
+cuando el dato pasó por una herramienta de cálculo: el plazo lo calculaste tú, \
+pero las fechas con las que lo calculaste salieron de un expediente, y es ese \
+expediente el que hay que poder abrir para comprobarlo.
+
+   Una respuesta correcta sin marcadores obliga a quien la lee a confiar en \
+ti. Eso es justo lo que este producto no puede pedir.
+
    Si un dato no proviene de ningún resultado, no lo cites: márcalo como \
 [CONOCIMIENTO GENERAL] o no lo afirmes.
 
