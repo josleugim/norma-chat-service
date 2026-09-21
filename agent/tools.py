@@ -45,8 +45,14 @@ TOOLS = [
                         "`query` NO acota la búsqueda. Para comparar dos "
                         "documentos, pásalos ambos: se busca en cada uno por "
                         "separado y se conservan los dos conjuntos de "
-                        "evidencia. Omítelo sólo cuando la pregunta sea "
-                        "temática y no identifique documento."
+                        "evidencia.\n\n"
+                        "NO es un prefijo ni un tipo. `\"VCN-\"`, `\"VCN\"` o "
+                        "`\"amparos\"` NO son identificadores y no acotan "
+                        "nada: se ignoran. Si la pregunta es temática —«busca "
+                        "una resolución VCN que explique X»— OMITE este "
+                        "parámetro y deja que la búsqueda semántica recorra "
+                        "el acervo. Úsalo sólo cuando sepas QUÉ documento "
+                        "concreto necesitas."
                     ),
                 },
             },

@@ -1289,3 +1289,52 @@ class TestValidacionAntesDeEmitir:
             self._Reg(["C1"]))
         assert "[C14] doc catorce" not in r["texto"]
         assert "[C1] doc uno" in r["texto"]
+
+
+class TestFiltroDocumentalNoAcotaSiNoIdentifica:
+    """
+    Regresión propia, detectada en la regresión del 21-sep. Ante una pregunta
+    temática ("busca una resolución VCN que explique…") el modelo pasó
+    `en_expedientes: ["VCN-"]` — un prefijo, no un identificador. El filtro lo
+    tomó literalmente, devolvió cero sobre 19 criterios que sí existían, y el
+    agente se abstuvo contestando por doctrina.
+
+    Una abstención que parece prudente y en realidad es capacidad perdida: el
+    caso exacto que el paso 08 de COFECE señala como "abstenerse prudentemente
+    no demuestra recuperación exitosa".
+
+    El diagnóstico ya lo advertía: la obligación de filtro se activa cuando hay
+    una identidad RESUELTA, no para toda consulta semántica.
+    """
+
+    def _universo(self):
+        from core.universo import UniversoRestringido
+        return UniversoRestringido(
+            ["VCN-001-2025", "VCN-002-2017", "178_2017_2TCC"], etiqueta="t")
+
+    def test_un_prefijo_no_es_una_identidad(self):
+        u = self._universo()
+        assert "VCN-" not in u
+        assert "VCN" not in u
+        assert "VCN-001-2025" in u
+
+    def test_valores_que_no_identifican_se_separan_de_los_que_si(self):
+        u = self._universo()
+        pedidos = ["VCN-", "VCN-001-2025", "amparos"]
+        validos = [e for e in pedidos if e in u]
+        descartados = [e for e in pedidos if e not in u]
+        assert validos == ["VCN-001-2025"]
+        assert descartados == ["VCN-", "amparos"]
+
+    def test_la_descripcion_advierte_contra_el_prefijo(self):
+        import agent.tools as t
+        tool = next(
+            d for grp in vars(t).values()
+            if isinstance(grp, list) and grp and isinstance(grp[0], dict)
+            for d in grp
+            if (d.get("function", d)).get("name") == "buscar_criterios"
+        )
+        desc = (tool.get("function", tool)["parameters"]["properties"]
+                ["en_expedientes"]["description"])
+        assert "NO es un prefijo" in desc
+        assert "OMITE" in desc

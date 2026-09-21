@@ -763,6 +763,42 @@ class NormaPlusAgent:
         incompleta en vez de presentarse como coincidencia.
         """
         universo = getattr(self.estadistica, "universo", None)
+
+        # Un valor que no es una identidad NO acota: abre.
+        #
+        # Regresión propia detectada en la regresión del 21-sep: ante una
+        # pregunta temática ("busca una resolución VCN que explique…") el
+        # modelo pasó `en_expedientes: ["VCN-"]`, un prefijo. El filtro lo tomó
+        # literalmente, no lo encontró, y devolvió cero sobre 19 criterios que
+        # sí existían. El agente se abstuvo y contestó por doctrina: una
+        # abstención que parece prudente y en realidad es capacidad perdida.
+        #
+        # El diagnóstico ya lo advertía: la obligación de filtro se activa
+        # cuando hay una identidad documental RESUELTA, no para toda consulta
+        # semántica. Un valor que no identifica un documento del universo se
+        # descarta y la búsqueda sigue abierta, que es lo que la pregunta pedía.
+        if universo is not None:
+            validos = [e for e in expedientes if e in universo]
+            descartados = [e for e in expedientes if e not in universo]
+            if descartados:
+                logger.warning(
+                    f"en_expedientes con valores que no identifican un "
+                    f"documento del universo: {descartados}. Se ignoran; la "
+                    f"búsqueda NO se acota con ellos."
+                )
+            if not validos:
+                # Ninguno identificaba nada: búsqueda abierta, no búsqueda
+                # vacía. Acotar a la nada y concluir ausencia es el error.
+                if state is not None:
+                    state.cobertura_por_documento = [{
+                        "expediente": e, "recuperados": None,
+                        "motivo": "no identifica un documento; filtro ignorado",
+                    } for e in descartados]
+                return await self.criterios.search(
+                    query=query, top_k=top_k, collector=collector
+                )
+            expedientes = validos
+
         vistos: set[str] = set()
         agregados: list = []
         cobertura: list[dict] = []
