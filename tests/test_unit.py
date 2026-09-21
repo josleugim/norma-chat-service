@@ -1083,3 +1083,105 @@ class TestContratoDeCalculo:
                       "judgmentDate"):
             assert campo in props["campo_inicio"]["enum"], campo
         assert "judgmentDate" in props["campo_fin"]["enum"]
+
+
+class TestVozDelCriterio:
+    """
+    C05 del diagnóstico de COFECE. Ante "¿qué sostuvo el tribunal en el
+    353/2024?" el agente presentó como postura MAYORITARIA el criterio 8422,
+    que es el voto particular de la Magistrada Irma Leticia Flores Díaz, e
+    invirtió lo que sostenían mayoría y disidencia.
+
+    La API no expone la voz en campo propio (verificado el 21-sep-2026); el
+    rastro está en `metadata.context`.
+    """
+
+    VOTO = {
+        "content": "los elementos del 130 no resultan aplicables en su totalidad",
+        "metadata": {"context": (
+            "…cuáles no.” Magistrada Irma Leticia Flores Díaz. "
+            "Respetuosamente, formulo voto en contra, en atención a que…")},
+    }
+    SALVEDAD = {
+        "content": "me aparto de las consideraciones",
+        "metadata": {"context": (
+            "SALVEDADES QUE FORMULA EL MAGISTRADO FRANCISCO GARCÍA SANDOVAL, "
+            "EN EL EXPEDIENTE R.A. 353/2024.")},
+    }
+    SENTENCIA = {
+        "content": "la autoridad debe valorar la totalidad de los elementos",
+        "metadata": {"context": "<<<PAGINA:88>>> En consecuencia, procede…"},
+    }
+
+    def test_identifica_el_voto_particular_y_su_autora(self):
+        from core.voz import clasificar_voz, VOTO_PARTICULAR
+        v = clasificar_voz(self.VOTO)
+        assert v["voz"] == VOTO_PARTICULAR
+        assert v["autor"] == "Irma Leticia Flores Díaz"
+        assert v["evidencia"], "la clasificación debe ser auditable"
+
+    def test_identifica_las_salvedades(self):
+        from core.voz import clasificar_voz, VOTO_PARTICULAR
+        v = clasificar_voz(self.SALVEDAD)
+        assert v["voz"] == VOTO_PARTICULAR
+        assert "FRANCISCO GARCÍA SANDOVAL" in (v["autor"] or "")
+
+    def test_sin_marca_NO_se_concluye_mayoria(self):
+        """
+        La regla central: que el documento sea una sentencia no dice quién
+        habla en ese fragmento. Deducir "mayoría" es el error a impedir.
+        """
+        from core.voz import clasificar_voz, NO_IDENTIFICADA
+        v = clasificar_voz(self.SENTENCIA)
+        assert v["voz"] == NO_IDENTIFICADA
+        assert v["autor"] is None
+
+    def test_un_voto_sin_firma_no_produce_nombre(self):
+        from core.voz import clasificar_voz, VOTO_PARTICULAR
+        v = clasificar_voz({"content": "formulo voto particular en contra",
+                            "metadata": {}})
+        assert v["voz"] == VOTO_PARTICULAR
+        assert v["autor"] is None, "sin firma legible no se inventa autor"
+
+    def test_cambiar_el_autor_cambia_la_salida(self):
+        """No puede quedar fijado al ejemplo del holdout."""
+        from core.voz import clasificar_voz
+        otro = {"content": "x", "metadata": {"context":
+                "Magistrada Ana Pérez López. Respetuosamente, formulo voto…"}}
+        assert clasificar_voz(otro)["autor"] == "Ana Pérez López"
+
+
+class TestContinuidadDeCitasEntreTurnos:
+    """
+    C04. En H19 `[C14]` era una cita válida a `511_2023_2TCC`. H20 la
+    reutilizó, pero su registro sólo llegaba a C10: quedó inválida aunque el
+    documento fuera real. La causa era que el resumen de caché usaba índices
+    posicionales, no los marcadores del registro del turno.
+    """
+
+    def test_la_evidencia_previa_se_registra_en_el_turno_actual(self):
+        from core.citations import CitationRegistry
+        from core.evidence_cache import EvidenceCache
+        cache = EvidenceCache()
+        crit = {"id": "8496", "text": "criterio sobre individualización",
+                "metadata": {"id_expediente": "511_2023_2TCC",
+                             "title": "Individualización", "paginas_parrafos": "89, 90, 91"}}
+        cache.update("s1", "pregunta previa", [crit], [])
+        reg = CitationRegistry()
+        ctx = cache.contexto_para_turno("s1", reg)
+        assert "511_2023_2TCC" in ctx
+        # El marcador del contexto tiene que existir en el registro del turno.
+        import re
+        marcadores = re.findall(r"\[([CE]\d+)\]", ctx)
+        assert marcadores
+        for m in marcadores:
+            assert reg.resolve(m) is not None, f"{m} debe resolver"
+
+    def test_el_contexto_trae_el_texto_no_solo_el_titulo(self):
+        from core.citations import CitationRegistry
+        from core.evidence_cache import EvidenceCache
+        cache = EvidenceCache()
+        cache.update("s1", "q", [{"id": "1", "text": "CONTENIDO SUSTANTIVO",
+                                  "metadata": {"id_expediente": "X-1"}}], [])
+        ctx = cache.contexto_para_turno("s1", CitationRegistry())
+        assert "CONTENIDO SUSTANTIVO" in ctx

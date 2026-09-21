@@ -25,6 +25,7 @@ from agent.tools import TOOLS
 from prompts.system import AGENT_SYSTEM_PROMPT, TITLE_GENERATION_PROMPT
 from core.fuentes import case_link_de, clasificar_fuente, composicion
 from core.identidades import ResolutorDeIdentidades
+from core.voz import clasificar_voz, etiqueta as etiqueta_voz, VOTO_PARTICULAR, NO_IDENTIFICADA
 from models.schemas import (
     StreamEvent, LLMMessage,
 )
@@ -574,17 +575,24 @@ class NormaPlusAgent:
         # Construir contexto del cache si hay evidencia
         cache_context = ""
         if used_cache and (cached_criterios or cached_expedientes):
-            cache_context = self.evidence_cache.get_context_summary(session_id)
+            # Registrada en ESTE turno, con sus marcadores actuales (C04).
+            # El resumen anterior usaba índices posicionales, así que el modelo
+            # acababa reutilizando marcadores de su respuesta previa.
+            registro = getattr(state, "registry", None) if state else None
+            cache_context = self.evidence_cache.contexto_para_turno(
+                session_id, registro
+            ) or self.evidence_cache.get_context_summary(session_id)
 
         # System prompt + cache context
         system_content = AGENT_SYSTEM_PROMPT
         if cache_context:
             system_content += (
                 "\n\n## EVIDENCIA DE TURNOS ANTERIORES\n"
-                "La siguiente evidencia fue recuperada en turnos anteriores de "
-                "esta conversación. Puedes usarla si es relevante para la consulta "
-                "actual, sin necesidad de volver a buscar. Si necesitas información "
-                "adicional o más reciente, usa las herramientas.\n\n"
+                "Puedes usarla si es relevante, sin volver a buscar. Los "
+                "marcadores de abajo son los de ESTE turno: los que aparezcan "
+                "en tus respuestas anteriores NO son válidos aquí, aunque "
+                "recuerdes haberlos escrito. Si necesitas algo que no está, "
+                "usa las herramientas.\n\n"
                 + cache_context
             )
 
@@ -786,16 +794,28 @@ class NormaPlusAgent:
                 top_k=args.get("top_k", 15),
                 collector=collector,
             )
-        serialized = [
-            {
+        # Voz del criterio (C05). Un voto particular dice lo contrario de la
+        # sentencia: atribuirlo al tribunal cambia el sentido de lo resuelto.
+        # La API no expone la voz en campo propio —verificado el 21-sep— pero
+        # el rastro está en `metadata.context`, en la fórmula con la que se
+        # firman estos documentos.
+        serialized = []
+        for r in results:
+            v = clasificar_voz({"content": r.text, "metadata": r.metadata})
+            d = {
                 "id": r.id,
                 # truncar para no explotar el contexto
                 "text": r.text[:CRITERIO_CONTEXT_CHARS],
                 "score": r.score,
                 "metadata": r.metadata,
+                "voz": v["voz"],
+                "voz_etiqueta": etiqueta_voz(v["voz"]),
             }
-            for r in results
-        ]
+            if v["autor"]:
+                d["autor_del_voto"] = v["autor"]
+            if v["evidencia"]:
+                d["voz_evidencia"] = v["evidencia"]
+            serialized.append(d)
 
         # ── Control de suficiencia ──────────────────────────
         # ¿Esta evidencia responde exactamente lo preguntado, o solo se le
