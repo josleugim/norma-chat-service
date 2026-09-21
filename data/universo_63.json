@@ -1,0 +1,317 @@
+[
+  {
+    "case_link": "VCN-001-2017",
+    "id_bd": "25066",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-001-2018",
+    "id_bd": "25070",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-001-2019",
+    "id_bd": "25072",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-001-2020",
+    "id_bd": "25074",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-001-2021",
+    "id_bd": "25078",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-001-2022",
+    "id_bd": "25063",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-001-2023",
+    "id_bd": "25060",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-001-2024",
+    "id_bd": "25054",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-001-2025",
+    "id_bd": "25182",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-002-2017",
+    "id_bd": "25065",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-002-2020",
+    "id_bd": "25073",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-002-2021",
+    "id_bd": "25079",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-002-2022",
+    "id_bd": "25080",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-002-2023",
+    "id_bd": "25056",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-002-2024",
+    "id_bd": "25048",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-002-2025",
+    "id_bd": "25228",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-003-2017",
+    "id_bd": "25067",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-003-2020",
+    "id_bd": "25075",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-003-2022",
+    "id_bd": "25059",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-003-2023",
+    "id_bd": "25057",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-003-2024",
+    "id_bd": "25053",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-003-2025",
+    "id_bd": "25221",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-004-2018",
+    "id_bd": "25068",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-004-2020",
+    "id_bd": "25076",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-004-2022",
+    "id_bd": "25062",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-004-2023",
+    "id_bd": "25055",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-004-2024",
+    "id_bd": "25052",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-005-2018",
+    "id_bd": "25071",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-005-2020",
+    "id_bd": "25077",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-005-2022",
+    "id_bd": "25061",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-005-2023",
+    "id_bd": "25051",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-005-2024",
+    "id_bd": "25050",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-006-2018",
+    "id_bd": "25069",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-006-2022",
+    "id_bd": "25058",
+    "familia": "VCN principal"
+  },
+  {
+    "case_link": "VCN-001-2017_2019_03_14",
+    "id_bd": "25262",
+    "familia": "VCN cumplimiento"
+  },
+  {
+    "case_link": "VCN-002-2017_2019_03_14",
+    "id_bd": "25261",
+    "familia": "VCN cumplimiento"
+  },
+  {
+    "case_link": "VCN-002-2023_2025_10_09",
+    "id_bd": "25263",
+    "familia": "VCN cumplimiento"
+  },
+  {
+    "case_link": "VCN-004-2022_2025_10_09",
+    "id_bd": "25264",
+    "familia": "VCN cumplimiento"
+  },
+  {
+    "case_link": "1244_2017_2JD",
+    "id_bd": "25238",
+    "familia": "Juzgado de distrito"
+  },
+  {
+    "case_link": "1251_2017_1JD",
+    "id_bd": "25399",
+    "familia": "Juzgado de distrito"
+  },
+  {
+    "case_link": "1258_2017_2JD",
+    "id_bd": "25254",
+    "familia": "Juzgado de distrito"
+  },
+  {
+    "case_link": "1259-1260_2017_2JD",
+    "id_bd": "25259",
+    "familia": "Juzgado de distrito"
+  },
+  {
+    "case_link": "257_2019_2JD",
+    "id_bd": "25239",
+    "familia": "Juzgado de distrito"
+  },
+  {
+    "case_link": "274_2023_3JD",
+    "id_bd": "25250",
+    "familia": "Juzgado de distrito"
+  },
+  {
+    "case_link": "275_2023_1JD",
+    "id_bd": "25240",
+    "familia": "Juzgado de distrito"
+  },
+  {
+    "case_link": "275_2023_3JD",
+    "id_bd": "25396",
+    "familia": "Juzgado de distrito"
+  },
+  {
+    "case_link": "278_2023_1JD_2024_07_15",
+    "id_bd": "25247",
+    "familia": "Juzgado de distrito"
+  },
+  {
+    "case_link": "278_2023_1JD_2025_11_19",
+    "id_bd": "25245",
+    "familia": "Juzgado de distrito"
+  },
+  {
+    "case_link": "43_2021_3JD",
+    "id_bd": "25256",
+    "familia": "Juzgado de distrito"
+  },
+  {
+    "case_link": "925_2022_3JD",
+    "id_bd": "25397",
+    "familia": "Juzgado de distrito"
+  },
+  {
+    "case_link": "178_2017_2TCC",
+    "id_bd": "25236",
+    "familia": "Tribunal colegiado"
+  },
+  {
+    "case_link": "322_2025_1TCC",
+    "id_bd": "25248",
+    "familia": "Tribunal colegiado"
+  },
+  {
+    "case_link": "331_2022_1TCC",
+    "id_bd": "25244",
+    "familia": "Tribunal colegiado"
+  },
+  {
+    "case_link": "353_2024_1TCC",
+    "id_bd": "25249",
+    "familia": "Tribunal colegiado"
+  },
+  {
+    "case_link": "367_2024_1TCC",
+    "id_bd": "25246",
+    "familia": "Tribunal colegiado"
+  },
+  {
+    "case_link": "511_2023_2TCC",
+    "id_bd": "25401",
+    "familia": "Tribunal colegiado"
+  },
+  {
+    "case_link": "556_2023_1TCC",
+    "id_bd": "25398",
+    "familia": "Tribunal colegiado"
+  },
+  {
+    "case_link": "565_2023_1TCC_2024_07_18",
+    "id_bd": "25257",
+    "familia": "Tribunal colegiado"
+  },
+  {
+    "case_link": "565_2023_1TCC_2025_04_24",
+    "id_bd": "25400",
+    "familia": "Tribunal colegiado"
+  },
+  {
+    "case_link": "93_2018_2TCC",
+    "id_bd": "25253",
+    "familia": "Tribunal colegiado"
+  },
+  {
+    "case_link": "96_2023_2TCC",
+    "id_bd": "25251",
+    "familia": "Tribunal colegiado"
+  },
+  {
+    "case_link": "480_2018_2SCJN",
+    "id_bd": "25258",
+    "familia": "SCJN"
+  },
+  {
+    "case_link": "677_2024_1SCJN",
+    "id_bd": "25255",
+    "familia": "SCJN"
+  }
+]

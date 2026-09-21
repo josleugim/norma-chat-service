@@ -759,3 +759,63 @@ class TestExpectativaDeBuscarExpedientes:
         e = expected_tools("¿qué criterios aplicó la COFECE en la multa "
                            "del expediente VCN-004-2024?")
         assert "buscar_expedientes" in e
+
+
+class TestUniversoRestringido:
+    """
+    Paso 01 del protocolo de holdout de COFECE: el alcance es configuración,
+    no una instrucción por pregunta, y no vale filtrar por prefijo VCN porque
+    dejaría fuera las 25 sentencias judiciales del universo.
+    """
+
+    def _u(self):
+        from core.universo import UniversoRestringido
+        return UniversoRestringido(
+            ["VCN-001-2017", "VCN-004-2024", "1244_2017_2JD", "480_2018_2SCJN"],
+            etiqueta="prueba",
+        )
+
+    def test_incluye_judiciales_no_solo_el_prefijo(self):
+        u = self._u()
+        assert "1244_2017_2JD" in u and "480_2018_2SCJN" in u
+
+    def test_excluye_lo_que_no_esta(self):
+        u = self._u()
+        assert "CNT-090-2025" not in u
+        assert "VCN-005-2018" not in u, "un VCN fuera de la lista tampoco entra"
+
+    def test_tolerante_a_mayusculas(self):
+        u = self._u()
+        assert "vcn-004-2024" in u and "1244_2017_2jd" in u
+
+    def test_filtrar_conserva_el_orden(self):
+        u = self._u()
+        class R:
+            def __init__(s, c): s.caseLink = c
+        regs = [R("CNT-090-2025"), R("VCN-004-2024"), R("CNT-001-2020"),
+                R("1244_2017_2JD")]
+        out = u.filtrar(regs)
+        assert [r.caseLink for r in out] == ["VCN-004-2024", "1244_2017_2JD"]
+
+    def test_archivo_vacio_revienta(self, tmp_path):
+        """
+        Arrancar sin restricción cuando se pidió restricción produciría una
+        corrida que parece válida y mide otro universo.
+        """
+        import json, pytest
+        from core.universo import UniversoRestringido
+        p = tmp_path / "vacio.json"
+        p.write_text(json.dumps([]), encoding="utf-8")
+        with pytest.raises(ValueError):
+            UniversoRestringido.desde_archivo(p)
+
+    def test_carga_el_formato_del_inventario(self, tmp_path):
+        import json
+        from core.universo import UniversoRestringido
+        p = tmp_path / "u.json"
+        p.write_text(json.dumps([
+            {"case_link": "VCN-001-2017", "familia": "VCN principal"},
+            {"case_link": "480_2018_2SCJN", "familia": "SCJN"},
+        ]), encoding="utf-8")
+        u = UniversoRestringido.desde_archivo(p)
+        assert len(u) == 2 and "480_2018_2SCJN" in u

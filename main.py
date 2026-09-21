@@ -75,6 +75,21 @@ async def lifespan(app: FastAPI):
     )
     logger.info("Evidence cache inicializado")
 
+    # ── Universo consultable ────────────────────────────────
+    # Paso 01 del protocolo de holdout: el alcance es configuración, no una
+    # instrucción añadida a cada pregunta. Se engancha al cliente antes del
+    # censo para que la foto del acervo mida el universo real del agente y no
+    # otro más grande.
+    if settings.universo_path:
+        from core.universo import UniversoRestringido
+        universo = UniversoRestringido.desde_archivo(settings.universo_path)
+        estadistica_client.universo = universo
+        logger.info(
+            f"UNIVERSO RESTRINGIDO a {len(universo)} expedientes "
+            f"({universo.etiqueta}). Las consultas estructuradas y las "
+            f"agregaciones no pueden salir de esa lista."
+        )
+
     # ── Trazabilidad ────────────────────────────────────────
     trace_sink = build_sink(settings)
     manifest_store = None
@@ -98,6 +113,35 @@ async def lifespan(app: FastAPI):
             f"Censo del acervo: {census.get('total')} expedientes — "
             + ", ".join(f"{k}:{v}" for k, v in census.get("by_prefix", {}).items())
         )
+
+        # Con universo restringido, el censo debe dar exactamente la lista.
+        # Si da menos, el servicio no tiene todos los documentos que la
+        # configuración declara, y una corrida así mediría un universo más
+        # chico sin que se note: las preguntas de exhaustividad saldrían
+        # "completas" sobre un conjunto incompleto. Es la verificación que
+        # pide el paso 02 del protocolo, y falla ruidosamente a propósito.
+        if estadistica_client.universo is not None:
+            esperados = len(estadistica_client.universo)
+            medidos = census.get("total") or 0
+            if medidos != esperados:
+                faltantes = sorted(
+                    c for c in estadistica_client.universo.case_links
+                    if c not in {
+                        r for r in census.get("case_links_vistos", [])
+                    }
+                ) if census.get("case_links_vistos") else []
+                logger.error(
+                    f"UNIVERSO INCOMPLETO EN EL SERVICIO: la configuración "
+                    f"declara {esperados} expedientes y el censo encontró "
+                    f"{medidos}. No se puede afirmar exhaustividad sobre este "
+                    f"universo."
+                    + (f" Faltan: {', '.join(faltantes[:10])}" if faltantes else "")
+                )
+            else:
+                logger.info(
+                    f"Universo verificado: los {esperados} expedientes de "
+                    f"{estadistica_client.universo.etiqueta} están disponibles."
+                )
         # Un campo que la API deja de mandar no produce ningún error: el
         # registro se parsea igual, el campo queda en None y el agente
         # responde "no hay dato" sobre información que sí existe. Tiene que

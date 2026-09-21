@@ -90,6 +90,13 @@ async def take_census(estadistica_client, prefixes: tuple[str, ...] = PREFIXES) 
 
     census["total"] = len(registros)
 
+    # Los identificadores vistos, para poder decir CUÁLES faltan cuando hay un
+    # universo declarado. Con 63 documentos cabe en el manifiesto; con el
+    # acervo completo no, así que sólo se guarda cuando es una lista corta.
+    vistos = sorted({getattr(r, "caseLink", None) or "" for r in registros})
+    if len(vistos) <= 200:
+        census["case_links_vistos"] = vistos
+
     # Cobertura de campos: cuáles llegan con valor, cuáles llegan siempre
     # vacíos, y cuáles la API directamente ya no incluye en su respuesta.
     presentes: dict[str, int] = {}

@@ -64,3 +64,16 @@ class TurnState:
     # "los criterios de la COFECE" construida con 17 sentencias de 60 fuentes
     # se ve idéntica a una construida sólo con resoluciones.
     composicion_fuentes: dict | None = None
+
+    # ── Rutas de búsqueda ejercidas en el turno ─────────────
+    # Cuántos resultados devolvió cada herramienta de recuperación. Sirve para
+    # una sola pregunta, que es la que q14 contestó mal: ¿se puede afirmar que
+    # algo NO existe?
+    #
+    # Ante "¿qué precedentes hay en el mercado de distribución de
+    # medicamentos?" el agente hizo UNA búsqueda léxica sobre metadatos, recibió
+    # cero, y afirmó que no existen precedentes — sin consultar nunca el índice
+    # semántico de criterios, que es donde vivirían. La respuesta resultó
+    # correcta, y eso es lo que la hace peligrosa: falsa exhaustividad
+    # acertando por suerte, igual que el filtro de negación de §24.6.
+    resultados_por_herramienta: dict[str, int] = field(default_factory=dict)

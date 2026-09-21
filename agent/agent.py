@@ -30,6 +30,15 @@ from models.schemas import (
 
 logger = logging.getLogger(__name__)
 
+# Las dos rutas de recuperación se complementan y no se sustituyen:
+# `buscar_expedientes` es léxica sobre metadatos, `buscar_criterios` es
+# semántica sobre el texto. Que una venga vacía no dice nada sobre la otra, así
+# que afirmar ausencia exige haber ejercido las dos.
+COMPLEMENTO_DE_BUSQUEDA = {
+    "buscar_expedientes": "buscar_criterios",
+    "buscar_criterios": "buscar_expedientes",
+}
+
 # Truncado del texto de criterios al serializarlos para el LLM.
 # Es una de las tres etapas de retrieval: lo que entra al contexto no es lo
 # mismo que lo que devolvió el buscador.
@@ -373,6 +382,19 @@ class NormaPlusAgent:
                 "data_anomalies", state.anomalias, "derived")
             collector.set_decision(
                 "composicion_fuentes", state.composicion_fuentes, "derived")
+            # ¿Alguna ruta vino vacía y su complementaria nunca se ejerció?
+            # Es objetivo y no depende de leer el texto: si la respuesta afirma
+            # ausencia con esto encendido, es falsa exhaustividad.
+            state_r = state.resultados_por_herramienta
+            collector.set_decision(
+                "ausencia_sin_complemento",
+                any(
+                    n == 0 and COMPLEMENTO_DE_BUSQUEDA[t] not in state_r
+                    for t, n in state_r.items()
+                    if t in COMPLEMENTO_DE_BUSQUEDA
+                ),
+                "derived",
+            )
             collector.set_decision(
                 "retrieval_retries", state.retrieval_retries, "derived")
             collector.set_decision(
@@ -1523,6 +1545,40 @@ class NormaPlusAgent:
                 )
                 payload["composicion_fuentes"] = comp
                 state.composicion_fuentes = comp
+
+            # Cero resultados no es "no existe".
+            #
+            # `buscar_expedientes` y `buscar_criterios` no buscan lo mismo ni
+            # buscan igual: la primera es léxica (ILIKE) sobre cuatro columnas
+            # de metadatos —caseLink, name, economicAgents, relevantMarkets—;
+            # la segunda es semántica sobre el texto de los criterios. Que una
+            # no encuentre nada no dice nada sobre la otra.
+            #
+            # Medido en q14: una búsqueda léxica vacía bastó para afirmar que
+            # no hay precedentes en un mercado. La regla que quedó del 9-sep
+            # —la ausencia sólo se afirma cuando la consulta se completó— se
+            # cumplía de forma literal y se incumplía de fondo: la consulta se
+            # completó, pero era la consulta equivocada.
+            if state is not None and tool_name in COMPLEMENTO_DE_BUSQUEDA:
+                state.resultados_por_herramienta[tool_name] = len(result)
+                complemento = COMPLEMENTO_DE_BUSQUEDA[tool_name]
+                if not result and complemento not in state.resultados_por_herramienta:
+                    payload["AUSENCIA_NO_CONCLUYENTE"] = {
+                        "herramienta": tool_name,
+                        "tipo_de_busqueda": (
+                            "léxica sobre metadatos del expediente"
+                            if tool_name == "buscar_expedientes"
+                            else "semántica sobre el texto de los criterios"
+                        ),
+                        "regla": (
+                            "Esta búsqueda no encontró nada, y NO basta para "
+                            "afirmar que no existe: sólo cubre una de las dos "
+                            f"rutas. Llama a `{complemento}` antes de concluir "
+                            "ausencia. Si tampoco encuentra nada, dilo diciendo "
+                            "qué buscaste y por qué ruta, no como un hecho "
+                            "sobre el mundo."
+                        ),
+                    }
 
             # Suficiencia: si lo recuperado no responde la pregunta, decirlo.
             # Una segunda búsqueda focalizada; si tampoco alcanza, abstenerse.
