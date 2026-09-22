@@ -1630,3 +1630,48 @@ class TestEmisorDelDocumento:
                   if not (c == "autoridad" and emisor)]
         assert "autoridad" not in campos
         assert "sentido_resolucion" in campos
+
+
+class TestReconciliacionDelConjuntoCalculado:
+    """
+    C07, lo que quedaba abierto. La calculadora aceptaba el subconjunto que el
+    modelo mandara sin compararlo con la búsqueda previa. COFECE lo reprodujo:
+    enviar cuatro de los cinco registros daba count=4 y promedio 64.5 —en vez
+    de 5 y 63.4— sin que nada justificara la exclusión.
+
+    Una cifra sobre un subconjunto silencioso es peor que un error: se ve bien
+    calculada.
+    """
+
+    def _cinco(self):
+        return [{"caseLink": f"VCN-00{i}-2024", "resolutionDate": "01-01-2024",
+                 "startAgreementDate": "01-01-2024"} for i in range(1, 6)]
+
+    def test_detecta_el_subconjunto_silencioso(self):
+        from core.fuentes import case_link_de
+        recuperados = {case_link_de(e) for e in self._cinco()}
+        enviados = {case_link_de(e) for e in self._cinco()[:4]}
+        excluidos = sorted(recuperados - enviados)
+        assert excluidos == ["VCN-005-2024"]
+
+    def test_el_conjunto_completo_no_marca_exclusiones(self):
+        from core.fuentes import case_link_de
+        recuperados = {case_link_de(e) for e in self._cinco()}
+        enviados = {case_link_de(e) for e in self._cinco()}
+        assert not (recuperados - enviados)
+
+    def test_un_registro_sin_identidad_se_descarta(self):
+        from core.fuentes import case_link_de
+        mezcla = self._cinco() + [{"fecha_inicio": "01-01-2024"}]
+        validos = [e for e in mezcla if case_link_de(e)]
+        sin_id = [e for e in mezcla if not case_link_de(e)]
+        assert len(validos) == 5 and len(sin_id) == 1
+
+    def test_los_ids_viajan_en_la_auditoria(self):
+        """
+        COFECE: "en las trazas H04 los IDs por cálculo siguen vacíos". Sin
+        ellos no se puede reconstruir de dónde salió un promedio.
+        """
+        from core.fuentes import case_link_de
+        ids = sorted(case_link_de(e) for e in self._cinco())
+        assert len(ids) == 5 and all(ids)

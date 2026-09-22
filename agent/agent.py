@@ -1638,6 +1638,42 @@ class NormaPlusAgent:
                 ),
             }
 
+        # Reconciliar con lo recuperado (C07, lo que quedaba abierto).
+        #
+        # La herramienta aceptaba el subconjunto que el modelo mandara, sin
+        # compararlo con la búsqueda previa. COFECE lo reprodujo: enviar cuatro
+        # de los cinco registros daba count=4 y promedio 64.5 —en vez de 5 y
+        # 63.4— sin que nada justificara la exclusión. En H04 ocurrió en tres
+        # de las corridas anteriores.
+        #
+        # Un registro sin identidad tampoco se acepta: no se puede auditar una
+        # cifra cuyo origen no se sabe.
+        sin_id = [e for e in expedientes
+                  if isinstance(e, dict) and not case_link_de(e)]
+        expedientes = [e for e in expedientes
+                       if not (isinstance(e, dict) and not case_link_de(e))]
+        if not expedientes:
+            return {
+                "error": (
+                    "Ninguno de los registros enviados tiene identificador de "
+                    "expediente. No se puede calcular algo que después no se "
+                    "pueda auditar."
+                ),
+                "sugerencia": (
+                    "Usa `usar_ultima_busqueda: true` para operar sobre lo que "
+                    "recuperaste, o pasa fechas sueltas con "
+                    "fecha_inicio_explicita / fecha_fin_explicita."
+                ),
+            }
+
+        excluidos: list[str] = []
+        if state and state.last_expedientes and not args.get("usar_ultima_busqueda"):
+            recuperados = {case_link_de(e) for e in state.last_expedientes
+                           if isinstance(e, dict) and case_link_de(e)}
+            enviados = {case_link_de(e) for e in expedientes
+                        if isinstance(e, dict) and case_link_de(e)}
+            excluidos = sorted(recuperados - enviados)
+
         # Calculadora general entre cualquier par de campos de fecha. Antes
         # estaba cableada a notificación → resolución, que NO EXISTE en VCN.
         calculos = self.temporal.compute_between_fields(
@@ -1722,11 +1758,33 @@ class NormaPlusAgent:
             )
             result["stats"]["unidad"] = plazo_field
             result["stats"]["universo_calculado"] = len(elegibles)
+            result["stats"]["ids_incluidos"] = sorted(
+                case_link_de(e) for e in elegibles
+                if isinstance(e, dict) and case_link_de(e)
+            )
             result["stats"]["alcance"] = (
                 "subconjunto filtrado" if (max_dh is not None or min_dh is not None)
                 else "universo completo"
             )
             result["stats"]["filas_presentadas"] = len(result.get("expedientes", []))
+
+        # Exclusiones y registros sin identidad, declarados al modelo. Una
+        # cifra sobre un subconjunto sin justificar es peor que un error: se
+        # ve bien calculada.
+        if excluidos:
+            result["EXCLUSIONES_NO_JUSTIFICADAS"] = {
+                "recuperaste_y_no_enviaste": excluidos,
+                "regla": (
+                    "Calculaste sobre menos registros de los que habías "
+                    "recuperado. Si la exclusión es deliberada, dila y "
+                    "explícala en la respuesta; si no lo es, vuelve a calcular "
+                    "con `usar_ultima_busqueda: true`. Un promedio sobre un "
+                    "subconjunto silencioso es una cifra correcta para otra "
+                    "pregunta."
+                ),
+            }
+        if sin_id:
+            result["REGISTROS_SIN_IDENTIDAD_DESCARTADOS"] = len(sin_id)
 
         no_calculables = [c for c in calculos if not c["calculable"]]
         if no_calculables:
@@ -1740,6 +1798,31 @@ class NormaPlusAgent:
                 ),
             }
 
+        # La auditoría del cálculo va a `decisions`, no sólo al paso.
+        #
+        # Había dos caminos paralelos: `collector.record_computation` la
+        # guardaba en el step, y la traza escribe `computation_audit` desde
+        # `state`, que esta herramienta nunca llenaba. Por eso COFECE reportó
+        # que "`computation_audit` está vacío" pese a que el cálculo sí se
+        # registraba: se registraba en el otro lado.
+        auditoria = {
+            "tool_called": True,
+            "modo": "entre_campos",
+            "unidad": plazo_field,
+            "ids_incluidos": sorted(
+                case_link_de(e) for e in expedientes
+                if isinstance(e, dict) and case_link_de(e)
+            ),
+            "ids_excluidos_de_la_busqueda": excluidos,
+            "campo_inicio": args.get("campo_inicio") or "default por tipo",
+            "campo_fin": args.get("campo_fin", "resolutionDate"),
+            "n_calculables": sum(1 for c in calculos if c.get("calculable")),
+            "n_no_calculables": sum(1 for c in calculos if not c.get("calculable")),
+            "stats": result.get("stats"),
+        }
+        if state is not None:
+            state.computation_audit.append(auditoria)
+
         if collector is not None:
             collector.record_computation({
                 "tool_called": True,
@@ -1751,6 +1834,12 @@ class NormaPlusAgent:
                     "campo_inicio": args.get("campo_inicio") or "default por tipo",
                     "campo_fin": args.get("campo_fin", "resolutionDate"),
                 },
+                "ids_incluidos": sorted(
+                    case_link_de(e) for e in expedientes
+                    if isinstance(e, dict) and case_link_de(e)
+                ),
+                "ids_excluidos_de_la_busqueda": excluidos,
+                "unidad": plazo_field,
                 "per_case": [
                     {**c, "date_start": c["fecha_inicio"], "date_end": c["fecha_fin"],
                      "business_days": c["dias_habiles"],
