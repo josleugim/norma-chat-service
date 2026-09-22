@@ -46,6 +46,15 @@ COMPLEMENTO_DE_BUSQUEDA = {
 # Truncado del texto de criterios al serializarlos para el LLM.
 # Es una de las tres etapas de retrieval: lo que entra al contexto no es lo
 # mismo que lo que devolvió el buscador.
+# Tope del texto del criterio que viaja al prompt.
+#
+# Durante meses se truncó la EVIDENCIA a 700 caracteres mientras la metadata
+# viajaba entera: `anchor` y `context` sumaban ~1,300 por documento. Cortábamos
+# lo que responde la pregunta y dejábamos crecer lo accesorio. Medido el
+# 22-sep, el texto era el 24% del documento serializado, y en H10 el agente
+# dijo no poder recuperar un criterio que tenía delante.
+#
+# La regla que queda: si hay que recortar, se recorta lo accesorio primero.
 CRITERIO_CONTEXT_CHARS = 700
 
 
@@ -1479,7 +1488,7 @@ class NormaPlusAgent:
                 filters=filters if filters else None,
                 collector=collector,
             )
-            serialized = [r.model_dump() for r in results]
+            serialized = [r.para_prompt() for r in results]
             # Ya no es una página de 500 sobre un universo mayor: el tope es
             # el universo completo, así que la exhaustividad se sostiene
             # salvo que la API haya topado con el límite.
@@ -1494,7 +1503,7 @@ class NormaPlusAgent:
                 limit=fetch_limit,
                 collector=collector,
             )
-            serialized = [r.model_dump() for r in results]
+            serialized = [r.para_prompt() for r in results]
             state.universo_completo = False
 
         # El servidor ya intersecta, pero esta pasada sigue haciendo falta: es

@@ -200,6 +200,28 @@ class ExpedienteRecord(BaseModel):
     principalAppellants: Optional[list[str] | str] = None
     adhesiveAppellants: Optional[list[str] | str] = None
 
+    # Campos que NO viajan al prompt: el modelo no puede usarlos y ocupan el
+    # lugar de la evidencia. `resolutionFileUrl` es una URL firmada de ~1,500
+    # caracteres —un tercio del registro— que el agente no puede abrir; el
+    # citation builder la reconstruye por su cuenta para la interfaz.
+    _NO_AL_PROMPT = frozenset({"resolutionFileUrl", "id", "hasDigitalResolution"})
+
+    def para_prompt(self) -> dict:
+        """
+        El registro como lo ve el modelo: sólo campos con valor, sin los que
+        no puede usar.
+
+        Medido el 22-sep: un expediente serializado completo son 4,591
+        caracteres, de los cuales 37 campos van en nulo y la URL firmada ocupa
+        1,541. Cincuenta expedientes eran ~229 KB —unos 57,000 tokens— donde
+        la mitad no aportaba nada. Es el mismo problema que sepultó el criterio
+        7888 en H10, a mayor escala.
+        """
+        return {
+            k: v for k, v in self.model_dump().items()
+            if k not in self._NO_AL_PROMPT and v not in (None, "", [], {})
+        }
+
     @field_validator("senseOfResolution", mode="before")
     @classmethod
     def _sentido_a_lista(cls, v):

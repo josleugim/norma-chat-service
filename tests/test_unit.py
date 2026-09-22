@@ -1424,3 +1424,47 @@ class TestEstadisticasRespetanElFiltro:
         presentados = datos[:50]
         assert len(datos) == 51 and len(presentados) == 50
         assert sum(d["dias_naturales"] for d in datos) / len(datos) == 10
+
+
+class TestElPayloadNoSepultaLaEvidencia:
+    """
+    Auditoría del 22-sep, a raíz de H10: el agente dijo no poder recuperar un
+    criterio que tenía en contexto. No era el alcance ni los controles: era el
+    tamaño relativo de la evidencia frente a la metadata que fuimos apilando.
+
+    La asimetría más clara: el texto del criterio se trunca a 700 caracteres y
+    `anchor` + `context` viajaban enteros con ~1,300. Se recortaba lo que
+    responde la pregunta y crecía lo accesorio.
+    """
+
+    def _registro(self):
+        from models.schemas import ExpedienteRecord
+        return ExpedienteRecord(
+            caseLink="VCN-004-2024", authority="COFECE",
+            resolutionDate="21-11-2024", senseOfResolution=["Sanciona"],
+            resolutionFileUrl="https://firmada.example/" + "x" * 1400,
+            id=25195, hasDigitalResolution=True,
+        )
+
+    def test_la_url_firmada_no_viaja_al_prompt(self):
+        """1,541 caracteres que el modelo no puede abrir."""
+        d = self._registro().para_prompt()
+        assert "resolutionFileUrl" not in d
+        assert d["caseLink"] == "VCN-004-2024"
+
+    def test_los_campos_nulos_no_viajan(self):
+        d = self._registro().para_prompt()
+        assert all(v not in (None, "", [], {}) for v in d.values())
+        assert "notificationDate" not in d
+
+    def test_conserva_lo_que_si_importa(self):
+        d = self._registro().para_prompt()
+        for k in ("caseLink", "authority", "resolutionDate", "senseOfResolution"):
+            assert k in d, k
+
+    def test_la_reduccion_es_sustancial(self):
+        import json
+        r = self._registro()
+        completo = len(json.dumps(r.model_dump(), ensure_ascii=False))
+        prompt = len(json.dumps(r.para_prompt(), ensure_ascii=False))
+        assert prompt < completo / 2, f"{completo} → {prompt}"
