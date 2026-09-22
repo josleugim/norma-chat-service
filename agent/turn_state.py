@@ -103,3 +103,44 @@ class TurnState:
     # exacto con vocabulario de cualquier otro del mismo tema.
     requisitos: list[dict] = field(default_factory=list)
     requisitos_verificados: dict | None = None
+
+    # Toda la evidencia recuperada en el turno, no sólo la de la última
+    # herramienta.
+    #
+    # Lo encontró COFECE leyendo el código: `requisitos_verificados` se
+    # calculaba contra el `result` de la llamada en curso y se sobrescribía.
+    # Como H14 llama `buscar_expedientes` **y** `buscar_criterios`, la que
+    # corriera al final decidía el veredicto: si los criterios iban después,
+    # el requisito de `campos_registro` —que se cumple porque el registro trajo
+    # `relatedTccCaseFile`— volvía a leerse como incumplido, y el agente
+    # recibía la orden de buscar algo que ya tenía.
+    #
+    # Un requisito satisfecho no puede dejar de estarlo porque después se
+    # buscara otra cosa. La verificación se hace sobre esta acumulación.
+    evidencia_acumulada: list[dict] = field(default_factory=list)
+
+    def acumular_evidencia(self, docs) -> int:
+        """
+        Agrega documentos recuperados, sin repetir. Devuelve cuántos son nuevos.
+
+        Deduplica por expediente + identificador del fragmento: el mismo
+        criterio puede volver en dos búsquedas distintas, y contarlo dos veces
+        no agrega evidencia pero sí ensucia el conteo de cobertura.
+        """
+        from core.fuentes import case_link_de
+
+        vistos = {
+            (case_link_de(d), str(d.get("id") or d.get("caseLink") or ""))
+            for d in self.evidencia_acumulada
+        }
+        nuevos = 0
+        for d in docs or []:
+            if not isinstance(d, dict):
+                continue
+            clave = (case_link_de(d), str(d.get("id") or d.get("caseLink") or ""))
+            if clave in vistos:
+                continue
+            vistos.add(clave)
+            self.evidencia_acumulada.append(d)
+            nuevos += 1
+        return nuevos

@@ -1717,3 +1717,95 @@ class TestAbstencionSoloSiFaltaAlgoQueNombrar:
         razon = ("Tras dos búsquedas la evidencia no sostiene: "
                  + "; ".join(faltantes)) if faltantes else None
         assert razon is None
+
+
+class TestLaEvidenciaSeAcumulaEntreHerramientas:
+    """
+    Lo encontró COFECE leyendo el código (§1.3 de su revisión del 22-sep):
+    `requisitos_verificados` se calculaba contra el `result` de la llamada en
+    curso y se sobrescribía.
+
+    H14 llama `buscar_expedientes` **y** `buscar_criterios`. Si los criterios
+    corren al final, el requisito de campos del registro —que ya se cumplió
+    porque el registro trajo `relatedTccCaseFile`— vuelve a leerse como
+    incumplido, y el agente recibe la orden de buscar algo que ya tiene.
+
+    Un requisito satisfecho no deja de estarlo porque después se buscara otra
+    cosa.
+    """
+
+    REGISTRO = {
+        "caseLink": "677_2024_1SCJN",
+        "relatedTccCaseFile": "565/2023",
+        "relatedCollegiateCourt": "Primer Tribunal Colegiado…",
+    }
+    CRITERIO = {
+        "id": "c1",
+        "metadata": {"id_expediente": "677_2024_1SCJN"},
+        "content": "reserva de jurisdicción",
+    }
+
+    def _req(self):
+        from core.identidades import ResolutorDeIdentidades
+        from core.requisitos import construir_requisitos
+        q = ("En el amparo en revisión 677/2024, ¿la Primera Sala resolvió "
+             "todos los agravios? ¿Qué tribunal colegiado y qué expediente "
+             "dieron origen?")
+        u = ["677_2024_1SCJN"]
+        return construir_requisitos(q, ResolutorDeIdentidades(u).resolver(q))
+
+    def test_el_criterio_despues_del_registro_no_borra_lo_cumplido(self):
+        """La regresión exacta: registro primero, criterios después."""
+        from agent.turn_state import TurnState
+        from core.requisitos import verificar
+
+        st = TurnState()
+        st.acumular_evidencia([self.REGISTRO])
+        assert verificar(self._req(), st.evidencia_acumulada)["cumple"]
+
+        st.acumular_evidencia([self.CRITERIO])
+        v = verificar(self._req(), st.evidencia_acumulada)
+        assert v["cumple"], (
+            "el requisito ya estaba cumplido por el registro; una búsqueda "
+            f"posterior de criterios no puede revertirlo: {v['faltantes']}"
+        )
+
+    def test_el_orden_inverso_da_el_mismo_veredicto(self):
+        """Criterios primero, registro después. El resultado no depende del orden."""
+        from agent.turn_state import TurnState
+        from core.requisitos import verificar
+
+        st = TurnState()
+        st.acumular_evidencia([self.CRITERIO])
+        assert not verificar(self._req(), st.evidencia_acumulada)["cumple"]
+
+        st.acumular_evidencia([self.REGISTRO])
+        assert verificar(self._req(), st.evidencia_acumulada)["cumple"]
+
+    def test_sin_acumular_la_verificacion_se_revierte(self):
+        """
+        Fija la conducta ANTERIOR como incorrecta: verificar sólo contra el
+        último resultado sí revierte el requisito. Si esta prueba empieza a
+        fallar es que `verificar` cambió de contrato.
+        """
+        from core.requisitos import verificar
+        assert verificar(self._req(), [self.REGISTRO])["cumple"]
+        assert not verificar(self._req(), [self.CRITERIO])["cumple"]
+
+    def test_no_se_duplica_el_mismo_documento(self):
+        from agent.turn_state import TurnState
+        st = TurnState()
+        assert st.acumular_evidencia([self.CRITERIO, self.REGISTRO]) == 2
+        assert st.acumular_evidencia([self.CRITERIO]) == 0
+        assert len(st.evidencia_acumulada) == 2
+
+    def test_dos_fragmentos_del_mismo_expediente_son_dos(self):
+        """
+        Deduplicar por expediente borraría criterios distintos del mismo
+        documento, que es justo la evidencia que H19 necesita para separar
+        mayoría de voto particular.
+        """
+        from agent.turn_state import TurnState
+        st = TurnState()
+        otro = dict(self.CRITERIO, id="c2", content="voto particular")
+        assert st.acumular_evidencia([self.CRITERIO, otro]) == 2

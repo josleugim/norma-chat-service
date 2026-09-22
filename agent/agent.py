@@ -455,6 +455,20 @@ class NormaPlusAgent:
                 "requisitos", state.requisitos, "heuristic")
             collector.set_decision(
                 "requisitos_verificados", state.requisitos_verificados, "derived")
+            # Sobre cuánta evidencia se verificó. COFECE pidió poder ver qué
+            # necesidad disparó cada consulta y contra qué se comprobó; sin
+            # esto, un requisito cumplido no dice si lo sostuvo el registro,
+            # los criterios, o los dos.
+            collector.set_decision(
+                "evidencia_verificada",
+                {
+                    "documentos": len(state.evidencia_acumulada),
+                    "expedientes": sorted({
+                        case_link_de(d) for d in state.evidencia_acumulada
+                        if case_link_de(d)
+                    }),
+                },
+                "derived")
             collector.set_decision(
                 "cobertura_por_documento", state.cobertura_por_documento, "derived")
             collector.set_decision(
@@ -2038,6 +2052,9 @@ class NormaPlusAgent:
                 )
                 payload["composicion_fuentes"] = comp
                 state.composicion_fuentes = comp
+                # Toda la evidencia del turno queda junta, venga de la
+                # herramienta que venga. Ver `TurnState.acumular_evidencia`.
+                state.acumular_evidencia(result)
 
             # Requisitos por componente (C03). Se comprueban contra la
             # evidencia identificada —documento, voz, los dos lados de una
@@ -2046,7 +2063,12 @@ class NormaPlusAgent:
             # vocabulario de cualquier otro del mismo tema.
             if (state is not None and state.requisitos
                     and tool_name in ("buscar_criterios", "buscar_expedientes")):
-                v = verificar_requisitos(state.requisitos, result)
+                # Contra TODA la evidencia del turno, no contra la de esta
+                # llamada: un requisito que ya se cumplió no deja de cumplirse
+                # porque la siguiente búsqueda trajera otra cosa.
+                v = verificar_requisitos(
+                    state.requisitos, state.evidencia_acumulada
+                )
                 state.requisitos_verificados = v
                 payload["REQUISITOS"] = v["componentes"]
                 if not v["cumple"]:
