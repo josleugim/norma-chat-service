@@ -1338,3 +1338,382 @@ class TestFiltroDocumentalNoAcotaSiNoIdentifica:
                 ["en_expedientes"]["description"])
         assert "NO es un prefijo" in desc
         assert "OMITE" in desc
+
+
+class TestActoDerivadoNoEsElPrincipal:
+    """
+    H10 de la revisión final. La pregunta pide el cumplimiento de amparo del
+    9 de octubre de 2025 de VCN-004-2022, y el agente buscaba sobre el
+    principal. Como el filtro de la API hace SUBSTRING —verificado el 22-sep:
+    `caseLink=VCN-004-2022` devuelve 16 criterios suyos más los 14 del
+    cumplimiento— la respuesta mezclaba la fórmula de incremento del acto
+    original con lo preguntado sobre el cumplimiento.
+    """
+
+    U = ["VCN-004-2022", "VCN-004-2022_2025_10_09",
+         "VCN-002-2023", "VCN-002-2023_2025_10_09",
+         "VCN-001-2017", "VCN-001-2017_2019_03_14"]
+
+    def _r(self):
+        from core.identidades import ResolutorDeIdentidades
+        return ResolutorDeIdentidades(self.U)
+
+    def test_la_fecha_resuelve_al_acto(self):
+        r = self._r().resolver(
+            "En el cumplimiento de amparo del VCN-004-2022 de 9 de octubre "
+            "de 2025, ¿qué fórmula de incremento se usó?")
+        actos = [i for i in r if i.get("acto_de")]
+        assert actos and actos[0]["candidatos"] == ["VCN-004-2022_2025_10_09"]
+        assert actos[0]["acto_de"] == "VCN-004-2022"
+
+    def test_el_principal_sin_fecha_NO_salta_al_acto(self):
+        """Preguntar por el expediente original debe seguir dando el original."""
+        r = self._r().resolver("En el VCN-004-2022, ¿a quién se multó?")
+        assert [i for i in r if i.get("acto_de")] == []
+
+    def test_cumplimiento_sin_fecha_con_acto_unico(self):
+        r = self._r().resolver(
+            "En la resolución de cumplimiento del VCN-002-2023, ¿qué alcance?")
+        actos = [i for i in r if i.get("acto_de")]
+        assert actos[0]["candidatos"] == ["VCN-002-2023_2025_10_09"]
+
+    def test_formato_numerico_de_fecha(self):
+        r = self._r().resolver("el cumplimiento del VCN-004-2022 de 09-10-2025")
+        actos = [i for i in r if i.get("acto_de")]
+        assert actos[0]["candidatos"] == ["VCN-004-2022_2025_10_09"]
+
+    def test_una_fecha_que_no_corresponde_no_inventa_acto(self):
+        r = self._r().resolver(
+            "el cumplimiento del VCN-004-2022 de 1 de enero de 2030")
+        assert [i for i in r if i.get("acto_de")] == []
+
+
+class TestEstadisticasRespetanElFiltro:
+    """
+    Regresión propia, reproducida por COFECE el 22-sep. Al corregir el tope de
+    50 filas se puso `data_for_stats = enriched`, que también se saltaba el
+    filtro por plazo: pedir "el promedio de los que tardaron menos de 50 días"
+    devolvía el promedio del universo entero. Una cifra correcta para otra
+    pregunta.
+
+    El recorte de 50 es presentación y no debe afectar el cálculo; el filtro
+    por plazo es parte de lo preguntado y sí debe.
+    """
+
+    def _datos(self):
+        return [
+            {"caseLink": f"VCN-00{i}-2024", "dias_naturales": d,
+             "dias_habiles": d, "calculable": True}
+            for i, d in enumerate([49, 56, 59, 70, 83], start=1)
+        ]
+
+    def test_con_filtro_las_stats_son_del_subconjunto(self):
+        datos = self._datos()
+        filtrados = [d for d in datos if d["dias_naturales"] <= 50]
+        assert len(filtrados) == 1
+        promedio = sum(d["dias_naturales"] for d in filtrados) / len(filtrados)
+        assert promedio == 49, "no el 63.4 del universo completo"
+
+    def test_sin_filtro_las_stats_son_del_universo(self):
+        datos = self._datos()
+        promedio = sum(d["dias_naturales"] for d in datos) / len(datos)
+        assert round(promedio, 1) == 63.4
+
+    def test_el_recorte_visual_no_cambia_el_calculo(self):
+        datos = [{"dias_naturales": 10, "calculable": True} for _ in range(51)]
+        presentados = datos[:50]
+        assert len(datos) == 51 and len(presentados) == 50
+        assert sum(d["dias_naturales"] for d in datos) / len(datos) == 10
+
+
+class TestElPayloadNoSepultaLaEvidencia:
+    """
+    Auditoría del 22-sep, a raíz de H10: el agente dijo no poder recuperar un
+    criterio que tenía en contexto. No era el alcance ni los controles: era el
+    tamaño relativo de la evidencia frente a la metadata que fuimos apilando.
+
+    La asimetría más clara: el texto del criterio se trunca a 700 caracteres y
+    `anchor` + `context` viajaban enteros con ~1,300. Se recortaba lo que
+    responde la pregunta y crecía lo accesorio.
+    """
+
+    def _registro(self):
+        from models.schemas import ExpedienteRecord
+        return ExpedienteRecord(
+            caseLink="VCN-004-2024", authority="COFECE",
+            resolutionDate="21-11-2024", senseOfResolution=["Sanciona"],
+            resolutionFileUrl="https://firmada.example/" + "x" * 1400,
+            id=25195, hasDigitalResolution=True,
+        )
+
+    def test_la_url_firmada_no_viaja_al_prompt(self):
+        """1,541 caracteres que el modelo no puede abrir."""
+        d = self._registro().para_prompt()
+        assert "resolutionFileUrl" not in d
+        assert d["caseLink"] == "VCN-004-2024"
+
+    def test_los_campos_nulos_no_viajan(self):
+        d = self._registro().para_prompt()
+        assert all(v not in (None, "", [], {}) for v in d.values())
+        assert "notificationDate" not in d
+
+    def test_conserva_lo_que_si_importa(self):
+        d = self._registro().para_prompt()
+        for k in ("caseLink", "authority", "resolutionDate", "senseOfResolution"):
+            assert k in d, k
+
+    def test_la_reduccion_es_sustancial(self):
+        import json
+        r = self._registro()
+        completo = len(json.dumps(r.model_dump(), ensure_ascii=False))
+        prompt = len(json.dumps(r.para_prompt(), ensure_ascii=False))
+        assert prompt < completo / 2, f"{completo} → {prompt}"
+
+
+class TestCamposDelRegistroComoRequisito:
+    """
+    H14 de la revisión final. La pregunta pide identificar el tribunal
+    colegiado y su expediente; las tres corridas usaron sólo
+    `buscar_criterios`. Los datos estaban en el registro —`relatedTccCaseFile:
+    565/2023`, `relatedCollegiateCourt: Primer Tribunal Colegiado…`— y nadie
+    los fue a buscar.
+
+    Un identificador canónico correcto no equivale a haber recuperado todos
+    los campos pedidos.
+    """
+
+    Q = ("En el amparo en revisión 677/2024, ¿la Primera Sala resolvió todos "
+         "los agravios? ¿Qué tribunal colegiado y qué expediente dieron origen?")
+
+    def _req(self, q=None):
+        from core.identidades import ResolutorDeIdentidades
+        from core.requisitos import construir_requisitos
+        u = ["677_2024_1SCJN", "VCN-001-2025", "178_2017_2TCC"]
+        q = q or self.Q
+        return construir_requisitos(q, ResolutorDeIdentidades(u).resolver(q))
+
+    def test_solo_criterios_no_cumple(self):
+        from core.requisitos import verificar
+        v = verificar(self._req(), [
+            {"caseLink": "677_2024_1SCJN", "content": "reserva de jurisdicción"}])
+        assert not v["cumple"]
+        assert any("tribunal" in f for f in v["faltantes"])
+
+    def test_con_el_registro_cumple(self):
+        from core.requisitos import verificar
+        v = verificar(self._req(), [{
+            "caseLink": "677_2024_1SCJN",
+            "relatedTccCaseFile": "565/2023",
+            "relatedCollegiateCourt": "Primer Tribunal Colegiado…",
+        }])
+        assert v["cumple"]
+
+    def test_nombrar_un_tribunal_no_es_preguntarlo(self):
+        """
+        "del Segundo Tribunal Colegiado" identifica el documento; no pide que
+        se diga cuál es. La primera versión del patrón disparaba con cualquier
+        mención y rompía las comparaciones.
+        """
+        req = self._req("Compara lo de VCN-001-2025 con lo del amparo 178/2017 "
+                        "del Segundo Tribunal Colegiado")
+        assert not [r for r in req if r["tipo"] == "campos_registro"]
+
+    def test_quien_voto_pide_los_campos_de_votos(self):
+        req = self._req("En el VCN-003-2025, ¿quiénes votaron y hubo "
+                        "comisionados en contra?")
+        campos = [r for r in req if r["tipo"] == "campos_registro"]
+        assert campos and "dissentingOpinions" in campos[0]["valor"]
+
+
+class TestTodasLasRutasDeSalidaValidan:
+    """
+    C06, completado. La validación estaba sólo en la rama `content`;
+    `stream` y la síntesis forzada emitían token por token y resolvían las
+    citas al final, cuando el texto ya había salido.
+
+    Las 180 respuestas del holdout usaron `content`: eso no probaba que las
+    otras rutas estuvieran protegidas, sólo que no se habían ejercido.
+    """
+
+    class _Agente:
+        from core.validacion_salida import validar_borrador as _vb
+        _emitir_validado = None  # se enlaza abajo
+
+    class _Reg:
+        def __init__(self, validos): self.validos = set(validos)
+        def resolve(self, m): return {"x": 1} if m in self.validos else None
+
+    class _State:
+        def __init__(self, reg): self.registry = reg; self.reparacion_salida = None
+
+    def _agente(self):
+        from agent.agent import NormaPlusAgent
+        return NormaPlusAgent.__new__(NormaPlusAgent)
+
+    def test_las_cuatro_rutas_usan_el_mismo_validador(self):
+        """Ninguna ruta puede emitir sin pasar por aquí."""
+        import inspect
+        from agent.agent import NormaPlusAgent
+        src = inspect.getsource(NormaPlusAgent._run_traced)
+        assert src.count("_emitir_validado") == 4, (
+            "content, stream, forced_synthesis y forced_synthesis_stream")
+
+    def test_repara_y_registra_la_ruta(self):
+        ag = self._agente()
+        st = self._State(self._Reg(["C1"]))
+        texto = ag._emitir_validado(
+            "Afirmación buena [C1]. Afirmación colgada [C14].",
+            st, None, "stream")
+        assert "[C14]" not in texto
+        assert st.reparacion_salida["ruta"] == "stream"
+        assert st.reparacion_salida["marcadores_invalidos"] == ["C14"]
+
+    def test_un_borrador_limpio_pasa_intacto(self):
+        ag = self._agente()
+        st = self._State(self._Reg(["C1", "E2"]))
+        texto = "Todo sustentado [C1] y [E2]."
+        assert ag._emitir_validado(texto, st, None, "content") == texto
+        assert st.reparacion_salida is None
+
+    def test_sin_registro_no_revienta(self):
+        ag = self._agente()
+        assert ag._emitir_validado("texto [C1]", None, None, "content")
+
+
+class TestEmisorDelDocumento:
+    """
+    Correcciones menores de la revisión final, todas con la misma raíz: un
+    criterio no dice qué órgano lo dictó, así que el agente lo infería.
+
+    H17-B no identificó al Juzgado Tercero como emisor del criterio del
+    43/2021. H18-B confundió a COFECE —que dictó el acto de 2023— con CNA, que
+    era la destinataria del cumplimiento.
+    """
+
+    def _u(self):
+        from core.universo import UniversoRestringido
+        return UniversoRestringido(
+            ["43_2021_3JD", "VCN-004-2024", "677_2024_1SCJN", "275_2023_1JD"],
+            etiqueta="t")
+
+    def test_carga_los_emisores_del_universo(self):
+        u = self._u()
+        n = u.cargar_emisores([
+            {"caseLink": "43_2021_3JD", "authority": "Juzgado Tercero de Distrito"},
+            {"caseLink": "VCN-004-2024", "authority": "COFECE"},
+            {"caseLink": "FUERA-001-2020", "authority": "OTRA"},
+        ])
+        assert n == 2, "lo que no está en el universo no se carga"
+        assert u.emisor_de("43_2021_3JD") == "Juzgado Tercero de Distrito"
+        assert u.emisor_de("VCN-004-2024") == "COFECE"
+
+    def test_sin_authority_usa_el_organo_judicial(self):
+        u = self._u()
+        u.cargar_emisores([{"caseLink": "677_2024_1SCJN",
+                            "judicialBody": "Primera Sala de la SCJN"}])
+        assert u.emisor_de("677_2024_1SCJN") == "Primera Sala de la SCJN"
+
+    def test_un_documento_sin_emisor_devuelve_None(self):
+        """No se inventa: seis de los 63 no traen authority."""
+        u = self._u()
+        u.cargar_emisores([{"caseLink": "275_2023_1JD"}])
+        assert u.emisor_de("275_2023_1JD") is None
+
+    def test_la_autoridad_deja_de_estar_no_disponible_si_hay_emisor(self):
+        """
+        `campos_no_disponibles` existe para que el modelo no invente. Si el
+        emisor SÍ se conoce, declararlo no disponible sería mentir al revés.
+        """
+        emisor = "Juzgado Tercero de Distrito"
+        campos = [c for c in ("autoridad", "sentido_resolucion",
+                              "fecha_resolucion")
+                  if not (c == "autoridad" and emisor)]
+        assert "autoridad" not in campos
+        assert "sentido_resolucion" in campos
+
+
+class TestReconciliacionDelConjuntoCalculado:
+    """
+    C07, lo que quedaba abierto. La calculadora aceptaba el subconjunto que el
+    modelo mandara sin compararlo con la búsqueda previa. COFECE lo reprodujo:
+    enviar cuatro de los cinco registros daba count=4 y promedio 64.5 —en vez
+    de 5 y 63.4— sin que nada justificara la exclusión.
+
+    Una cifra sobre un subconjunto silencioso es peor que un error: se ve bien
+    calculada.
+    """
+
+    def _cinco(self):
+        return [{"caseLink": f"VCN-00{i}-2024", "resolutionDate": "01-01-2024",
+                 "startAgreementDate": "01-01-2024"} for i in range(1, 6)]
+
+    def test_detecta_el_subconjunto_silencioso(self):
+        from core.fuentes import case_link_de
+        recuperados = {case_link_de(e) for e in self._cinco()}
+        enviados = {case_link_de(e) for e in self._cinco()[:4]}
+        excluidos = sorted(recuperados - enviados)
+        assert excluidos == ["VCN-005-2024"]
+
+    def test_el_conjunto_completo_no_marca_exclusiones(self):
+        from core.fuentes import case_link_de
+        recuperados = {case_link_de(e) for e in self._cinco()}
+        enviados = {case_link_de(e) for e in self._cinco()}
+        assert not (recuperados - enviados)
+
+    def test_un_registro_sin_identidad_se_descarta(self):
+        from core.fuentes import case_link_de
+        mezcla = self._cinco() + [{"fecha_inicio": "01-01-2024"}]
+        validos = [e for e in mezcla if case_link_de(e)]
+        sin_id = [e for e in mezcla if not case_link_de(e)]
+        assert len(validos) == 5 and len(sin_id) == 1
+
+    def test_los_ids_viajan_en_la_auditoria(self):
+        """
+        COFECE: "en las trazas H04 los IDs por cálculo siguen vacíos". Sin
+        ellos no se puede reconstruir de dónde salió un promedio.
+        """
+        from core.fuentes import case_link_de
+        ids = sorted(case_link_de(e) for e in self._cinco())
+        assert len(ids) == 5 and all(ids)
+
+
+class TestAbstencionSoloSiFaltaAlgoQueNombrar:
+    """
+    Falso positivo propio, detectado en la regresión del 22-sep: el indicador
+    `abstained` saltó de 0 a 7 de 20, incluidas H08, H10 y H15 — que
+    respondieron bien, con fuentes y sin inventar nada.
+
+    La causa: un chequeo PARTIAL agotaba el reintento y escribía
+    "Tras dos búsquedas la evidencia no sostiene: " con la lista de faltantes
+    VACÍA. `abstained` se deriva de que esa razón exista.
+
+    Marcar abstención donde no la hubo no es un detalle de etiqueta: COFECE lee
+    ese indicador, y decir que el agente se abstuvo cuando respondió es tan
+    falso como lo contrario.
+    """
+
+    def test_partial_sin_componentes_insuficientes_no_abstiene(self):
+        from core.sufficiency import INSUFFICIENT
+        chequeo = {"components": [
+            {"descripcion": "qué es el control", "estado": "PARTIAL"},
+            {"descripcion": "cómo lo define COFECE", "estado": "SUFFICIENT"},
+        ]}
+        faltantes = [c["descripcion"] for c in chequeo["components"]
+                     if c["estado"] == INSUFFICIENT]
+        assert not faltantes, "PARTIAL no es INSUFFICIENT"
+
+    def test_con_un_componente_insuficiente_si_abstiene(self):
+        from core.sufficiency import INSUFFICIENT
+        chequeo = {"components": [
+            {"descripcion": "el criterio del 178/2017", "estado": INSUFFICIENT},
+        ]}
+        faltantes = [c["descripcion"] for c in chequeo["components"]
+                     if c["estado"] == INSUFFICIENT]
+        assert faltantes == ["el criterio del 178/2017"]
+
+    def test_la_razon_nunca_queda_colgando(self):
+        """Nunca debe escribirse la frase con la lista vacía."""
+        faltantes = []
+        razon = ("Tras dos búsquedas la evidencia no sostiene: "
+                 + "; ".join(faltantes)) if faltantes else None
+        assert razon is None

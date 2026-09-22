@@ -59,6 +59,31 @@ class UniversoRestringido:
         # descartaría un documento del universo en silencio.
         self._upper = {c.upper() for c in self.case_links}
 
+        # Emisor de cada documento, cargado una vez al arrancar desde el mismo
+        # barrido que hace el censo. Un criterio no trae el órgano que lo
+        # dictó, así que el agente lo infería: en H17 no identificó al Juzgado
+        # Tercero como emisor del criterio del 43/2021, y en H18 confundió a
+        # COFECE —que dictó el acto— con CNA, que era la destinataria del
+        # cumplimiento.
+        #
+        # `authority` lo dice con precisión y cubre 57 de los 63; para los seis
+        # restantes queda vacío y el agente lo sabrá en vez de suponerlo.
+        self.emisores: dict[str, str] = {}
+
+    def cargar_emisores(self, registros) -> int:
+        """Guarda el emisor de cada documento del universo. Devuelve cuántos."""
+        for r in registros:
+            d = r.model_dump() if hasattr(r, "model_dump") else dict(r)
+            cl = d.get("caseLink")
+            if cl in self:
+                emisor = d.get("authority") or d.get("judicialBody")
+                if emisor:
+                    self.emisores[str(cl)] = str(emisor)
+        return len(self.emisores)
+
+    def emisor_de(self, case_link) -> str | None:
+        return self.emisores.get(str(case_link or "").strip())
+
     def __len__(self) -> int:
         return len(self.case_links)
 

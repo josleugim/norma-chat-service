@@ -46,6 +46,15 @@ COMPLEMENTO_DE_BUSQUEDA = {
 # Truncado del texto de criterios al serializarlos para el LLM.
 # Es una de las tres etapas de retrieval: lo que entra al contexto no es lo
 # mismo que lo que devolvió el buscador.
+# Tope del texto del criterio que viaja al prompt.
+#
+# Durante meses se truncó la EVIDENCIA a 700 caracteres mientras la metadata
+# viajaba entera: `anchor` y `context` sumaban ~1,300 por documento. Cortábamos
+# lo que responde la pregunta y dejábamos crecer lo accesorio. Medido el
+# 22-sep, el texto era el 24% del documento serializado, y en H10 el agente
+# dijo no poder recuperar un criterio que tenía delante.
+#
+# La regla que queda: si hay que recortar, se recorta lo accesorio primero.
 CRITERIO_CONTEXT_CHARS = 700
 
 
@@ -289,19 +298,8 @@ class NormaPlusAgent:
                     # resuelve dejaba el marcador y su afirmación en el texto,
                     # con la fuente ausente de la lista. La defensa llegaba
                     # tarde por el orden, no por falta de mecanismo.
-                    revision = validar_borrador(response.content, state.registry)
-                    final_text = revision["texto"]
-                    if revision["reparado"]:
-                        state.reparacion_salida = {
-                            "marcadores_invalidos": revision["marcadores_invalidos"],
-                            "frases_sin_respaldo": len(revision["frases_sin_respaldo"]),
-                        }
-                        if collector is not None:
-                            collector.add_error(
-                                "validacion_salida",
-                                "marcadores fuera del registro: "
-                                + ", ".join(revision["marcadores_invalidos"]),
-                            )
+                    final_text = self._emitir_validado(
+                        response.content, state, collector, "content")
                     for chunk in self._chunk_text(final_text):
                         yield StreamEvent(type="token", data={"text": chunk})
                 else:
@@ -317,14 +315,18 @@ class NormaPlusAgent:
                         messages=stream_messages,
                         model=model,
                     ):
+                        # No se emite aquí: se acumula. Validar después de
+                        # emitir no protege nada (C06).
                         if chunk.text:
                             final_parts.append(chunk.text)
-                            yield StreamEvent(type="token", data={"text": chunk.text})
                         if chunk.input_tokens:
                             total_input_tokens += chunk.input_tokens
                         if chunk.output_tokens:
                             total_output_tokens += chunk.output_tokens
-                    final_text = "".join(final_parts)
+                    final_text = self._emitir_validado(
+                        "".join(final_parts), state, collector, "stream")
+                    for _c in self._chunk_text(final_text):
+                        yield StreamEvent(type="token", data={"text": _c})
                     if collector is not None:
                         collector.end_step("ok")
                 break
@@ -370,7 +372,9 @@ class NormaPlusAgent:
                 total_output_tokens += fallback_response.output_tokens
 
                 if fallback_response.content:
-                    final_text = fallback_response.content
+                    final_text = self._emitir_validado(
+                        fallback_response.content, state, collector,
+                        "forced_synthesis")
                     for chunk in self._chunk_text(final_text):
                         yield StreamEvent(type="token", data={"text": chunk})
                 else:
@@ -385,12 +389,15 @@ class NormaPlusAgent:
                     ):
                         if chunk.text:
                             final_parts.append(chunk.text)
-                            yield StreamEvent(type="token", data={"text": chunk.text})
                         if chunk.input_tokens:
                             total_input_tokens += chunk.input_tokens
                         if chunk.output_tokens:
                             total_output_tokens += chunk.output_tokens
-                    final_text = "".join(final_parts)
+                    final_text = self._emitir_validado(
+                        "".join(final_parts), state, collector,
+                        "forced_synthesis_stream")
+                    for _c in self._chunk_text(final_text):
+                        yield StreamEvent(type="token", data={"text": _c})
             except Exception as e:
                 logger.error(f"Error en fallback de respuesta: {e}")
                 if collector is not None:
@@ -438,6 +445,20 @@ class NormaPlusAgent:
                 "data_anomalies", state.anomalias, "derived")
             collector.set_decision(
                 "composicion_fuentes", state.composicion_fuentes, "derived")
+            # Decisiones nuevas de C01-C07. COFECE las pidió expresamente:
+            # "las nuevas decisiones no aparecen en las trazas actuales", y sin
+            # ellas no se puede auditar por qué el agente hizo lo que hizo.
+            # Yo mismo las necesité para diagnosticar H10 y no estaban.
+            collector.set_decision(
+                "identidades_resueltas", state.identidades_resueltas, "derived")
+            collector.set_decision(
+                "requisitos", state.requisitos, "heuristic")
+            collector.set_decision(
+                "requisitos_verificados", state.requisitos_verificados, "derived")
+            collector.set_decision(
+                "cobertura_por_documento", state.cobertura_por_documento, "derived")
+            collector.set_decision(
+                "reparacion_salida", state.reparacion_salida, "derived")
             # ¿Alguna ruta vino vacía y su complementaria nunca se ejerció?
             # Es objetivo y no depende de leer el texto: si la respuesta afirma
             # ausencia con esto encendido, es falsa exhaustividad.
@@ -638,6 +659,16 @@ class NormaPlusAgent:
                           "pregunta no permite distinguirlos, dilo y pide la "
                           "precisión que falta."
                     )
+                elif i.get("acto_de"):
+                    lineas.append(
+                        f"- «{i['mencion']}» es el acto {i['candidatos'][0]}, "
+                        f"derivado de {i['acto_de']}. **Son documentos "
+                        f"distintos.** Si la pregunta es sobre el acto, usa "
+                        f"{i['candidatos'][0]} y NO {i['acto_de']}: lo que "
+                        f"resolvió el principal no se le atribuye al "
+                        f"cumplimiento. Si citas el principal como "
+                        f"antecedente, dilo expresamente."
+                    )
                 else:
                     lineas.append(
                         f"- «{i['mencion']}» es {i['candidatos'][0]}"
@@ -750,6 +781,40 @@ class NormaPlusAgent:
 
     # ── Ejecutores de herramientas ──────────────────────────
 
+    def _emitir_validado(self, texto: str, state, collector, ruta: str):
+        """
+        Salida única para TODAS las rutas: valida y después emite.
+
+        C06 del diagnóstico, completado. La validación estaba sólo en la rama
+        `content`; `stream` y la síntesis forzada emitían token por token y
+        resolvían las citas al final, cuando el texto ya había salido. Las 180
+        respuestas del holdout usaron `content`, así que esas rutas nunca se
+        probaron — no que estuvieran protegidas.
+
+        Para el streaming esto significa acumular antes de emitir: se pierde la
+        aparición progresiva, pero una respuesta que se emite y después se
+        descubre mal sustentada ya no se puede retirar. El diagnóstico lo
+        propone así, y en este producto la corrección pesa más que la
+        sensación de inmediatez.
+
+        Devuelve el texto ya revisado; el llamador emite los trozos.
+        """
+        revision = validar_borrador(texto, state.registry if state else None)
+        if revision["reparado"]:
+            if state is not None:
+                state.reparacion_salida = {
+                    "ruta": ruta,
+                    "marcadores_invalidos": revision["marcadores_invalidos"],
+                    "frases_sin_respaldo": len(revision["frases_sin_respaldo"]),
+                }
+            if collector is not None:
+                collector.add_error(
+                    "validacion_salida",
+                    f"[{ruta}] marcadores fuera del registro: "
+                    + ", ".join(revision["marcadores_invalidos"]),
+                )
+        return revision["texto"]
+
     async def _buscar_criterios_por_documento(
         self, query: str, expedientes: list[str], top_k: int, collector, state
     ) -> list:
@@ -814,7 +879,35 @@ class NormaPlusAgent:
                 filters={"caseLink": exp},
                 collector=collector,
             )
-            cobertura.append({"expediente": exp, "recuperados": len(parciales)})
+
+            # El filtro de la API es SUBSTRING, no igualdad. Verificado el
+            # 22-sep: `caseLink=VCN-004-2022` devuelve 16 criterios suyos MÁS
+            # los 14 de `VCN-004-2022_2025_10_09`, que es otro acto. Por eso en
+            # H10 la respuesta mezclaba la fórmula de incremento del acto
+            # original con lo preguntado sobre el cumplimiento.
+            #
+            # Pedir un documento y recibir además sus parientes no es una
+            # ampliación útil: es la mezcla de actos que hay que evitar. Se
+            # comprueba igualdad y lo ajeno se descarta con registro.
+            ajenos = [r for r in parciales if case_link_de(r.model_dump()
+                      if hasattr(r, "model_dump") else r) != exp]
+            if ajenos:
+                otros = sorted({
+                    case_link_de(r.model_dump() if hasattr(r, "model_dump") else r)
+                    for r in ajenos
+                })
+                logger.warning(
+                    f"caseLink={exp} devolvió {len(ajenos)} criterios de otros "
+                    f"actos ({', '.join(otros)}). Se descartan: son documentos "
+                    f"distintos."
+                )
+                parciales = [r for r in parciales if r not in ajenos]
+
+            cobertura.append({
+                "expediente": exp,
+                "recuperados": len(parciales),
+                **({"descartados_de_otros_actos": len(ajenos)} if ajenos else {}),
+            })
             for r in parciales:
                 if r.id in vistos:
                     continue
@@ -872,12 +965,57 @@ class NormaPlusAgent:
                 "score": r.score,
                 "metadata": r.metadata,
                 "voz": v["voz"],
-                "voz_etiqueta": etiqueta_voz(v["voz"]),
             }
             if v["autor"]:
                 d["autor_del_voto"] = v["autor"]
             if v["evidencia"]:
                 d["voz_evidencia"] = v["evidencia"]
+
+            # La metadata no puede sepultar el texto.
+            #
+            # Medido el 22-sep: con `voz`, `voz_etiqueta`, `tipo_fuente`,
+            # `ficha_fuente` y la metadata cruda completa, el TEXTO del
+            # criterio quedaba en el 24% del documento serializado. Con 14
+            # criterios el modelo recibía ~10 KB donde 2.6 KB eran contenido
+            # jurídico, y en H10 dijo que no pudo recuperar un criterio que
+            # tenía delante.
+            #
+            # Cada cosa que añadimos para cerrar un defecto de atribución
+            # empujó la evidencia un poco más al fondo. Aquí se conserva sólo
+            # lo que el modelo necesita para citar y atribuir; `anchor` y
+            # `context` sirvieron ya para clasificar la voz y no tienen que
+            # viajar enteros al prompt.
+            meta_ligera = {
+                k: v for k, v in (r.metadata or {}).items()
+                if k in ("id_expediente", "title", "paginas_parrafos",
+                         "article", "parent_titles")
+            }
+            d["metadata"] = meta_ligera
+
+            # Ficha de la fuente, con lo que de verdad sabemos (H16).
+            #
+            # Una búsqueda de criterios NO devuelve autoridad, sentido de
+            # resolución ni fecha: esos campos viven en el registro del
+            # expediente. El modelo los estaba completando de memoria, y así
+            # `VCN-005-2024` salió etiquetado "CIERRE POR DESISTIMIENTO"
+            # cuando su registro dice "No sanciona". No eran citas
+            # inexistentes: eran atributos falsos colgados de fuentes reales.
+            #
+            # Se declara explícitamente qué no viene, para que la ausencia sea
+            # un dato y no un hueco que el modelo rellene.
+            # Quién dictó el documento del que sale este criterio. Se sabe
+            # del universo cargado, no de la búsqueda: sin él, el agente
+            # atribuía un criterio de un juzgado sin decir cuál, o confundía al
+            # emisor de un acto con su destinatario.
+            _univ = getattr(self.estadistica, "universo", None)
+            _emisor = _univ.emisor_de(case_link_de(d)) if _univ else None
+            if _emisor:
+                d["emisor"] = _emisor
+            d["campos_no_disponibles"] = [
+                c for c in ("autoridad", "sentido_resolucion",
+                            "fecha_resolucion")
+                if not (c == "autoridad" and _emisor)
+            ]
             serialized.append(d)
 
         # ── Control de suficiencia ──────────────────────────
@@ -903,10 +1041,26 @@ class NormaPlusAgent:
                         c["descripcion"] for c in chequeo["components"]
                         if c["estado"] == INSUFFICIENT
                     ]
-                    state.abstention_reason = (
-                        "Tras dos búsquedas la evidencia no sostiene: "
-                        + "; ".join(faltantes)
-                    )
+                    # Sólo hay abstención si falta algo que NOMBRAR.
+                    #
+                    # Un chequeo PARTIAL agotaba el reintento y escribía
+                    # "Tras dos búsquedas la evidencia no sostiene: " con la
+                    # lista vacía. El indicador `abstained` se encendía sobre
+                    # respuestas correctas y bien citadas: en la regresión del
+                    # 22-sep saltó de 0 a 7 de 20, incluidas H08, H10 y H15,
+                    # que respondieron bien y con fuentes.
+                    #
+                    # Marcar abstención donde no la hubo no es un detalle de
+                    # etiqueta: COFECE lee ese indicador, y decir que el agente
+                    # se abstuvo cuando respondió es tan falso como lo
+                    # contrario. PARTIAL significa que la evidencia cubre parte
+                    # de lo preguntado, y eso se responde señalando el límite,
+                    # no callando.
+                    if faltantes:
+                        state.abstention_reason = (
+                            "Tras dos búsquedas la evidencia no sostiene: "
+                            + "; ".join(faltantes)
+                        )
 
         # Etapa 3 — lo que realmente entra al prompt. Es aquí donde se pierde
         # texto respecto de lo que devolvió el buscador.
@@ -1392,7 +1546,7 @@ class NormaPlusAgent:
                 filters=filters if filters else None,
                 collector=collector,
             )
-            serialized = [r.model_dump() for r in results]
+            serialized = [r.para_prompt() for r in results]
             # Ya no es una página de 500 sobre un universo mayor: el tope es
             # el universo completo, así que la exhaustividad se sostiene
             # salvo que la API haya topado con el límite.
@@ -1407,7 +1561,7 @@ class NormaPlusAgent:
                 limit=fetch_limit,
                 collector=collector,
             )
-            serialized = [r.model_dump() for r in results]
+            serialized = [r.para_prompt() for r in results]
             state.universo_completo = False
 
         # El servidor ya intersecta, pero esta pasada sigue haciendo falta: es
@@ -1500,6 +1654,42 @@ class NormaPlusAgent:
                 ),
             }
 
+        # Reconciliar con lo recuperado (C07, lo que quedaba abierto).
+        #
+        # La herramienta aceptaba el subconjunto que el modelo mandara, sin
+        # compararlo con la búsqueda previa. COFECE lo reprodujo: enviar cuatro
+        # de los cinco registros daba count=4 y promedio 64.5 —en vez de 5 y
+        # 63.4— sin que nada justificara la exclusión. En H04 ocurrió en tres
+        # de las corridas anteriores.
+        #
+        # Un registro sin identidad tampoco se acepta: no se puede auditar una
+        # cifra cuyo origen no se sabe.
+        sin_id = [e for e in expedientes
+                  if isinstance(e, dict) and not case_link_de(e)]
+        expedientes = [e for e in expedientes
+                       if not (isinstance(e, dict) and not case_link_de(e))]
+        if not expedientes:
+            return {
+                "error": (
+                    "Ninguno de los registros enviados tiene identificador de "
+                    "expediente. No se puede calcular algo que después no se "
+                    "pueda auditar."
+                ),
+                "sugerencia": (
+                    "Usa `usar_ultima_busqueda: true` para operar sobre lo que "
+                    "recuperaste, o pasa fechas sueltas con "
+                    "fecha_inicio_explicita / fecha_fin_explicita."
+                ),
+            }
+
+        excluidos: list[str] = []
+        if state and state.last_expedientes and not args.get("usar_ultima_busqueda"):
+            recuperados = {case_link_de(e) for e in state.last_expedientes
+                           if isinstance(e, dict) and case_link_de(e)}
+            enviados = {case_link_de(e) for e in expedientes
+                        if isinstance(e, dict) and case_link_de(e)}
+            excluidos = sorted(recuperados - enviados)
+
         # Calculadora general entre cualquier par de campos de fecha. Antes
         # estaba cableada a notificación → resolución, que NO EXISTE en VCN.
         calculos = self.temporal.compute_between_fields(
@@ -1566,16 +1756,51 @@ class NormaPlusAgent:
 
         # Stats si se pidieron
         if args.get("compute_stats"):
-            # Sobre el conjunto elegible COMPLETO, no sobre las 50 filas que se
-            # presentan. El recorte es de presentación: calcular después de él
-            # convierte un universo de 51 en un promedio de 50 sin avisar.
-            data_for_stats = enriched
+            # Después de los filtros lógicos, antes del recorte visual.
+            #
+            # Regresión propia, reproducida por COFECE el 22-sep: al corregir
+            # el tope de 50 filas puse `data_for_stats = enriched`, que también
+            # se saltaba el filtro por plazo. Pedir "el promedio de los que
+            # tardaron menos de 50 días" devolvía el promedio del universo
+            # entero: una cifra correcta para otra pregunta.
+            #
+            # El recorte de 50 es presentación y no debe afectar el cálculo;
+            # el filtro por plazo es parte de lo que se preguntó y sí debe.
+            elegibles = filtered if (max_dh is not None or min_dh is not None) \
+                else enriched
+            data_for_stats = elegibles
             result["stats"] = self.temporal.compute_stats(
                 data_for_stats, plazo_field=plazo_field
             )
             result["stats"]["unidad"] = plazo_field
-            result["stats"]["universo_calculado"] = len(enriched)
+            result["stats"]["universo_calculado"] = len(elegibles)
+            result["stats"]["ids_incluidos"] = sorted(
+                case_link_de(e) for e in elegibles
+                if isinstance(e, dict) and case_link_de(e)
+            )
+            result["stats"]["alcance"] = (
+                "subconjunto filtrado" if (max_dh is not None or min_dh is not None)
+                else "universo completo"
+            )
             result["stats"]["filas_presentadas"] = len(result.get("expedientes", []))
+
+        # Exclusiones y registros sin identidad, declarados al modelo. Una
+        # cifra sobre un subconjunto sin justificar es peor que un error: se
+        # ve bien calculada.
+        if excluidos:
+            result["EXCLUSIONES_NO_JUSTIFICADAS"] = {
+                "recuperaste_y_no_enviaste": excluidos,
+                "regla": (
+                    "Calculaste sobre menos registros de los que habías "
+                    "recuperado. Si la exclusión es deliberada, dila y "
+                    "explícala en la respuesta; si no lo es, vuelve a calcular "
+                    "con `usar_ultima_busqueda: true`. Un promedio sobre un "
+                    "subconjunto silencioso es una cifra correcta para otra "
+                    "pregunta."
+                ),
+            }
+        if sin_id:
+            result["REGISTROS_SIN_IDENTIDAD_DESCARTADOS"] = len(sin_id)
 
         no_calculables = [c for c in calculos if not c["calculable"]]
         if no_calculables:
@@ -1589,6 +1814,31 @@ class NormaPlusAgent:
                 ),
             }
 
+        # La auditoría del cálculo va a `decisions`, no sólo al paso.
+        #
+        # Había dos caminos paralelos: `collector.record_computation` la
+        # guardaba en el step, y la traza escribe `computation_audit` desde
+        # `state`, que esta herramienta nunca llenaba. Por eso COFECE reportó
+        # que "`computation_audit` está vacío" pese a que el cálculo sí se
+        # registraba: se registraba en el otro lado.
+        auditoria = {
+            "tool_called": True,
+            "modo": "entre_campos",
+            "unidad": plazo_field,
+            "ids_incluidos": sorted(
+                case_link_de(e) for e in expedientes
+                if isinstance(e, dict) and case_link_de(e)
+            ),
+            "ids_excluidos_de_la_busqueda": excluidos,
+            "campo_inicio": args.get("campo_inicio") or "default por tipo",
+            "campo_fin": args.get("campo_fin", "resolutionDate"),
+            "n_calculables": sum(1 for c in calculos if c.get("calculable")),
+            "n_no_calculables": sum(1 for c in calculos if not c.get("calculable")),
+            "stats": result.get("stats"),
+        }
+        if state is not None:
+            state.computation_audit.append(auditoria)
+
         if collector is not None:
             collector.record_computation({
                 "tool_called": True,
@@ -1600,6 +1850,12 @@ class NormaPlusAgent:
                     "campo_inicio": args.get("campo_inicio") or "default por tipo",
                     "campo_fin": args.get("campo_fin", "resolutionDate"),
                 },
+                "ids_incluidos": sorted(
+                    case_link_de(e) for e in expedientes
+                    if isinstance(e, dict) and case_link_de(e)
+                ),
+                "ids_excluidos_de_la_busqueda": excluidos,
+                "unidad": plazo_field,
                 "per_case": [
                     {**c, "date_start": c["fecha_inicio"], "date_end": c["fecha_fin"],
                      "business_days": c["dias_habiles"],
