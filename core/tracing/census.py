@@ -121,6 +121,13 @@ async def take_census(estadistica_client, prefixes: tuple[str, ...] = PREFIXES) 
     # Los identificadores vistos, para poder decir CUÁLES faltan cuando hay un
     # universo declarado. Con 63 documentos cabe en el manifiesto; con el
     # acervo completo no, así que sólo se guarda cuando es una lista corta.
+    # Emisores del universo, de paso: el barrido ya está hecho y evita una
+    # segunda petición. Un criterio no dice qué órgano lo dictó.
+    universo = getattr(estadistica_client, "universo", None)
+    if universo is not None:
+        n = universo.cargar_emisores(registros)
+        census["emisores_cargados"] = n
+
     vistos = sorted({getattr(r, "caseLink", None) or "" for r in registros})
     if len(vistos) <= 200:
         census["case_links_vistos"] = vistos

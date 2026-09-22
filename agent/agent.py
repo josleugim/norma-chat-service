@@ -1003,8 +1003,18 @@ class NormaPlusAgent:
             #
             # Se declara explícitamente qué no viene, para que la ausencia sea
             # un dato y no un hueco que el modelo rellene.
+            # Quién dictó el documento del que sale este criterio. Se sabe
+            # del universo cargado, no de la búsqueda: sin él, el agente
+            # atribuía un criterio de un juzgado sin decir cuál, o confundía al
+            # emisor de un acto con su destinatario.
+            _univ = getattr(self.estadistica, "universo", None)
+            _emisor = _univ.emisor_de(case_link_de(d)) if _univ else None
+            if _emisor:
+                d["emisor"] = _emisor
             d["campos_no_disponibles"] = [
-                "autoridad", "sentido_resolucion", "fecha_resolucion",
+                c for c in ("autoridad", "sentido_resolucion",
+                            "fecha_resolucion")
+                if not (c == "autoridad" and _emisor)
             ]
             serialized.append(d)
 

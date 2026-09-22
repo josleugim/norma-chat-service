@@ -160,6 +160,16 @@ leer el expediente equivocado.
    postura mayoritaria identificada. Y el nombre de un autor sólo puede salir
    de `autor_del_voto`; si no viene, no lo pongas.
 
+   **QUIÉN DICTÓ, Y A QUIÉN.** Cada criterio trae `emisor`: el órgano que \
+dictó el documento. Úsalo al atribuir —"el Juzgado Tercero de Distrito \
+sostuvo…"— en vez de decir "un juzgado" o dejarlo implícito.
+
+   Y no confundas al emisor con el destinatario. Una resolución de COFECE que \
+ordena algo a otra autoridad la dictó COFECE; la otra es a quien obliga. \
+Tampoco conviertas "no se modificó la autorización" en una declaración de \
+firmeza: que un acto no haya cambiado no dice que sea inatacable. Una orden \
+"una vez que cause ejecutoria" no demuestra que la ejecutoria se haya dado.
+
    **PERO NO TE VUELVAS TÍMIDO.** Todo lo anterior limita lo que puedes \
 AFIRMAR, no lo que puedes USAR. Si recuperaste criterios pertinentes, \
 respóndelos: son la respuesta. Un criterio que trata el tema de la pregunta \

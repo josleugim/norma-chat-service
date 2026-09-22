@@ -1578,3 +1578,55 @@ class TestTodasLasRutasDeSalidaValidan:
     def test_sin_registro_no_revienta(self):
         ag = self._agente()
         assert ag._emitir_validado("texto [C1]", None, None, "content")
+
+
+class TestEmisorDelDocumento:
+    """
+    Correcciones menores de la revisión final, todas con la misma raíz: un
+    criterio no dice qué órgano lo dictó, así que el agente lo infería.
+
+    H17-B no identificó al Juzgado Tercero como emisor del criterio del
+    43/2021. H18-B confundió a COFECE —que dictó el acto de 2023— con CNA, que
+    era la destinataria del cumplimiento.
+    """
+
+    def _u(self):
+        from core.universo import UniversoRestringido
+        return UniversoRestringido(
+            ["43_2021_3JD", "VCN-004-2024", "677_2024_1SCJN", "275_2023_1JD"],
+            etiqueta="t")
+
+    def test_carga_los_emisores_del_universo(self):
+        u = self._u()
+        n = u.cargar_emisores([
+            {"caseLink": "43_2021_3JD", "authority": "Juzgado Tercero de Distrito"},
+            {"caseLink": "VCN-004-2024", "authority": "COFECE"},
+            {"caseLink": "FUERA-001-2020", "authority": "OTRA"},
+        ])
+        assert n == 2, "lo que no está en el universo no se carga"
+        assert u.emisor_de("43_2021_3JD") == "Juzgado Tercero de Distrito"
+        assert u.emisor_de("VCN-004-2024") == "COFECE"
+
+    def test_sin_authority_usa_el_organo_judicial(self):
+        u = self._u()
+        u.cargar_emisores([{"caseLink": "677_2024_1SCJN",
+                            "judicialBody": "Primera Sala de la SCJN"}])
+        assert u.emisor_de("677_2024_1SCJN") == "Primera Sala de la SCJN"
+
+    def test_un_documento_sin_emisor_devuelve_None(self):
+        """No se inventa: seis de los 63 no traen authority."""
+        u = self._u()
+        u.cargar_emisores([{"caseLink": "275_2023_1JD"}])
+        assert u.emisor_de("275_2023_1JD") is None
+
+    def test_la_autoridad_deja_de_estar_no_disponible_si_hay_emisor(self):
+        """
+        `campos_no_disponibles` existe para que el modelo no invente. Si el
+        emisor SÍ se conoce, declararlo no disponible sería mentir al revés.
+        """
+        emisor = "Juzgado Tercero de Distrito"
+        campos = [c for c in ("autoridad", "sentido_resolucion",
+                              "fecha_resolucion")
+                  if not (c == "autoridad" and emisor)]
+        assert "autoridad" not in campos
+        assert "sentido_resolucion" in campos

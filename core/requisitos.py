@@ -74,6 +74,18 @@ _CAMPOS_PEDIDOS = [
                 r"\ba\s+qui[ée]n\s+se\s+(?:le\s+)?multó", re.IGNORECASE),
      ["agentFines"],
      "los agentes multados y sus montos, tomados del registro"),
+    # Qué resolvió una sentencia y a quién obliga. H18: los datos estaban en
+    # `judicialDecisionEffects` —"el Pleno de la Comisión Nacional
+    # Antimonopolio deberá…"— y en `originAdministrativeAuthority` —COFECE,
+    # que dictó el acto reclamado—, no en los criterios. El agente usó sólo
+    # `buscar_criterios` y acabó confundiendo emisor con destinatario.
+    (re.compile(r"\bqu[ée]\s+se\s+resolvi[óo]\b|\bqu[ée]\s+efectos?\b|"
+                r"\bpuntos?\s+resolutivos?\b|\bqu[ée]\s+orden[óa]\b|"
+                r"\bsentido\s+del?\s+(?:amparo|fallo|sentencia)\b",
+                re.IGNORECASE),
+     ["judicialDecisionEffects", "senseOfAmparo", "scopeOfCompliance",
+      "judgmentImplementation", "originAdministrativeAuthority"],
+     "qué se resolvió y a quién obliga, tomados del registro"),
 ]
 
 
