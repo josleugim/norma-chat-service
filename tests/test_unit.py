@@ -1468,3 +1468,58 @@ class TestElPayloadNoSepultaLaEvidencia:
         completo = len(json.dumps(r.model_dump(), ensure_ascii=False))
         prompt = len(json.dumps(r.para_prompt(), ensure_ascii=False))
         assert prompt < completo / 2, f"{completo} → {prompt}"
+
+
+class TestCamposDelRegistroComoRequisito:
+    """
+    H14 de la revisión final. La pregunta pide identificar el tribunal
+    colegiado y su expediente; las tres corridas usaron sólo
+    `buscar_criterios`. Los datos estaban en el registro —`relatedTccCaseFile:
+    565/2023`, `relatedCollegiateCourt: Primer Tribunal Colegiado…`— y nadie
+    los fue a buscar.
+
+    Un identificador canónico correcto no equivale a haber recuperado todos
+    los campos pedidos.
+    """
+
+    Q = ("En el amparo en revisión 677/2024, ¿la Primera Sala resolvió todos "
+         "los agravios? ¿Qué tribunal colegiado y qué expediente dieron origen?")
+
+    def _req(self, q=None):
+        from core.identidades import ResolutorDeIdentidades
+        from core.requisitos import construir_requisitos
+        u = ["677_2024_1SCJN", "VCN-001-2025", "178_2017_2TCC"]
+        q = q or self.Q
+        return construir_requisitos(q, ResolutorDeIdentidades(u).resolver(q))
+
+    def test_solo_criterios_no_cumple(self):
+        from core.requisitos import verificar
+        v = verificar(self._req(), [
+            {"caseLink": "677_2024_1SCJN", "content": "reserva de jurisdicción"}])
+        assert not v["cumple"]
+        assert any("tribunal" in f for f in v["faltantes"])
+
+    def test_con_el_registro_cumple(self):
+        from core.requisitos import verificar
+        v = verificar(self._req(), [{
+            "caseLink": "677_2024_1SCJN",
+            "relatedTccCaseFile": "565/2023",
+            "relatedCollegiateCourt": "Primer Tribunal Colegiado…",
+        }])
+        assert v["cumple"]
+
+    def test_nombrar_un_tribunal_no_es_preguntarlo(self):
+        """
+        "del Segundo Tribunal Colegiado" identifica el documento; no pide que
+        se diga cuál es. La primera versión del patrón disparaba con cualquier
+        mención y rompía las comparaciones.
+        """
+        req = self._req("Compara lo de VCN-001-2025 con lo del amparo 178/2017 "
+                        "del Segundo Tribunal Colegiado")
+        assert not [r for r in req if r["tipo"] == "campos_registro"]
+
+    def test_quien_voto_pide_los_campos_de_votos(self):
+        req = self._req("En el VCN-003-2025, ¿quiénes votaron y hubo "
+                        "comisionados en contra?")
+        campos = [r for r in req if r["tipo"] == "campos_registro"]
+        assert campos and "dissentingOpinions" in campos[0]["valor"]

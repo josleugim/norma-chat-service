@@ -53,6 +53,30 @@ _COMPARA = re.compile(
 )
 
 
+# Preguntas que exigen campos concretos del registro, no criterios. Van con
+# los nombres reales del modelo para que el requisito sea comprobable.
+_CAMPOS_PEDIDOS = [
+    # Sólo en forma INTERROGATIVA. "del Segundo Tribunal Colegiado" nombra el
+    # órgano; "¿qué tribunal colegiado?" lo pregunta. La primera versión
+    # disparaba con cualquier mención y exigía campos del registro a una
+    # comparación que sólo estaba identificando su documento.
+    (re.compile(r"\bqu[ée]\s+tribunal\b|\bcu[áa]l\s+(?:tribunal|[óo]rgano)\b|"
+                r"\bqu[ée]\s+expediente\b|\bde\s+qu[ée]\s+(?:tribunal|[óo]rgano)\b|"
+                r"\bqu[ée]\s+[óo]rgano\b", re.IGNORECASE),
+     ["relatedCollegiateCourt", "relatedTccCaseFile", "judicialBody"],
+     "el tribunal y su expediente, tomados del registro"),
+    (re.compile(r"\bqui[ée]n(?:es)?\s+(?:vot[óo]|resolvi[óo]|firm)|"
+                r"\bcomisionad[oa]s?\b|\bintegrantes\b", re.IGNORECASE),
+     ["decisionOfficials", "dissentingOpinions",
+      "dissentingAndConcurringOpinions"],
+     "quiénes decidieron, tomados del registro"),
+    (re.compile(r"\bmulta\w*\b.{0,40}\b(?:a\s+qui[ée]n|agente|impuso)|"
+                r"\ba\s+qui[ée]n\s+se\s+(?:le\s+)?multó", re.IGNORECASE),
+     ["agentFines"],
+     "los agentes multados y sus montos, tomados del registro"),
+]
+
+
 def construir_requisitos(query: str, identidades: list[dict] | None) -> list[dict]:
     """
     Requisitos verificables de una pregunta.
@@ -89,6 +113,23 @@ def construir_requisitos(query: str, identidades: list[dict] | None) -> list[dic
             "descripcion": "un voto particular o concurrente identificado",
             "obligatorio": True,
         })
+
+    # Campos del registro que la pregunta pide expresamente.
+    #
+    # H14 de la revisión final: la pregunta pide identificar el tribunal
+    # colegiado y su expediente, y las tres corridas usaron sólo
+    # `buscar_criterios`. Los datos estaban en el registro —
+    # `relatedTccCaseFile: 565/2023`, `relatedCollegiateCourt: Primer Tribunal
+    # Colegiado…`— y nadie los fue a buscar. Un identificador canónico correcto
+    # no equivale a haber recuperado todos los campos pedidos.
+    for patron, campos, desc in _CAMPOS_PEDIDOS:
+        if patron.search(query or ""):
+            req.append({
+                "tipo": "campos_registro",
+                "valor": campos,
+                "descripcion": desc,
+                "obligatorio": True,
+            })
 
     if _COMPARA.search(query or "") and len(documentos) >= 2:
         req.append({
@@ -151,6 +192,21 @@ def verificar(requisitos: list[dict], docs: list[dict]) -> dict:
                     "voto identificado" if ok
                     else "no se recuperó ningún voto particular identificado"
                 )
+        elif r["tipo"] == "campos_registro":
+            # Se cumple si ALGUNO de los campos pedidos llegó con valor en
+            # algún documento recuperado. No basta tener el expediente
+            # correcto: hay que haber traído el campo.
+            traidos = [
+                c for c in r["valor"]
+                if any(d.get(c) not in (None, "", [], {}) for d in (docs or []))
+            ]
+            ok = bool(traidos)
+            detalle = (
+                "presentes: " + ", ".join(traidos) if ok
+                else "ninguno de estos campos llegó: " + ", ".join(r["valor"])
+                     + ". Están en el registro del expediente, no en los "
+                       "criterios: hay que consultarlo con buscar_expedientes"
+            )
         else:
             ok, detalle = True, "sin verificación definida"
 
