@@ -1675,3 +1675,45 @@ class TestReconciliacionDelConjuntoCalculado:
         from core.fuentes import case_link_de
         ids = sorted(case_link_de(e) for e in self._cinco())
         assert len(ids) == 5 and all(ids)
+
+
+class TestAbstencionSoloSiFaltaAlgoQueNombrar:
+    """
+    Falso positivo propio, detectado en la regresión del 22-sep: el indicador
+    `abstained` saltó de 0 a 7 de 20, incluidas H08, H10 y H15 — que
+    respondieron bien, con fuentes y sin inventar nada.
+
+    La causa: un chequeo PARTIAL agotaba el reintento y escribía
+    "Tras dos búsquedas la evidencia no sostiene: " con la lista de faltantes
+    VACÍA. `abstained` se deriva de que esa razón exista.
+
+    Marcar abstención donde no la hubo no es un detalle de etiqueta: COFECE lee
+    ese indicador, y decir que el agente se abstuvo cuando respondió es tan
+    falso como lo contrario.
+    """
+
+    def test_partial_sin_componentes_insuficientes_no_abstiene(self):
+        from core.sufficiency import INSUFFICIENT
+        chequeo = {"components": [
+            {"descripcion": "qué es el control", "estado": "PARTIAL"},
+            {"descripcion": "cómo lo define COFECE", "estado": "SUFFICIENT"},
+        ]}
+        faltantes = [c["descripcion"] for c in chequeo["components"]
+                     if c["estado"] == INSUFFICIENT]
+        assert not faltantes, "PARTIAL no es INSUFFICIENT"
+
+    def test_con_un_componente_insuficiente_si_abstiene(self):
+        from core.sufficiency import INSUFFICIENT
+        chequeo = {"components": [
+            {"descripcion": "el criterio del 178/2017", "estado": INSUFFICIENT},
+        ]}
+        faltantes = [c["descripcion"] for c in chequeo["components"]
+                     if c["estado"] == INSUFFICIENT]
+        assert faltantes == ["el criterio del 178/2017"]
+
+    def test_la_razon_nunca_queda_colgando(self):
+        """Nunca debe escribirse la frase con la lista vacía."""
+        faltantes = []
+        razon = ("Tras dos búsquedas la evidencia no sostiene: "
+                 + "; ".join(faltantes)) if faltantes else None
+        assert razon is None

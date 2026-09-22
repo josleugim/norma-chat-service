@@ -1041,10 +1041,26 @@ class NormaPlusAgent:
                         c["descripcion"] for c in chequeo["components"]
                         if c["estado"] == INSUFFICIENT
                     ]
-                    state.abstention_reason = (
-                        "Tras dos búsquedas la evidencia no sostiene: "
-                        + "; ".join(faltantes)
-                    )
+                    # Sólo hay abstención si falta algo que NOMBRAR.
+                    #
+                    # Un chequeo PARTIAL agotaba el reintento y escribía
+                    # "Tras dos búsquedas la evidencia no sostiene: " con la
+                    # lista vacía. El indicador `abstained` se encendía sobre
+                    # respuestas correctas y bien citadas: en la regresión del
+                    # 22-sep saltó de 0 a 7 de 20, incluidas H08, H10 y H15,
+                    # que respondieron bien y con fuentes.
+                    #
+                    # Marcar abstención donde no la hubo no es un detalle de
+                    # etiqueta: COFECE lee ese indicador, y decir que el agente
+                    # se abstuvo cuando respondió es tan falso como lo
+                    # contrario. PARTIAL significa que la evidencia cubre parte
+                    # de lo preguntado, y eso se responde señalando el límite,
+                    # no callando.
+                    if faltantes:
+                        state.abstention_reason = (
+                            "Tras dos búsquedas la evidencia no sostiene: "
+                            + "; ".join(faltantes)
+                        )
 
         # Etapa 3 — lo que realmente entra al prompt. Es aquí donde se pierde
         # texto respecto de lo que devolvió el buscador.
