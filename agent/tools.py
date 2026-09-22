@@ -28,6 +28,33 @@ TOOLS = [
                     "description": "Número máximo de resultados (5-30). Usa 8 para preguntas simples, 15 para medias, 25 para complejas.",
                     "default": 15,
                 },
+                # C01 del diagnóstico de COFECE (21-sep-2026). El cliente ya
+                # sabía serializar este filtro; la herramienta no lo exponía,
+                # así que el alcance documental quedaba en manos de escribir el
+                # expediente dentro de la frase de búsqueda — que no impone
+                # identidad. H15 no recuperó `178_2017_2TCC` en ninguna de las
+                # nueve respuestas.
+                "en_expedientes": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Limita la búsqueda a estos expedientes concretos, por "
+                        "su identificador exacto (VCN-004-2024, 178_2017_2TCC, "
+                        "480_2018_2SCJN). ÚSALO SIEMPRE que la pregunta nombre "
+                        "uno o más documentos: escribir el expediente dentro de "
+                        "`query` NO acota la búsqueda. Para comparar dos "
+                        "documentos, pásalos ambos: se busca en cada uno por "
+                        "separado y se conservan los dos conjuntos de "
+                        "evidencia.\n\n"
+                        "NO es un prefijo ni un tipo. `\"VCN-\"`, `\"VCN\"` o "
+                        "`\"amparos\"` NO son identificadores y no acotan "
+                        "nada: se ignoran. Si la pregunta es temática —«busca "
+                        "una resolución VCN que explique X»— OMITE este "
+                        "parámetro y deja que la búsqueda semántica recorra "
+                        "el acervo. Úsalo sólo cuando sepas QUÉ documento "
+                        "concreto necesitas."
+                    ),
+                },
             },
             "required": ["query"],
         },
@@ -252,7 +279,16 @@ TOOLS = [
                         "basicInfoRequestDate", "admissionDate",
                         "additionalInfoRequestDate", "resolutionDate",
                         "ResolutionIssueDate",
-                    ],
+                        # Campos judiciales (C07, subcaso H05). Faltaban, así
+                        # que la única vía para un plazo de amparo era que el
+                        # modelo pasara dos fechas sueltas — y esa rama pierde
+                        # la procedencia del expediente.
+                        "complaintFilingDate", "complaintAdmissionDate",
+                        "expandedComplaintAdmissionDate", "judgmentDate",
+                        "reviewResolutionDate", "amparoComplianceResolutionDate",
+                        "relatedTccDecisionDate", "appealedJudgmentDate",
+                        "originAdministrativeResolutionDate",
+                        ],
                     "description": (
                         "Campo de fecha inicial. IMPORTANTE: en VCN e IO la fecha "
                         "de notificación NO EXISTE por diseño; ahí el inicio del "
@@ -266,9 +302,32 @@ TOOLS = [
                     "enum": [
                         "resolutionDate", "ResolutionIssueDate", "admissionDate",
                         "additionalInfoRequestDate", "basicInfoRequestDate",
-                    ],
-                    "description": "Campo de fecha final. Default: resolutionDate.",
+                        "complaintFilingDate", "complaintAdmissionDate",
+                        "expandedComplaintAdmissionDate", "judgmentDate",
+                        "reviewResolutionDate", "amparoComplianceResolutionDate",
+                        "relatedTccDecisionDate", "appealedJudgmentDate",
+                        "originAdministrativeResolutionDate",
+                        ],
+                    "description": (
+                        "Campo de fecha final. Default: resolutionDate. En "
+                        "asuntos judiciales: judgmentDate (sentencia), "
+                        "complaintAdmissionDate (admisión de la demanda)."
+                    ),
                     "default": "resolutionDate",
+                },
+                "unidad": {
+                    "type": "string",
+                    "enum": ["dias_habiles", "dias_naturales"],
+                    "description": (
+                        "Unidad del promedio y demás estadísticas. "
+                        "`dias_habiles` descuenta fines de semana e inhábiles "
+                        "según el calendario de la autoridad; `dias_naturales` "
+                        "es la resta de fechas. Si la pregunta dice "
+                        "explícitamente «días naturales», usa dias_naturales: "
+                        "pedir compute_stats sin esto devolvía siempre hábiles "
+                        "y respondía otra cosa."
+                    ),
+                    "default": "dias_habiles",
                 },
                 "max_dias_habiles": {
                     "type": "integer",

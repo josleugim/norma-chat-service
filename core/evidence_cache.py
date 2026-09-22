@@ -180,6 +180,70 @@ class EvidenceCache:
             True,
         )
 
+    def contexto_para_turno(
+        self, session_id: str, registry, limite: int = 12,
+    ) -> str:
+        """
+        Evidencia de turnos previos, **registrada en el turno actual**.
+
+        C04 del diagnóstico de COFECE (21-sep-2026). `get_context_summary`
+        imprimía títulos con índices posicionales `[1]..[5]`, que no son los
+        marcadores de ningún registro. El modelo veía `[C14]` en su propia
+        respuesta anterior —dentro del historial— y lo reutilizaba en el turno
+        siguiente, cuyo registro sólo llegaba a C10. La cita quedaba inválida
+        aunque el documento fuera real: en H19 `C14` era `511_2023_2TCC`,
+        páginas 89-91.
+
+        Aquí cada pieza se registra en el registro del turno actual y se
+        presenta con el marcador que le acaba de tocar. Así no hay dos espacios
+        de nombres: el que el modelo lee es el que resuelve.
+
+        Se incluye el texto y la voz, no sólo el título: un criterio del que
+        sólo se conoce el encabezado no permite sostener nada, y sin la voz un
+        voto particular se lee como la sentencia.
+        """
+        session = self._sessions.get(session_id)
+        if not session or not session["turns"] or registry is None:
+            return ""
+
+        from core.voz import clasificar_voz, etiqueta as etiqueta_voz
+
+        lineas: list[str] = []
+        vistos: set[str] = set()
+        # De los turnos más recientes hacia atrás: lo último pesa más.
+        for turn in reversed(session["turns"][-3:]):
+            for c in (turn.get("criterios") or []):
+                if len(vistos) >= limite:
+                    break
+                marker = registry.assign(c, "C")
+                if not marker or marker in vistos:
+                    continue
+                vistos.add(marker)
+                meta = c.get("metadata") or {}
+                v = clasificar_voz(c)
+                texto = (c.get("text") or c.get("content") or "").strip()
+                linea = (
+                    f"[{marker}] {meta.get('id_expediente', '?')} — "
+                    f"{meta.get('title', '?')} (pp. "
+                    f"{meta.get('paginas_parrafos', '?')})"
+                )
+                if v["voz"] != "no_identificada":
+                    linea += f" · {etiqueta_voz(v['voz'])}"
+                    if v["autor"]:
+                        linea += f" de {v['autor']}"
+                lineas.append(linea)
+                if texto:
+                    lineas.append(f"      {texto[:400]}")
+
+        if not lineas:
+            return ""
+        return (
+            "Evidencia recuperada en turnos anteriores de esta conversación, "
+            "ya registrada para ESTE turno. Cita con estos marcadores; los de "
+            "respuestas anteriores no son válidos aquí.\n"
+            + "\n".join(lineas)
+        )
+
     def get_context_summary(self, session_id: str) -> str:
         """
         Genera un resumen de la evidencia cacheada para inyectar

@@ -77,3 +77,29 @@ class TurnState:
     # correcta, y eso es lo que la hace peligrosa: falsa exhaustividad
     # acertando por suerte, igual que el filtro de negación de §24.6.
     resultados_por_herramienta: dict[str, int] = field(default_factory=dict)
+
+    # ── Alcance documental de la búsqueda de criterios ──────
+    # Qué expedientes se pidieron explícitamente y cuánta evidencia devolvió
+    # cada uno. Una comparación de dos documentos a la que le falta un lado
+    # tiene que poder saberse incompleta: en H15 el agente afirmó que dos
+    # posturas "coinciden plenamente" sin haber recuperado una de las dos.
+    cobertura_por_documento: list[dict] = field(default_factory=list)
+
+    # Menciones naturales de expediente resueltas a identidades reales del
+    # universo, antes de llamar cualquier herramienta. "677/2024" no es un
+    # identificador: `677_2024_1SCJN` sí. Se conservan los candidatos y si la
+    # mención era ambigua, porque un número compartido por dos órganos son dos
+    # asuntos y no se elige uno en silencio.
+    identidades_resueltas: list[dict] = field(default_factory=list)
+
+    # Reparación aplicada al borrador antes de emitirlo (C06): qué marcadores
+    # no resolvían y cuántas afirmaciones colgaban sólo de ellos.
+    reparacion_salida: dict | None = None
+
+    # Requisitos verificables de la pregunta (C03): qué documento, qué voz y
+    # si exige comparar dos fuentes. Se comprueban contra la evidencia
+    # identificada, no contra una bolsa de palabras — el check léxico descarta
+    # los números de expediente y aprobaba una pregunta sobre un documento
+    # exacto con vocabulario de cualquier otro del mismo tema.
+    requisitos: list[dict] = field(default_factory=list)
+    requisitos_verificados: dict | None = None

@@ -50,3 +50,8 @@ logs/
 
 # Trazas de corridas (se exportan, no se versionan)
 traces/
+
+# El holdout de COFECE no va en este repo: contiene sus preguntas.
+# Vive en NormaChat-Doc-Obs/holdout/, fuera de control de versiones.
+entregables/holdout/
+data/question_sets/holdout*

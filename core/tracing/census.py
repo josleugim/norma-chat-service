@@ -90,6 +90,34 @@ async def take_census(estadistica_client, prefixes: tuple[str, ...] = PREFIXES) 
 
     census["total"] = len(registros)
 
+    # Campos que la API trae con dato y el modelo no declara.
+    #
+    # `CAMPOS_VIGILADOS` es una lista fija: detecta que un campo conocido
+    # DESAPAREZCA, no que uno nuevo nunca se haya declarado. Ese punto ciego
+    # costó el holdout del 21-sep: la API devolvía 52 campos, `ExpedienteRecord`
+    # declaraba 19, y el agente afirmaba que no existían datos que sí estaban en
+    # 57 de los 63 documentos.
+    #
+    # Esto lo mide sin lista fija: compara lo que llega contra lo que el modelo
+    # sabe recibir. Si la API agrega un campo mañana, se entera sola.
+    try:
+        from models.schemas import ExpedienteRecord
+        declarados = set(ExpedienteRecord.model_fields)
+        crudos = getattr(estadistica_client, "ultimo_payload_crudo", None) or []
+        no_declarados: dict[str, int] = {}
+        for item in crudos:
+            if not isinstance(item, dict):
+                continue
+            for k, v in item.items():
+                if k not in declarados and v not in (None, "", [], {}):
+                    no_declarados[k] = no_declarados.get(k, 0) + 1
+        if no_declarados:
+            census["campos_no_declarados"] = dict(
+                sorted(no_declarados.items(), key=lambda kv: -kv[1])
+            )
+    except Exception as e:  # nunca tumbar el censo por esta medición
+        census["errors"].append(f"campos_no_declarados: {type(e).__name__}: {e}")
+
     # Los identificadores vistos, para poder decir CUÁLES faltan cuando hay un
     # universo declarado. Con 63 documentos cabe en el manifiesto; con el
     # acervo completo no, así que sólo se guarda cuando es una lista corta.

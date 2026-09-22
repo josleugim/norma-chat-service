@@ -132,6 +132,74 @@ class ExpedienteRecord(BaseModel):
     resource: Optional[str] = None
     agentFines: Optional[str | dict] = None              # String con dict O dict vacío {}
 
+    # ── Campos que la API devuelve y el modelo no declaraba ──
+    #
+    # Descubierto por el holdout de COFECE el 21-sep-2026, y es la falla más
+    # cara de todo el proyecto. Pydantic descarta en silencio lo que no está
+    # declarado, así que la API devolvía 52 campos, el modelo declaraba 19, y
+    # los 33 restantes nunca llegaban al agente.
+    #
+    # El efecto no era un hueco visible: era una afirmación falsa. Ante
+    # "¿cuántos días naturales pasaron desde que se presentó la demanda del
+    # amparo 275/2023 hasta que se admitió?", el agente respondió en las TRES
+    # repeticiones que sólo constaba la fecha de sentencia. La API tenía
+    # `complaintFilingDate: 12-07-2023` y `complaintAdmissionDate: 26-07-2023`.
+    #
+    # Medido sobre el universo de 63: **57 documentos tenían al menos un campo
+    # con dato que el agente no podía ver**, repartidos en 36 campos.
+    #
+    # Por qué no lo atrapó la alarma de cobertura: `CAMPOS_VIGILADOS` es una
+    # lista fija de nueve campos. Está construida para detectar que un campo
+    # DESAPAREZCA, no para detectar que nunca se declaró. El instrumento tenía
+    # el mismo punto ciego que el código. Corregido en `census.py`.
+
+    # Emisión y naturaleza de la resolución
+    resolutionIssueDate: Optional[str] = None            # DD-MM-YYYY
+    applicableLaw: Optional[str] = None
+    natureOfResolution: Optional[str] = None
+    modifiedInitialResolutionDate: Optional[str] = None
+    operationDescription: Optional[str] = None
+    notifyingParties: Optional[list[str] | str] = None
+    accumulatedCaseFiles: Optional[list[str] | str] = None
+    # Votos particulares y concurrentes. Sin esto, "¿hubo algún voto que
+    # discrepara y quién lo emitió?" no tiene con qué responderse.
+    dissentingOpinions: Optional[list[str] | str] = None
+    dissentingAndConcurringOpinions: Optional[list[dict] | list[str] | str] = None
+    decisionOfficials: Optional[list[dict] | list[str] | str] = None
+
+    # Cumplimiento de amparo
+    amparoComplianceResolutionDate: Optional[str] = None
+    amparoComplianceResolutionIssueDate: Optional[str] = None
+    scopeOfCompliance: Optional[str] = None
+    judgmentImplementation: Optional[str] = None
+
+    # Procedimiento judicial: demanda, admisión y sentencia
+    originAdministrativeAuthority: Optional[str] = None
+    originAdministrativeResolutionDate: Optional[str] = None
+    claimedActs: Optional[list[str] | str] = None
+    challengedNorms: Optional[list[str] | str] = None
+    complaintFilingDate: Optional[str] = None            # DD-MM-YYYY
+    complaintAdmissionDate: Optional[str] = None         # DD-MM-YYYY
+    expandedComplaintAdmissionDate: Optional[str] = None  # DD-MM-YYYY
+    judgmentDate: Optional[str] = None                   # DD-MM-YYYY
+    senseOfAmparo: Optional[list[str] | str] = None
+    judicialDecisionEffects: Optional[str] = None
+    judicialCaseFile: Optional[str] = None
+    judicialBody: Optional[str] = None
+
+    # Revisión, colegiados y resultado final
+    reviewResolutionDate: Optional[str] = None           # DD-MM-YYYY
+    senseOfReview: Optional[list[str] | str] = None
+    finalAmparoResult: Optional[list[str] | str] = None
+    relatedTccCaseFile: Optional[str] = None
+    relatedCollegiateCourt: Optional[str] = None
+    relatedTccDecisionDate: Optional[str] = None         # DD-MM-YYYY
+    originAmparoCaseFiles: Optional[list[str] | str] = None
+    appealedJudgmentBody: Optional[str] = None
+    appealedJudgmentDate: Optional[str] = None           # DD-MM-YYYY
+    principalAppellants: Optional[list[str] | str] = None
+    adhesiveAppellants: Optional[list[str] | str] = None
+
     @field_validator("senseOfResolution", mode="before")
     @classmethod
     def _sentido_a_lista(cls, v):

@@ -819,3 +819,522 @@ class TestUniversoRestringido:
         ]), encoding="utf-8")
         u = UniversoRestringido.desde_archivo(p)
         assert len(u) == 2 and "480_2018_2SCJN" in u
+
+
+class TestCamposQueLaAPIMandaYElModeloNoDeclaraba:
+    """
+    El holdout del 21-sep-2026 encontró la falla más cara del proyecto: la API
+    devolvía 52 campos, `ExpedienteRecord` declaraba 19, y Pydantic descartaba
+    los 33 restantes en silencio.
+
+    No producía un hueco visible sino una afirmación falsa: ante "¿cuántos días
+    naturales pasaron desde que se presentó la demanda del amparo 275/2023
+    hasta que se admitió?", el agente respondió en las TRES repeticiones que
+    sólo constaba la fecha de sentencia. La API tenía las dos fechas.
+
+    Medido sobre el universo de 63: 57 documentos con al menos un campo
+    invisible, en 36 campos distintos.
+    """
+
+    def test_las_fechas_del_amparo_275_2023(self):
+        from models.schemas import ExpedienteRecord
+        r = ExpedienteRecord(
+            caseLink="275_2023_1JD",
+            complaintFilingDate="12-07-2023",
+            complaintAdmissionDate="26-07-2023",
+            judgmentDate="15-07-2024",
+        )
+        assert r.complaintFilingDate == "12-07-2023"
+        assert r.complaintAdmissionDate == "26-07-2023"
+        assert r.judgmentDate == "15-07-2024"
+
+    def test_los_votos_particulares_llegan(self):
+        """"¿Hubo algún voto que discrepara?" no tenía con qué responderse."""
+        from models.schemas import ExpedienteRecord
+        r = ExpedienteRecord(
+            caseLink="VCN-003-2025",
+            dissentingOpinions=["Oscar Alejandro Gómez Romero (concurrente)",
+                                "Ana María Reséndiz Mora (en contra)"],
+        )
+        assert len(r.dissentingOpinions) == 2
+
+    def test_el_modelo_cubre_los_campos_de_la_doc_v11(self):
+        from models.schemas import ExpedienteRecord
+        declarados = set(ExpedienteRecord.model_fields)
+        de_la_api = {
+            "id", "name", "caseLink", "resolutionFileUrl", "authority",
+            "typeOfProcedure", "relevantMarkets", "originTypeOfProcedure",
+            "economicAgents", "startAgreementDate", "notificationDate",
+            "basicInfoRequestDate", "admissionDate", "additionalInfoRequestDate",
+            "resolutionDate", "senseOfResolution", "resource", "agentFines",
+            "resolutionIssueDate", "applicableLaw", "dissentingOpinions",
+            "notifyingParties", "operationDescription", "natureOfResolution",
+            "modifiedInitialResolutionDate", "amparoComplianceResolutionDate",
+            "amparoComplianceResolutionIssueDate", "scopeOfCompliance",
+            "judgmentImplementation", "accumulatedCaseFiles", "decisionOfficials",
+            "originAdministrativeAuthority", "originAdministrativeResolutionDate",
+            "claimedActs", "challengedNorms", "complaintFilingDate",
+            "complaintAdmissionDate", "expandedComplaintAdmissionDate",
+            "judgmentDate", "senseOfAmparo", "judicialDecisionEffects",
+            "judicialCaseFile", "judicialBody", "reviewResolutionDate",
+            "senseOfReview", "finalAmparoResult", "relatedTccCaseFile",
+            "relatedCollegiateCourt", "relatedTccDecisionDate",
+            "originAmparoCaseFiles", "appealedJudgmentBody",
+            "appealedJudgmentDate", "principalAppellants", "adhesiveAppellants",
+            "dissentingAndConcurringOpinions",
+        }
+        faltan = de_la_api - declarados
+        assert not faltan, f"el modelo no declara: {sorted(faltan)}"
+
+
+class TestAlcanceConIdentificadoresJudiciales:
+    """
+    `1259-1260_2017_2JD` tiene guion, pero su "prefijo" sería `1259`: el número
+    de un amparo, no un tipo de procedimiento. Contarlo como scope marcaba como
+    confusión de alcance una pregunta sobre un VCN que además recuperaba la
+    sentencia que lo revisa — que es lo correcto cuando ambos están en el
+    universo. 2 de 20 preguntas en una repetición del holdout, las dos falsas.
+    """
+
+    def _scope(self, links):
+        from core.tracing.analysis import analyze_answer
+        docs = [{"case_link": l} for l in links]
+        a = analyze_answer(text="x", registry=None, references=[],
+                           unresolved=[], docs_in_context=docs,
+                           expected_prefixes=["VCN"])
+        return set(a.scope_observed), a.scope_mismatch
+
+    def test_una_sentencia_no_es_otro_alcance(self):
+        obs, mismatch = self._scope(["VCN-005-2020", "1259-1260_2017_2JD"])
+        assert obs == {"VCN"}
+        assert not mismatch
+
+    def test_un_procedimiento_de_verdad_si_lo_es(self):
+        obs, mismatch = self._scope(["VCN-005-2020", "CNT-090-2025"])
+        assert obs == {"VCN", "CNT"}
+        assert mismatch
+
+
+class TestMarcadorEnLosPlazos:
+    """
+    El holdout dejó ver que una respuesta puede ser correcta y aun así romper
+    la trazabilidad. En H05 el agente calculó bien los días naturales y nombró
+    la sentencia en FUENTES, pero no escribió marcador en el cuerpo:
+    `citations_emitted` quedó en 0 y la cadena afirmación → marcador →
+    registro → documento se cortaba.
+
+    El registro ya tenía el expediente; lo que faltaba era que la salida de
+    `calcular_plazos` lo trajera.
+    """
+
+    def test_el_marcador_se_reusa_no_se_duplica(self):
+        from core.citations import CitationRegistry
+        reg = CitationRegistry()
+        doc = {"caseLink": "275_2023_1JD", "judgmentDate": "15-07-2024"}
+        primero = reg.assign(doc, "E")
+        # El mismo expediente, llegando por otra herramienta.
+        otra_vista = {"caseLink": "275_2023_1JD", "dias_naturales": 355}
+        segundo = reg.assign(otra_vista, "E")
+        assert primero == segundo, "un expediente debe tener una sola identidad"
+
+    def test_dos_expedientes_distintos_llevan_marcadores_distintos(self):
+        from core.citations import CitationRegistry
+        reg = CitationRegistry()
+        a = reg.assign({"caseLink": "275_2023_1JD"}, "E")
+        b = reg.assign({"caseLink": "43_2021_3JD"}, "E")
+        assert a != b
+
+    def test_el_marcador_resuelve_al_expediente(self):
+        from core.citations import CitationRegistry
+        reg = CitationRegistry()
+        m = reg.assign({"caseLink": "275_2023_1JD"}, "E")
+        assert reg.case_link_of(m) == "275_2023_1JD"
+
+
+class TestResolucionDeIdentidades:
+    """
+    C02 del diagnóstico de COFECE. "El amparo en revisión 677/2024" viajaba
+    intacto como texto libre a una búsqueda léxica y devolvía cero en ocho de
+    nueve corridas. En la novena el modelo eligió por su cuenta
+    `677_2024_1SCJN` y lo encontró: el acierto dependía de que adivinara el
+    identificador interno.
+
+    Las pruebas de cierre que pide el diagnóstico: pares equivalentes resuelven
+    los mismos registros, un número compartido por órganos distintos no se
+    fusiona, y dos actos de un expediente conservan IDs distintos.
+    """
+
+    UNIVERSO = [
+        "VCN-004-2024", "677_2024_1SCJN", "480_2018_2SCJN",
+        "275_2023_1JD", "275_2023_3JD", "178_2017_2TCC",
+        "278_2023_1JD_2024_07_15", "278_2023_1JD_2025_11_19",
+        "1259-1260_2017_2JD",
+    ]
+
+    def _r(self):
+        from core.identidades import ResolutorDeIdentidades
+        return ResolutorDeIdentidades(self.UNIVERSO)
+
+    def test_el_numero_natural_resuelve_al_identificador_interno(self):
+        r = self._r().resolver("En el amparo en revisión 677/2024, ¿la Primera "
+                               "Sala resolvió todos los agravios?")
+        assert len(r) == 1
+        assert r[0]["candidatos"] == ["677_2024_1SCJN"]
+        assert not r[0]["ambiguo"]
+
+    def test_numero_compartido_por_dos_organos_no_se_fusiona(self):
+        r = self._r().resolver("En el amparo 275/2023, ¿qué se resolvió?")
+        assert r[0]["ambiguo"]
+        assert set(r[0]["candidatos"]) == {"275_2023_1JD", "275_2023_3JD"}
+
+    def test_el_organo_desambigua(self):
+        r = self._r().resolver("En el amparo 275/2023 del Juzgado Primero de "
+                               "Distrito, ¿cuántos días naturales pasaron?")
+        assert r[0]["candidatos"] == ["275_2023_1JD"]
+        assert not r[0]["ambiguo"]
+
+    def test_dos_actos_del_mismo_expediente_se_conservan(self):
+        r = self._r().resolver("el amparo 278/2023 del Juzgado Primero")
+        assert set(r[0]["candidatos"]) == {
+            "278_2023_1JD_2024_07_15", "278_2023_1JD_2025_11_19"}
+        assert r[0]["ambiguo"], "dos actos distintos no se colapsan en uno"
+
+    def test_no_fabrica_identificadores(self):
+        """Lo que no existe en el universo no se inventa por concatenación."""
+        assert self._r().resolver("el amparo 999/1999") == []
+
+    def test_numero_con_acumulados(self):
+        r = self._r().resolver("el amparo 1259-1260/2017")
+        assert r[0]["candidatos"] == ["1259-1260_2017_2JD"]
+
+    def test_partes_de_un_identificador_judicial(self):
+        from core.identidades import partes_de
+        p = partes_de("565_2023_1TCC_2025_04_24")
+        assert p["numero"] == "565" and p["anio"] == "2023"
+        assert p["marca_organo"] == "TCC" and p["ordinal_organo"] == "1"
+        assert p["acto"] == "2025_04_24"
+
+    def test_un_expediente_administrativo_no_es_judicial(self):
+        from core.identidades import partes_de
+        assert partes_de("VCN-004-2024") is None
+
+
+class TestContratoDeCalculo:
+    """
+    C07 del diagnóstico de COFECE. Tres defectos distintos en el mismo
+    contrato:
+
+    1. `CitationRegistry.assign` no rechazaba identidad vacía: cinco objetos de
+       fechas sin `caseLink` colapsaban bajo un mismo `E6` que no resolvía a
+       ningún documento.
+    2. Las estadísticas usaban siempre días hábiles. Una pregunta por el
+       promedio en días NATURALES recibía el de hábiles sin advertencia: la
+       cifra era correcta para otra pregunta.
+    3. El enum de campos no incluía los judiciales, así que un plazo de amparo
+       sólo podía calcularse con fechas sueltas — rama que pierde la
+       procedencia del expediente.
+    """
+
+    def test_identidad_vacia_no_recibe_marcador(self):
+        from core.citations import CitationRegistry
+        reg = CitationRegistry()
+        assert reg.assign({"fecha_inicio": "01-01-2024"}, "E") == ""
+        assert reg.assign({"dias_naturales": 355}, "E") == ""
+        assert reg.markers() == []
+
+    def test_objetos_sin_identidad_no_colapsan_en_uno(self):
+        """El defecto exacto: cinco registros distintos bajo un solo E6."""
+        from core.citations import CitationRegistry
+        reg = CitationRegistry()
+        marcadores = [
+            reg.assign({"fecha_inicio": f"0{i}-01-2024"}, "E") for i in range(1, 6)
+        ]
+        assert marcadores == ["", "", "", "", ""]
+        assert reg.markers() == [], "ninguno debe quedar registrado"
+
+    def test_con_identidad_si_recibe_marcador(self):
+        from core.citations import CitationRegistry
+        reg = CitationRegistry()
+        m = reg.assign({"caseLink": "VCN-004-2024", "dias_naturales": 49}, "E")
+        assert m == "E1"
+        assert reg.case_link_of(m) == "VCN-004-2024"
+
+    def test_la_unidad_es_explicita_en_la_herramienta(self):
+        import agent.tools as t
+        tool = next(
+            d for grp in vars(t).values()
+            if isinstance(grp, list) and grp and isinstance(grp[0], dict)
+            for d in grp
+            if (d.get("function", d)).get("name") == "calcular_plazos"
+        )
+        props = tool.get("function", tool)["parameters"]["properties"]
+        assert props["unidad"]["enum"] == ["dias_habiles", "dias_naturales"]
+
+    def test_los_campos_judiciales_estan_en_el_enum(self):
+        import agent.tools as t
+        tool = next(
+            d for grp in vars(t).values()
+            if isinstance(grp, list) and grp and isinstance(grp[0], dict)
+            for d in grp
+            if (d.get("function", d)).get("name") == "calcular_plazos"
+        )
+        props = tool.get("function", tool)["parameters"]["properties"]
+        for campo in ("complaintFilingDate", "complaintAdmissionDate",
+                      "judgmentDate"):
+            assert campo in props["campo_inicio"]["enum"], campo
+        assert "judgmentDate" in props["campo_fin"]["enum"]
+
+
+class TestVozDelCriterio:
+    """
+    C05 del diagnóstico de COFECE. Ante "¿qué sostuvo el tribunal en el
+    353/2024?" el agente presentó como postura MAYORITARIA el criterio 8422,
+    que es el voto particular de la Magistrada Irma Leticia Flores Díaz, e
+    invirtió lo que sostenían mayoría y disidencia.
+
+    La API no expone la voz en campo propio (verificado el 21-sep-2026); el
+    rastro está en `metadata.context`.
+    """
+
+    VOTO = {
+        "content": "los elementos del 130 no resultan aplicables en su totalidad",
+        "metadata": {"context": (
+            "…cuáles no.” Magistrada Irma Leticia Flores Díaz. "
+            "Respetuosamente, formulo voto en contra, en atención a que…")},
+    }
+    SALVEDAD = {
+        "content": "me aparto de las consideraciones",
+        "metadata": {"context": (
+            "SALVEDADES QUE FORMULA EL MAGISTRADO FRANCISCO GARCÍA SANDOVAL, "
+            "EN EL EXPEDIENTE R.A. 353/2024.")},
+    }
+    SENTENCIA = {
+        "content": "la autoridad debe valorar la totalidad de los elementos",
+        "metadata": {"context": "<<<PAGINA:88>>> En consecuencia, procede…"},
+    }
+
+    def test_identifica_el_voto_particular_y_su_autora(self):
+        from core.voz import clasificar_voz, VOTO_PARTICULAR
+        v = clasificar_voz(self.VOTO)
+        assert v["voz"] == VOTO_PARTICULAR
+        assert v["autor"] == "Irma Leticia Flores Díaz"
+        assert v["evidencia"], "la clasificación debe ser auditable"
+
+    def test_identifica_las_salvedades(self):
+        from core.voz import clasificar_voz, VOTO_PARTICULAR
+        v = clasificar_voz(self.SALVEDAD)
+        assert v["voz"] == VOTO_PARTICULAR
+        assert "FRANCISCO GARCÍA SANDOVAL" in (v["autor"] or "")
+
+    def test_sin_marca_NO_se_concluye_mayoria(self):
+        """
+        La regla central: que el documento sea una sentencia no dice quién
+        habla en ese fragmento. Deducir "mayoría" es el error a impedir.
+        """
+        from core.voz import clasificar_voz, NO_IDENTIFICADA
+        v = clasificar_voz(self.SENTENCIA)
+        assert v["voz"] == NO_IDENTIFICADA
+        assert v["autor"] is None
+
+    def test_un_voto_sin_firma_no_produce_nombre(self):
+        from core.voz import clasificar_voz, VOTO_PARTICULAR
+        v = clasificar_voz({"content": "formulo voto particular en contra",
+                            "metadata": {}})
+        assert v["voz"] == VOTO_PARTICULAR
+        assert v["autor"] is None, "sin firma legible no se inventa autor"
+
+    def test_cambiar_el_autor_cambia_la_salida(self):
+        """No puede quedar fijado al ejemplo del holdout."""
+        from core.voz import clasificar_voz
+        otro = {"content": "x", "metadata": {"context":
+                "Magistrada Ana Pérez López. Respetuosamente, formulo voto…"}}
+        assert clasificar_voz(otro)["autor"] == "Ana Pérez López"
+
+
+class TestContinuidadDeCitasEntreTurnos:
+    """
+    C04. En H19 `[C14]` era una cita válida a `511_2023_2TCC`. H20 la
+    reutilizó, pero su registro sólo llegaba a C10: quedó inválida aunque el
+    documento fuera real. La causa era que el resumen de caché usaba índices
+    posicionales, no los marcadores del registro del turno.
+    """
+
+    def test_la_evidencia_previa_se_registra_en_el_turno_actual(self):
+        from core.citations import CitationRegistry
+        from core.evidence_cache import EvidenceCache
+        cache = EvidenceCache()
+        crit = {"id": "8496", "text": "criterio sobre individualización",
+                "metadata": {"id_expediente": "511_2023_2TCC",
+                             "title": "Individualización", "paginas_parrafos": "89, 90, 91"}}
+        cache.update("s1", "pregunta previa", [crit], [])
+        reg = CitationRegistry()
+        ctx = cache.contexto_para_turno("s1", reg)
+        assert "511_2023_2TCC" in ctx
+        # El marcador del contexto tiene que existir en el registro del turno.
+        import re
+        marcadores = re.findall(r"\[([CE]\d+)\]", ctx)
+        assert marcadores
+        for m in marcadores:
+            assert reg.resolve(m) is not None, f"{m} debe resolver"
+
+    def test_el_contexto_trae_el_texto_no_solo_el_titulo(self):
+        from core.citations import CitationRegistry
+        from core.evidence_cache import EvidenceCache
+        cache = EvidenceCache()
+        cache.update("s1", "q", [{"id": "1", "text": "CONTENIDO SUSTANTIVO",
+                                  "metadata": {"id_expediente": "X-1"}}], [])
+        ctx = cache.contexto_para_turno("s1", CitationRegistry())
+        assert "CONTENIDO SUSTANTIVO" in ctx
+
+
+class TestRequisitosPorComponente:
+    """
+    C03. El check de suficiencia unía el texto de todos los documentos y medía
+    palabras. `_terminos` usa `[a-z]{4,}`, así que los números de expediente
+    desaparecen:
+
+        _terminos("criterio del amparo 178/2017 del 2TCC") → {'amparo','criterio'}
+
+    Una pregunta sobre un documento exacto se aprobaba con vocabulario de
+    cualquier otro del mismo tema, y evidencia de UNA fuente cubría una
+    consulta que pedía DOS posturas.
+    """
+
+    def _req(self, q):
+        from core.identidades import ResolutorDeIdentidades
+        from core.requisitos import construir_requisitos
+        u = ["VCN-001-2025", "178_2017_2TCC", "353_2024_1TCC"]
+        return construir_requisitos(
+            q, ResolutorDeIdentidades(u).resolver(q))
+
+    def test_una_comparacion_exige_los_dos_lados(self):
+        from core.requisitos import verificar
+        q = ("Compara lo que sostuvo la COFECE en VCN-001-2025 con lo que "
+             "sostuvo el Segundo Tribunal Colegiado en el amparo 178/2017")
+        req = self._req(q)
+        v = verificar(req, [{"caseLink": "VCN-001-2025", "content": "x"}])
+        assert not v["cumple"]
+        assert any("178_2017_2TCC" in f for f in v["faltantes"])
+
+    def test_con_los_dos_lados_cumple(self):
+        from core.requisitos import verificar
+        q = ("Compara lo de VCN-001-2025 con lo del amparo 178/2017 "
+             "del Segundo Tribunal Colegiado")
+        v = verificar(self._req(q), [
+            {"caseLink": "VCN-001-2025", "content": "a"},
+            {"caseLink": "178_2017_2TCC", "content": "b"},
+        ])
+        assert v["cumple"]
+
+    def test_un_voto_no_satisface_una_pregunta_por_la_mayoria(self):
+        from core.requisitos import verificar
+        q = ("En el amparo en revisión 353/2024 del Primer Tribunal "
+             "Colegiado, ¿qué sostuvo el tribunal?")
+        voto = {"caseLink": "353_2024_1TCC", "content": "x", "metadata": {
+            "context": "Magistrada Irma Leticia Flores Díaz. "
+                       "Respetuosamente, formulo voto"}}
+        v = verificar(self._req(q), [voto])
+        assert not v["cumple"]
+        assert any("mayoritaria" in f for f in v["faltantes"])
+
+    def test_cambiar_los_ids_impide_aprobar(self):
+        """Prueba de cierre del diagnóstico: reemplazar todos los IDs de
+        evidencia debe impedir aprobar una pregunta sobre un documento
+        exacto."""
+        from core.requisitos import verificar
+        q = "¿Qué se resolvió en el amparo 178/2017 del Segundo Tribunal?"
+        v = verificar(self._req(q), [{"caseLink": "OTRO-999-2020",
+                                      "content": "mismo tema, otro documento"}])
+        assert not v["cumple"]
+
+
+class TestValidacionAntesDeEmitir:
+    """
+    C06. Las tres rutas de salida emitían tokens antes de resolver las citas.
+    Cuando se descubría que un marcador no estaba en el registro, el texto ya
+    había salido: la defensa existía y llegaba tarde.
+    """
+
+    class _Reg:
+        def __init__(self, validos): self.validos = set(validos)
+        def resolve(self, m): return {"x": 1} if m in self.validos else None
+
+    def test_quita_el_marcador_invalido(self):
+        from core.validacion_salida import validar_borrador
+        r = validar_borrador(
+            "La autoridad debe valorar todo [C1]. El voto discrepó [C14].",
+            self._Reg(["C1"]))
+        assert r["reparado"]
+        assert r["marcadores_invalidos"] == ["C14"]
+        assert "[C14]" not in r["texto"]
+        assert "[C1]" in r["texto"]
+
+    def test_marca_la_afirmacion_que_se_queda_sin_respaldo(self):
+        from core.validacion_salida import validar_borrador
+        r = validar_borrador("El voto lo emitió la magistrada X [C14].",
+                             self._Reg(["C1"]))
+        assert "SIN RESPALDO" in r["texto"]
+        assert len(r["frases_sin_respaldo"]) == 1
+
+    def test_un_borrador_limpio_no_se_toca(self):
+        from core.validacion_salida import validar_borrador
+        texto = "Todo bien [C1] y [E2]."
+        r = validar_borrador(texto, self._Reg(["C1", "E2"]))
+        assert not r["reparado"] and r["texto"] == texto
+
+    def test_quita_el_renglon_de_FUENTES_correspondiente(self):
+        from core.validacion_salida import validar_borrador
+        r = validar_borrador(
+            "Afirmación [C1] y otra [C14].\n\nFUENTES\n[C1] doc uno\n[C14] doc catorce",
+            self._Reg(["C1"]))
+        assert "[C14] doc catorce" not in r["texto"]
+        assert "[C1] doc uno" in r["texto"]
+
+
+class TestFiltroDocumentalNoAcotaSiNoIdentifica:
+    """
+    Regresión propia, detectada en la regresión del 21-sep. Ante una pregunta
+    temática ("busca una resolución VCN que explique…") el modelo pasó
+    `en_expedientes: ["VCN-"]` — un prefijo, no un identificador. El filtro lo
+    tomó literalmente, devolvió cero sobre 19 criterios que sí existían, y el
+    agente se abstuvo contestando por doctrina.
+
+    Una abstención que parece prudente y en realidad es capacidad perdida: el
+    caso exacto que el paso 08 de COFECE señala como "abstenerse prudentemente
+    no demuestra recuperación exitosa".
+
+    El diagnóstico ya lo advertía: la obligación de filtro se activa cuando hay
+    una identidad RESUELTA, no para toda consulta semántica.
+    """
+
+    def _universo(self):
+        from core.universo import UniversoRestringido
+        return UniversoRestringido(
+            ["VCN-001-2025", "VCN-002-2017", "178_2017_2TCC"], etiqueta="t")
+
+    def test_un_prefijo_no_es_una_identidad(self):
+        u = self._universo()
+        assert "VCN-" not in u
+        assert "VCN" not in u
+        assert "VCN-001-2025" in u
+
+    def test_valores_que_no_identifican_se_separan_de_los_que_si(self):
+        u = self._universo()
+        pedidos = ["VCN-", "VCN-001-2025", "amparos"]
+        validos = [e for e in pedidos if e in u]
+        descartados = [e for e in pedidos if e not in u]
+        assert validos == ["VCN-001-2025"]
+        assert descartados == ["VCN-", "amparos"]
+
+    def test_la_descripcion_advierte_contra_el_prefijo(self):
+        import agent.tools as t
+        tool = next(
+            d for grp in vars(t).values()
+            if isinstance(grp, list) and grp and isinstance(grp[0], dict)
+            for d in grp
+            if (d.get("function", d)).get("name") == "buscar_criterios"
+        )
+        desc = (tool.get("function", tool)["parameters"]["properties"]
+                ["en_expedientes"]["description"])
+        assert "NO es un prefijo" in desc
+        assert "OMITE" in desc
