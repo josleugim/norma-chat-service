@@ -438,6 +438,20 @@ class NormaPlusAgent:
                 "data_anomalies", state.anomalias, "derived")
             collector.set_decision(
                 "composicion_fuentes", state.composicion_fuentes, "derived")
+            # Decisiones nuevas de C01-C07. COFECE las pidió expresamente:
+            # "las nuevas decisiones no aparecen en las trazas actuales", y sin
+            # ellas no se puede auditar por qué el agente hizo lo que hizo.
+            # Yo mismo las necesité para diagnosticar H10 y no estaban.
+            collector.set_decision(
+                "identidades_resueltas", state.identidades_resueltas, "derived")
+            collector.set_decision(
+                "requisitos", state.requisitos, "heuristic")
+            collector.set_decision(
+                "requisitos_verificados", state.requisitos_verificados, "derived")
+            collector.set_decision(
+                "cobertura_por_documento", state.cobertura_por_documento, "derived")
+            collector.set_decision(
+                "reparacion_salida", state.reparacion_salida, "derived")
             # ¿Alguna ruta vino vacía y su complementaria nunca se ejerció?
             # Es objetivo y no depende de leer el texto: si la respuesta afirma
             # ausencia con esto encendido, es falsa exhaustividad.
@@ -638,6 +652,16 @@ class NormaPlusAgent:
                           "pregunta no permite distinguirlos, dilo y pide la "
                           "precisión que falta."
                     )
+                elif i.get("acto_de"):
+                    lineas.append(
+                        f"- «{i['mencion']}» es el acto {i['candidatos'][0]}, "
+                        f"derivado de {i['acto_de']}. **Son documentos "
+                        f"distintos.** Si la pregunta es sobre el acto, usa "
+                        f"{i['candidatos'][0]} y NO {i['acto_de']}: lo que "
+                        f"resolvió el principal no se le atribuye al "
+                        f"cumplimiento. Si citas el principal como "
+                        f"antecedente, dilo expresamente."
+                    )
                 else:
                     lineas.append(
                         f"- «{i['mencion']}» es {i['candidatos'][0]}"
@@ -814,7 +838,35 @@ class NormaPlusAgent:
                 filters={"caseLink": exp},
                 collector=collector,
             )
-            cobertura.append({"expediente": exp, "recuperados": len(parciales)})
+
+            # El filtro de la API es SUBSTRING, no igualdad. Verificado el
+            # 22-sep: `caseLink=VCN-004-2022` devuelve 16 criterios suyos MÁS
+            # los 14 de `VCN-004-2022_2025_10_09`, que es otro acto. Por eso en
+            # H10 la respuesta mezclaba la fórmula de incremento del acto
+            # original con lo preguntado sobre el cumplimiento.
+            #
+            # Pedir un documento y recibir además sus parientes no es una
+            # ampliación útil: es la mezcla de actos que hay que evitar. Se
+            # comprueba igualdad y lo ajeno se descarta con registro.
+            ajenos = [r for r in parciales if case_link_de(r.model_dump()
+                      if hasattr(r, "model_dump") else r) != exp]
+            if ajenos:
+                otros = sorted({
+                    case_link_de(r.model_dump() if hasattr(r, "model_dump") else r)
+                    for r in ajenos
+                })
+                logger.warning(
+                    f"caseLink={exp} devolvió {len(ajenos)} criterios de otros "
+                    f"actos ({', '.join(otros)}). Se descartan: son documentos "
+                    f"distintos."
+                )
+                parciales = [r for r in parciales if r not in ajenos]
+
+            cobertura.append({
+                "expediente": exp,
+                "recuperados": len(parciales),
+                **({"descartados_de_otros_actos": len(ajenos)} if ajenos else {}),
+            })
             for r in parciales:
                 if r.id in vistos:
                     continue
@@ -872,12 +924,47 @@ class NormaPlusAgent:
                 "score": r.score,
                 "metadata": r.metadata,
                 "voz": v["voz"],
-                "voz_etiqueta": etiqueta_voz(v["voz"]),
             }
             if v["autor"]:
                 d["autor_del_voto"] = v["autor"]
             if v["evidencia"]:
                 d["voz_evidencia"] = v["evidencia"]
+
+            # La metadata no puede sepultar el texto.
+            #
+            # Medido el 22-sep: con `voz`, `voz_etiqueta`, `tipo_fuente`,
+            # `ficha_fuente` y la metadata cruda completa, el TEXTO del
+            # criterio quedaba en el 24% del documento serializado. Con 14
+            # criterios el modelo recibía ~10 KB donde 2.6 KB eran contenido
+            # jurídico, y en H10 dijo que no pudo recuperar un criterio que
+            # tenía delante.
+            #
+            # Cada cosa que añadimos para cerrar un defecto de atribución
+            # empujó la evidencia un poco más al fondo. Aquí se conserva sólo
+            # lo que el modelo necesita para citar y atribuir; `anchor` y
+            # `context` sirvieron ya para clasificar la voz y no tienen que
+            # viajar enteros al prompt.
+            meta_ligera = {
+                k: v for k, v in (r.metadata or {}).items()
+                if k in ("id_expediente", "title", "paginas_parrafos",
+                         "article", "parent_titles")
+            }
+            d["metadata"] = meta_ligera
+
+            # Ficha de la fuente, con lo que de verdad sabemos (H16).
+            #
+            # Una búsqueda de criterios NO devuelve autoridad, sentido de
+            # resolución ni fecha: esos campos viven en el registro del
+            # expediente. El modelo los estaba completando de memoria, y así
+            # `VCN-005-2024` salió etiquetado "CIERRE POR DESISTIMIENTO"
+            # cuando su registro dice "No sanciona". No eran citas
+            # inexistentes: eran atributos falsos colgados de fuentes reales.
+            #
+            # Se declara explícitamente qué no viene, para que la ausencia sea
+            # un dato y no un hueco que el modelo rellene.
+            d["campos_no_disponibles"] = [
+                "autoridad", "sentido_resolucion", "fecha_resolucion",
+            ]
             serialized.append(d)
 
         # ── Control de suficiencia ──────────────────────────
@@ -1566,15 +1653,28 @@ class NormaPlusAgent:
 
         # Stats si se pidieron
         if args.get("compute_stats"):
-            # Sobre el conjunto elegible COMPLETO, no sobre las 50 filas que se
-            # presentan. El recorte es de presentación: calcular después de él
-            # convierte un universo de 51 en un promedio de 50 sin avisar.
-            data_for_stats = enriched
+            # Después de los filtros lógicos, antes del recorte visual.
+            #
+            # Regresión propia, reproducida por COFECE el 22-sep: al corregir
+            # el tope de 50 filas puse `data_for_stats = enriched`, que también
+            # se saltaba el filtro por plazo. Pedir "el promedio de los que
+            # tardaron menos de 50 días" devolvía el promedio del universo
+            # entero: una cifra correcta para otra pregunta.
+            #
+            # El recorte de 50 es presentación y no debe afectar el cálculo;
+            # el filtro por plazo es parte de lo que se preguntó y sí debe.
+            elegibles = filtered if (max_dh is not None or min_dh is not None) \
+                else enriched
+            data_for_stats = elegibles
             result["stats"] = self.temporal.compute_stats(
                 data_for_stats, plazo_field=plazo_field
             )
             result["stats"]["unidad"] = plazo_field
-            result["stats"]["universo_calculado"] = len(enriched)
+            result["stats"]["universo_calculado"] = len(elegibles)
+            result["stats"]["alcance"] = (
+                "subconjunto filtrado" if (max_dh is not None or min_dh is not None)
+                else "universo completo"
+            )
             result["stats"]["filas_presentadas"] = len(result.get("expedientes", []))
 
         no_calculables = [c for c in calculos if not c["calculable"]]

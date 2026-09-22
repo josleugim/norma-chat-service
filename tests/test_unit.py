@@ -1338,3 +1338,89 @@ class TestFiltroDocumentalNoAcotaSiNoIdentifica:
                 ["en_expedientes"]["description"])
         assert "NO es un prefijo" in desc
         assert "OMITE" in desc
+
+
+class TestActoDerivadoNoEsElPrincipal:
+    """
+    H10 de la revisión final. La pregunta pide el cumplimiento de amparo del
+    9 de octubre de 2025 de VCN-004-2022, y el agente buscaba sobre el
+    principal. Como el filtro de la API hace SUBSTRING —verificado el 22-sep:
+    `caseLink=VCN-004-2022` devuelve 16 criterios suyos más los 14 del
+    cumplimiento— la respuesta mezclaba la fórmula de incremento del acto
+    original con lo preguntado sobre el cumplimiento.
+    """
+
+    U = ["VCN-004-2022", "VCN-004-2022_2025_10_09",
+         "VCN-002-2023", "VCN-002-2023_2025_10_09",
+         "VCN-001-2017", "VCN-001-2017_2019_03_14"]
+
+    def _r(self):
+        from core.identidades import ResolutorDeIdentidades
+        return ResolutorDeIdentidades(self.U)
+
+    def test_la_fecha_resuelve_al_acto(self):
+        r = self._r().resolver(
+            "En el cumplimiento de amparo del VCN-004-2022 de 9 de octubre "
+            "de 2025, ¿qué fórmula de incremento se usó?")
+        actos = [i for i in r if i.get("acto_de")]
+        assert actos and actos[0]["candidatos"] == ["VCN-004-2022_2025_10_09"]
+        assert actos[0]["acto_de"] == "VCN-004-2022"
+
+    def test_el_principal_sin_fecha_NO_salta_al_acto(self):
+        """Preguntar por el expediente original debe seguir dando el original."""
+        r = self._r().resolver("En el VCN-004-2022, ¿a quién se multó?")
+        assert [i for i in r if i.get("acto_de")] == []
+
+    def test_cumplimiento_sin_fecha_con_acto_unico(self):
+        r = self._r().resolver(
+            "En la resolución de cumplimiento del VCN-002-2023, ¿qué alcance?")
+        actos = [i for i in r if i.get("acto_de")]
+        assert actos[0]["candidatos"] == ["VCN-002-2023_2025_10_09"]
+
+    def test_formato_numerico_de_fecha(self):
+        r = self._r().resolver("el cumplimiento del VCN-004-2022 de 09-10-2025")
+        actos = [i for i in r if i.get("acto_de")]
+        assert actos[0]["candidatos"] == ["VCN-004-2022_2025_10_09"]
+
+    def test_una_fecha_que_no_corresponde_no_inventa_acto(self):
+        r = self._r().resolver(
+            "el cumplimiento del VCN-004-2022 de 1 de enero de 2030")
+        assert [i for i in r if i.get("acto_de")] == []
+
+
+class TestEstadisticasRespetanElFiltro:
+    """
+    Regresión propia, reproducida por COFECE el 22-sep. Al corregir el tope de
+    50 filas se puso `data_for_stats = enriched`, que también se saltaba el
+    filtro por plazo: pedir "el promedio de los que tardaron menos de 50 días"
+    devolvía el promedio del universo entero. Una cifra correcta para otra
+    pregunta.
+
+    El recorte de 50 es presentación y no debe afectar el cálculo; el filtro
+    por plazo es parte de lo preguntado y sí debe.
+    """
+
+    def _datos(self):
+        return [
+            {"caseLink": f"VCN-00{i}-2024", "dias_naturales": d,
+             "dias_habiles": d, "calculable": True}
+            for i, d in enumerate([49, 56, 59, 70, 83], start=1)
+        ]
+
+    def test_con_filtro_las_stats_son_del_subconjunto(self):
+        datos = self._datos()
+        filtrados = [d for d in datos if d["dias_naturales"] <= 50]
+        assert len(filtrados) == 1
+        promedio = sum(d["dias_naturales"] for d in filtrados) / len(filtrados)
+        assert promedio == 49, "no el 63.4 del universo completo"
+
+    def test_sin_filtro_las_stats_son_del_universo(self):
+        datos = self._datos()
+        promedio = sum(d["dias_naturales"] for d in datos) / len(datos)
+        assert round(promedio, 1) == 63.4
+
+    def test_el_recorte_visual_no_cambia_el_calculo(self):
+        datos = [{"dias_naturales": 10, "calculable": True} for _ in range(51)]
+        presentados = datos[:50]
+        assert len(datos) == 51 and len(presentados) == 50
+        assert sum(d["dias_naturales"] for d in datos) / len(datos) == 10

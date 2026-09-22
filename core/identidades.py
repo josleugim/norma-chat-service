@@ -48,6 +48,32 @@ _ORGANOS = [
     (r"\bjuzgado\b|\bjuez\b|\bdistrito\b|\bjd\b", "JD"),
 ]
 
+# Acto derivado de un expediente administrativo: el principal más la fecha en
+# que se dictó. `VCN-004-2022_2025_10_09` es la resolución en cumplimiento de
+# amparo de VCN-004-2022, dictada el 9 de octubre de 2025.
+_ADMIN_CON_ACTO = re.compile(
+    r"^(?P<principal>[A-Z]{2,5}-\d{3}-\d{4})_(?P<a>\d{4})_(?P<m>\d{2})_(?P<d>\d{2})$"
+)
+
+_MESES = {
+    "enero": "01", "febrero": "02", "marzo": "03", "abril": "04",
+    "mayo": "05", "junio": "06", "julio": "07", "agosto": "08",
+    "septiembre": "09", "setiembre": "09", "octubre": "10",
+    "noviembre": "11", "diciembre": "12",
+}
+# "9 de octubre de 2025", "09-10-2025", "2025-10-09".
+_FECHA_TEXTO = re.compile(
+    r"\b(\d{1,2})\s+de\s+([a-záéíóú]+)\s+de\s+(\d{4})\b", re.IGNORECASE
+)
+_FECHA_NUM = re.compile(r"\b(\d{1,2})[-/](\d{1,2})[-/](\d{4})\b")
+
+# Pide el acto derivado, no el principal.
+_PIDE_CUMPLIMIENTO = re.compile(
+    r"cumplimiento\s+de\s+amparo|resoluci[óo]n\s+de\s+cumplimiento|"
+    r"en\s+cumplimiento|acatamiento",
+    re.IGNORECASE,
+)
+
 _ORDINALES = [
     (r"\bprimer[oa]?\b|\b1[oº°]?\b", "1"),
     (r"\bsegund[oa]\b|\b2[oº°]?\b", "2"),
@@ -87,6 +113,9 @@ class ResolutorDeIdentidades:
     def __init__(self, case_links):
         self.por_numero_anio: dict[tuple, list[dict]] = defaultdict(list)
         self.conocidos: set[str] = set()
+        # Actos derivados por expediente principal: VCN-004-2022 →
+        # [{case_link: VCN-004-2022_2025_10_09, fecha: 2025-10-09}]
+        self.actos_de: dict[str, list[dict]] = defaultdict(list)
         for cl in case_links:
             cl = str(cl or "").strip()
             if not cl:
@@ -95,6 +124,12 @@ class ResolutorDeIdentidades:
             p = partes_de(cl)
             if p:
                 self.por_numero_anio[(p["numero"], p["anio"])].append(p)
+            m = _ADMIN_CON_ACTO.match(cl)
+            if m:
+                self.actos_de[m.group("principal")].append({
+                    "case_link": cl,
+                    "fecha": f"{m.group('a')}-{m.group('m')}-{m.group('d')}",
+                })
 
     def resolver(self, texto: str) -> list[dict]:
         """
@@ -131,7 +166,63 @@ class ResolutorDeIdentidades:
                     "ambiguo": len(candidatos) > 1,
                     "organo_pedido": marca,
                 })
+
+        salida.extend(self._resolver_actos(texto))
         return salida
+
+    def _resolver_actos(self, texto: str) -> list[dict]:
+        """
+        Expedientes administrativos nombrados en el texto, apuntando al ACTO
+        pedido cuando lo hay.
+
+        H10 del diagnóstico del 22-sep: la pregunta pide el cumplimiento de
+        amparo del 9 de octubre de 2025 de VCN-004-2022, y el agente buscaba
+        sobre `VCN-004-2022`. Como el filtro de la API hace substring y no
+        igualdad —verificado: pedir el principal devuelve 16 criterios suyos
+        MÁS los 14 del cumplimiento—, la respuesta mezclaba la fórmula de
+        incremento del acto original con lo que se preguntaba del cumplimiento.
+
+        Resolver el acto a su identificador completo hace el filtro exclusivo
+        y evita la mezcla en origen.
+        """
+        fecha = self._fecha_de(texto)
+        pide_cumplimiento = bool(_PIDE_CUMPLIMIENTO.search(texto))
+        salida: list[dict] = []
+
+        for cl in sorted(self.conocidos):
+            if "_" in cl or not re.search(rf"\b{re.escape(cl)}\b", texto):
+                continue  # los derivados se nombran por su principal
+            actos = self.actos_de.get(cl, [])
+            if not actos:
+                continue
+
+            elegidos = [a for a in actos if fecha and a["fecha"] == fecha]
+            if not elegidos and pide_cumplimiento:
+                # Pide el cumplimiento sin dar fecha: si hay uno solo, es ése.
+                elegidos = actos if len(actos) == 1 else []
+            if not elegidos:
+                continue
+
+            salida.append({
+                "mencion": cl + (f" ({fecha})" if fecha else " (cumplimiento)"),
+                "candidatos": [a["case_link"] for a in elegidos],
+                "ambiguo": len(elegidos) > 1,
+                "organo_pedido": None,
+                "acto_de": cl,
+            })
+        return salida
+
+    @staticmethod
+    def _fecha_de(texto: str) -> str | None:
+        m = _FECHA_TEXTO.search(texto or "")
+        if m:
+            mes = _MESES.get(m.group(2).lower())
+            if mes:
+                return f"{m.group(3)}-{mes}-{int(m.group(1)):02d}"
+        m = _FECHA_NUM.search(texto or "")
+        if m:
+            return f"{m.group(3)}-{int(m.group(2)):02d}-{int(m.group(1)):02d}"
+        return None
 
     def existe(self, case_link: str) -> bool:
         return str(case_link or "").strip() in self.conocidos

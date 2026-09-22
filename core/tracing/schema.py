@@ -151,6 +151,13 @@ class Decisions(BaseModel):
     # `buscar_expedientes` es léxica sobre metadatos y `buscar_criterios`
     # semántica sobre el texto, así que una vacía no dice nada de la otra.
     ausencia_sin_complemento: bool = False
+    # Decisiones de la ronda C01-C07, pedidas por COFECE para poder auditar
+    # por qué el agente eligió lo que eligió.
+    identidades_resueltas: list[dict[str, Any]] = Field(default_factory=list)
+    requisitos: list[dict[str, Any]] = Field(default_factory=list)
+    requisitos_verificados: Optional[dict[str, Any]] = None
+    cobertura_por_documento: list[dict[str, Any]] = Field(default_factory=list)
+    reparacion_salida: Optional[dict[str, Any]] = None
     used_cached_evidence: bool = False
     answered_without_retrieval: bool = False
     final_answer_path: Optional[str] = None
