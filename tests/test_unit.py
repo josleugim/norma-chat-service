@@ -1523,3 +1523,58 @@ class TestCamposDelRegistroComoRequisito:
                         "comisionados en contra?")
         campos = [r for r in req if r["tipo"] == "campos_registro"]
         assert campos and "dissentingOpinions" in campos[0]["valor"]
+
+
+class TestTodasLasRutasDeSalidaValidan:
+    """
+    C06, completado. La validación estaba sólo en la rama `content`;
+    `stream` y la síntesis forzada emitían token por token y resolvían las
+    citas al final, cuando el texto ya había salido.
+
+    Las 180 respuestas del holdout usaron `content`: eso no probaba que las
+    otras rutas estuvieran protegidas, sólo que no se habían ejercido.
+    """
+
+    class _Agente:
+        from core.validacion_salida import validar_borrador as _vb
+        _emitir_validado = None  # se enlaza abajo
+
+    class _Reg:
+        def __init__(self, validos): self.validos = set(validos)
+        def resolve(self, m): return {"x": 1} if m in self.validos else None
+
+    class _State:
+        def __init__(self, reg): self.registry = reg; self.reparacion_salida = None
+
+    def _agente(self):
+        from agent.agent import NormaPlusAgent
+        return NormaPlusAgent.__new__(NormaPlusAgent)
+
+    def test_las_cuatro_rutas_usan_el_mismo_validador(self):
+        """Ninguna ruta puede emitir sin pasar por aquí."""
+        import inspect
+        from agent.agent import NormaPlusAgent
+        src = inspect.getsource(NormaPlusAgent._run_traced)
+        assert src.count("_emitir_validado") == 4, (
+            "content, stream, forced_synthesis y forced_synthesis_stream")
+
+    def test_repara_y_registra_la_ruta(self):
+        ag = self._agente()
+        st = self._State(self._Reg(["C1"]))
+        texto = ag._emitir_validado(
+            "Afirmación buena [C1]. Afirmación colgada [C14].",
+            st, None, "stream")
+        assert "[C14]" not in texto
+        assert st.reparacion_salida["ruta"] == "stream"
+        assert st.reparacion_salida["marcadores_invalidos"] == ["C14"]
+
+    def test_un_borrador_limpio_pasa_intacto(self):
+        ag = self._agente()
+        st = self._State(self._Reg(["C1", "E2"]))
+        texto = "Todo sustentado [C1] y [E2]."
+        assert ag._emitir_validado(texto, st, None, "content") == texto
+        assert st.reparacion_salida is None
+
+    def test_sin_registro_no_revienta(self):
+        ag = self._agente()
+        assert ag._emitir_validado("texto [C1]", None, None, "content")

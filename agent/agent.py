@@ -298,19 +298,8 @@ class NormaPlusAgent:
                     # resuelve dejaba el marcador y su afirmación en el texto,
                     # con la fuente ausente de la lista. La defensa llegaba
                     # tarde por el orden, no por falta de mecanismo.
-                    revision = validar_borrador(response.content, state.registry)
-                    final_text = revision["texto"]
-                    if revision["reparado"]:
-                        state.reparacion_salida = {
-                            "marcadores_invalidos": revision["marcadores_invalidos"],
-                            "frases_sin_respaldo": len(revision["frases_sin_respaldo"]),
-                        }
-                        if collector is not None:
-                            collector.add_error(
-                                "validacion_salida",
-                                "marcadores fuera del registro: "
-                                + ", ".join(revision["marcadores_invalidos"]),
-                            )
+                    final_text = self._emitir_validado(
+                        response.content, state, collector, "content")
                     for chunk in self._chunk_text(final_text):
                         yield StreamEvent(type="token", data={"text": chunk})
                 else:
@@ -326,14 +315,18 @@ class NormaPlusAgent:
                         messages=stream_messages,
                         model=model,
                     ):
+                        # No se emite aquí: se acumula. Validar después de
+                        # emitir no protege nada (C06).
                         if chunk.text:
                             final_parts.append(chunk.text)
-                            yield StreamEvent(type="token", data={"text": chunk.text})
                         if chunk.input_tokens:
                             total_input_tokens += chunk.input_tokens
                         if chunk.output_tokens:
                             total_output_tokens += chunk.output_tokens
-                    final_text = "".join(final_parts)
+                    final_text = self._emitir_validado(
+                        "".join(final_parts), state, collector, "stream")
+                    for _c in self._chunk_text(final_text):
+                        yield StreamEvent(type="token", data={"text": _c})
                     if collector is not None:
                         collector.end_step("ok")
                 break
@@ -379,7 +372,9 @@ class NormaPlusAgent:
                 total_output_tokens += fallback_response.output_tokens
 
                 if fallback_response.content:
-                    final_text = fallback_response.content
+                    final_text = self._emitir_validado(
+                        fallback_response.content, state, collector,
+                        "forced_synthesis")
                     for chunk in self._chunk_text(final_text):
                         yield StreamEvent(type="token", data={"text": chunk})
                 else:
@@ -394,12 +389,15 @@ class NormaPlusAgent:
                     ):
                         if chunk.text:
                             final_parts.append(chunk.text)
-                            yield StreamEvent(type="token", data={"text": chunk.text})
                         if chunk.input_tokens:
                             total_input_tokens += chunk.input_tokens
                         if chunk.output_tokens:
                             total_output_tokens += chunk.output_tokens
-                    final_text = "".join(final_parts)
+                    final_text = self._emitir_validado(
+                        "".join(final_parts), state, collector,
+                        "forced_synthesis_stream")
+                    for _c in self._chunk_text(final_text):
+                        yield StreamEvent(type="token", data={"text": _c})
             except Exception as e:
                 logger.error(f"Error en fallback de respuesta: {e}")
                 if collector is not None:
@@ -782,6 +780,40 @@ class NormaPlusAgent:
         return messages
 
     # ── Ejecutores de herramientas ──────────────────────────
+
+    def _emitir_validado(self, texto: str, state, collector, ruta: str):
+        """
+        Salida única para TODAS las rutas: valida y después emite.
+
+        C06 del diagnóstico, completado. La validación estaba sólo en la rama
+        `content`; `stream` y la síntesis forzada emitían token por token y
+        resolvían las citas al final, cuando el texto ya había salido. Las 180
+        respuestas del holdout usaron `content`, así que esas rutas nunca se
+        probaron — no que estuvieran protegidas.
+
+        Para el streaming esto significa acumular antes de emitir: se pierde la
+        aparición progresiva, pero una respuesta que se emite y después se
+        descubre mal sustentada ya no se puede retirar. El diagnóstico lo
+        propone así, y en este producto la corrección pesa más que la
+        sensación de inmediatez.
+
+        Devuelve el texto ya revisado; el llamador emite los trozos.
+        """
+        revision = validar_borrador(texto, state.registry if state else None)
+        if revision["reparado"]:
+            if state is not None:
+                state.reparacion_salida = {
+                    "ruta": ruta,
+                    "marcadores_invalidos": revision["marcadores_invalidos"],
+                    "frases_sin_respaldo": len(revision["frases_sin_respaldo"]),
+                }
+            if collector is not None:
+                collector.add_error(
+                    "validacion_salida",
+                    f"[{ruta}] marcadores fuera del registro: "
+                    + ", ".join(revision["marcadores_invalidos"]),
+                )
+        return revision["texto"]
 
     async def _buscar_criterios_por_documento(
         self, query: str, expedientes: list[str], top_k: int, collector, state
