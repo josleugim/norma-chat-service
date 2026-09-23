@@ -680,7 +680,19 @@ class NormaPlusAgent:
         if ident:
             lineas = []
             for i in ident:
-                if i["ambiguo"]:
+                if i.get("conflicto"):
+                    # La pregunta trae una fecha que el acervo no confirma.
+                    # Antes esto se resolvía en silencio y la búsqueda quedaba
+                    # abierta; decirlo es la diferencia entre responder sobre
+                    # otro acto y advertir que el dato no cuadra.
+                    lineas.append(
+                        f"- «{i['mencion']}» NO se pudo resolver: "
+                        f"{i['conflicto']}. No elijas el acto más parecido ni "
+                        f"supongas que la fecha es un error: dilo en la "
+                        f"respuesta y pide la precisión que falta. Si "
+                        f"contestas sobre otro acto, adviértelo expresamente."
+                    )
+                elif i["ambiguo"]:
                     lineas.append(
                         f"- «{i['mencion']}» corresponde a MÁS DE UN asunto: "
                         + ", ".join(i["candidatos"])

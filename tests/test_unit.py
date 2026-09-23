@@ -1383,9 +1383,19 @@ class TestActoDerivadoNoEsElPrincipal:
         assert actos[0]["candidatos"] == ["VCN-004-2022_2025_10_09"]
 
     def test_una_fecha_que_no_corresponde_no_inventa_acto(self):
+        """
+        Sigue sin inventar acto —`candidatos` vacío— pero ya no lo hace en
+        silencio. Antes la mención desaparecía, el filtro de alcance nunca se
+        aplicaba y la búsqueda quedaba abierta sobre todo el universo.
+        """
         r = self._r().resolver(
             "el cumplimiento del VCN-004-2022 de 1 de enero de 2030")
-        assert [i for i in r if i.get("acto_de")] == []
+        actos = [i for i in r if i.get("acto_de")]
+        assert len(actos) == 1
+        assert actos[0]["candidatos"] == []
+        assert "2030-01-01" in actos[0]["conflicto"]
+        assert "2025-10-09" in actos[0]["conflicto"], (
+            "el conflicto debe decir qué fechas SÍ existen")
 
 
 class TestEstadisticasRespetanElFiltro:
@@ -2068,3 +2078,86 @@ class TestUnDatoNoSeApruebaConElCampoDeOtro:
             v = verificar(self._req(q), [{"caseLink": "43_2021_3JD",
                                           campo: "Juzgado Tercero de Distrito"}])
             assert v["cumple"], f"{campo} debería bastar por sí solo"
+
+
+class TestFechaContradictoriaYPrincipalSinFecha:
+    """
+    I3 de la revisión del 23-sep. Tres defectos reproducidos por COFECE y
+    confirmados aquí contra el universo real:
+
+    1. Una fecha explícita que ningún acto cumple caía en silencio. El filtro
+       de alcance nunca se aplicaba y la búsqueda quedaba abierta.
+    2. El formato ISO no se reconocía, pese a que el comentario del módulo
+       decía soportarlo desde el principio.
+    3. El expediente PRINCIPAL nombrado sin fecha no se resolvía: el catálogo
+       sólo cubría los actos derivados.
+
+    Textual suyo: "Si ningún candidato cumple una fecha explícita, devolver
+    conflicto o falta de coincidencia, sin descartar el año pedido para elegir
+    otro."
+    """
+
+    def _r(self):
+        from core.identidades import ResolutorDeIdentidades
+        return ResolutorDeIdentidades([
+            "VCN-004-2022", "VCN-004-2022_2025_10_09",
+            "VCN-001-2017", "VCN-001-2017_2019_03_14",
+            "677_2024_1SCJN",
+        ])
+
+    def _acto(self, q):
+        return [i for i in self._r().resolver(q) if i.get("acto_de")]
+
+    # ── 1. Conflicto declarado ───────────────────────────────────────
+    def test_fecha_inexistente_declara_conflicto(self):
+        a = self._acto("el cumplimiento de VCN-004-2022 de 9 de octubre de 2024")
+        assert len(a) == 1 and a[0]["candidatos"] == []
+        assert "2024-10-09" in a[0]["conflicto"]
+
+    def test_el_conflicto_no_elige_el_acto_mas_parecido(self):
+        """Lo peligroso sería resolver al de 2025 porque 'se le parece'."""
+        a = self._acto("el cumplimiento de VCN-004-2022 de 9 de octubre de 2024")
+        assert "VCN-004-2022_2025_10_09" not in a[0]["candidatos"]
+
+    def test_el_conflicto_dice_que_fechas_si_existen(self):
+        a = self._acto("cumplimiento de VCN-001-2017 de 5 de mayo de 2020")
+        assert "2019-03-14" in a[0]["conflicto"]
+
+    # ── 2. Formatos de fecha ─────────────────────────────────────────
+    def test_formato_iso(self):
+        a = self._acto("el cumplimiento de VCN-004-2022 de 2025-10-09")
+        assert a[0]["candidatos"] == ["VCN-004-2022_2025_10_09"]
+
+    def test_los_tres_formatos_dan_el_mismo_acto(self):
+        formas = ["9 de octubre de 2025", "09-10-2025", "2025-10-09", "9/10/2025"]
+        vistos = {
+            tuple(self._acto(f"cumplimiento de VCN-004-2022 de {f}")[0]["candidatos"])
+            for f in formas
+        }
+        assert vistos == {("VCN-004-2022_2025_10_09",)}
+
+    # ── 3. El principal sin fecha ────────────────────────────────────
+    def test_el_principal_sin_fecha_se_resuelve(self):
+        r = self._r().resolver("¿qué criterios tiene VCN-004-2022?")
+        principal = [i for i in r if i["candidatos"] == ["VCN-004-2022"]]
+        assert principal, "el principal nombrado sin fecha debe resolverse"
+        assert not principal[0].get("acto_de"), (
+            "es el principal, no un acto derivado de nadie")
+
+    def test_el_principal_declara_que_tiene_derivados(self):
+        """
+        Saber que existe un cumplimiento es lo que permite advertir que la
+        pregunta podría referirse a otro acto.
+        """
+        r = self._r().resolver("¿qué criterios tiene VCN-004-2022?")
+        p = [i for i in r if i["candidatos"] == ["VCN-004-2022"]][0]
+        assert p["tiene_derivados"] == ["VCN-004-2022_2025_10_09"]
+
+    def test_pedir_el_cumplimiento_sigue_dando_el_derivado(self):
+        """El arreglo del principal no puede revertir el cierre de H10."""
+        a = self._acto("criterios del cumplimiento de amparo de VCN-004-2022")
+        assert a[0]["candidatos"] == ["VCN-004-2022_2025_10_09"]
+
+    def test_un_expediente_sin_derivados_no_se_rompe(self):
+        r = self._r().resolver("¿qué dice 677/2024?")
+        assert any("677_2024_1SCJN" in i["candidatos"] for i in r)

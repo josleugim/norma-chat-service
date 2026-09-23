@@ -66,6 +66,10 @@ _FECHA_TEXTO = re.compile(
     r"\b(\d{1,2})\s+de\s+([a-záéíóú]+)\s+de\s+(\d{4})\b", re.IGNORECASE
 )
 _FECHA_NUM = re.compile(r"\b(\d{1,2})[-/](\d{1,2})[-/](\d{4})\b")
+# El comentario de arriba decía soportar ISO desde el principio y el
+# formato no estaba. Lo detectó COFECE en I3: "El formato ISO de la
+# fecha tampoco se reconoce."
+_FECHA_ISO = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b")
 
 # Pide el acto derivado, no el principal.
 _PIDE_CUMPLIMIENTO = re.compile(
@@ -197,10 +201,50 @@ class ResolutorDeIdentidades:
                 continue
 
             elegidos = [a for a in actos if fecha and a["fecha"] == fecha]
+
+            # Fecha explícita que no corresponde a ningún acto conocido.
+            #
+            # Antes esto caía en `continue` y la mención desaparecía en
+            # silencio: el filtro de alcance nunca se aplicaba y la búsqueda
+            # quedaba abierta sobre todo el universo. COFECE lo señaló en I3
+            # —"Si ningún candidato cumple una fecha explícita, devolver
+            # conflicto o falta de coincidencia, sin descartar el año pedido
+            # para elegir otro"—.
+            #
+            # Un dato que contradice al acervo es información, no ruido: hay
+            # que decirlo, no elegir el acto más parecido ni callar.
+            if fecha and not elegidos:
+                salida.append({
+                    "mencion": f"{cl} ({fecha})",
+                    "candidatos": [],
+                    "ambiguo": False,
+                    "conflicto": (
+                        f"no hay ningún acto de {cl} con fecha {fecha}. "
+                        "Las fechas conocidas son: "
+                        + ", ".join(a["fecha"] for a in actos)
+                    ),
+                    "organo_pedido": None,
+                    "acto_de": cl,
+                })
+                continue
+
             if not elegidos and pide_cumplimiento:
                 # Pide el cumplimiento sin dar fecha: si hay uno solo, es ése.
                 elegidos = actos if len(actos) == 1 else []
+
             if not elegidos:
+                # Nombró el expediente sin fecha ni mención al cumplimiento:
+                # pide el PRINCIPAL. Antes no se resolvía —el catálogo sólo
+                # cubría los actos derivados— así que una pregunta sobre la
+                # resolución original se quedaba sin identidad y sin alcance.
+                if not pide_cumplimiento:
+                    salida.append({
+                        "mencion": cl,
+                        "candidatos": [cl],
+                        "ambiguo": False,
+                        "organo_pedido": None,
+                        "tiene_derivados": [a["case_link"] for a in actos],
+                    })
                 continue
 
             salida.append({
@@ -222,6 +266,9 @@ class ResolutorDeIdentidades:
         m = _FECHA_NUM.search(texto or "")
         if m:
             return f"{m.group(3)}-{int(m.group(2)):02d}-{int(m.group(1)):02d}"
+        m = _FECHA_ISO.search(texto or "")
+        if m:
+            return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
         return None
 
     def existe(self, case_link: str) -> bool:
