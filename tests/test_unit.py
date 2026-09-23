@@ -1582,9 +1582,10 @@ class TestTodasLasRutasDeSalidaValidan:
     def test_repara_y_registra_la_ruta(self):
         ag = self._agente()
         st = self._State(self._Reg(["C1"]))
-        texto = ag._emitir_validado(
+        import asyncio
+        texto = asyncio.run(ag._emitir_validado(
             "Afirmación buena [C1]. Afirmación colgada [C14].",
-            st, None, "stream")
+            st, None, "stream"))
         assert "[C14]" not in texto
         assert st.reparacion_salida["ruta"] == "stream"
         assert st.reparacion_salida["marcadores_invalidos"] == ["C14"]
@@ -1593,12 +1594,16 @@ class TestTodasLasRutasDeSalidaValidan:
         ag = self._agente()
         st = self._State(self._Reg(["C1", "E2"]))
         texto = "Todo sustentado [C1] y [E2]."
-        assert ag._emitir_validado(texto, st, None, "content") == texto
+        import asyncio
+        assert asyncio.run(
+            ag._emitir_validado(texto, st, None, "content")) == texto
         assert st.reparacion_salida is None
 
     def test_sin_registro_no_revienta(self):
         ag = self._agente()
-        assert ag._emitir_validado("texto [C1]", None, None, "content")
+        import asyncio
+        assert asyncio.run(
+            ag._emitir_validado("texto [C1]", None, None, "content"))
 
 
 class TestEmisorDelDocumento:
@@ -2446,3 +2451,108 @@ class TestNingunaDecisionSeCaeEnSilencio:
             "estas decisiones se escriben y el esquema las descarta en "
             f"silencio: {huerfanos}. Decláralas en core/tracing/schema.py"
         )
+
+
+class TestVerificadorSemantico:
+    """
+    I5. Lo que se prueba aquí es lo determinista del verificador: que un
+    veredicto positivo exija un localizador que el CÓDIGO encuentre en la
+    evidencia.
+
+    Es la regla que impide que un modelo complaciente lo vuelva inútil. COFECE
+    lo dijo al corregir la prueba de aceptación que habíamos propuesto: "Un
+    verificador que aprueba todo rechazaría cero PASS y sería inútil."
+    """
+
+    EV = {"C1": {"documento": "VCN-005-2018", "anchor": "",
+                 "texto": ("En una sucesión de actos, la concentración debe "
+                           "notificarse antes de realizar la aportación de "
+                           "capital que provoque que se rebasen los umbrales "
+                           "legales; en ese momento la COFECE analizará la "
+                           "operación.")}}
+
+    class _Ad:
+        def __init__(self, payload): self.payload = payload
+        async def quick_completion(self, messages, model, max_tokens=50):
+            return self.payload
+
+    def _run(self, payload, evidencia=None):
+        import asyncio, json
+        from core.verificacion_semantica import verificar
+        return asyncio.run(verificar(
+            "pregunta", "borrador [C1].", evidencia or self.EV,
+            self._Ad(payload), "m"))
+
+    def test_supported_sin_localizador_no_se_acepta(self):
+        import json
+        from core.verificacion_semantica import NOT_DETERMINED
+        r = self._run(json.dumps({"afirmaciones": [
+            {"afirmacion": "x", "marcadores": ["C1"], "veredicto": "supported",
+             "localizador": "", "motivo": "porque sí"}]}))
+        assert r["afirmaciones"][0]["veredicto"] == NOT_DETERMINED
+
+    def test_localizador_inventado_degrada_el_veredicto(self):
+        """Un modelo que aprueba todo tendría que inventar citas verificables."""
+        import json
+        from core.verificacion_semantica import NOT_DETERMINED
+        r = self._run(json.dumps({"afirmaciones": [
+            {"afirmacion": "x", "marcadores": ["C1"], "veredicto": "supported",
+             "localizador": "la resolución declaró la independencia total de "
+                            "ambos aumentos de capital sin condición alguna",
+             "motivo": "inventado"}]}))
+        a = r["afirmaciones"][0]
+        assert a["veredicto_del_modelo"] == "supported"
+        assert a["veredicto"] == NOT_DETERMINED
+        assert a["localizador_verificado"] is False
+
+    def test_localizador_real_se_acepta(self):
+        import json
+        from core.verificacion_semantica import SUPPORTED
+        r = self._run(json.dumps({"afirmaciones": [
+            {"afirmacion": "x", "marcadores": ["C1"], "veredicto": "supported",
+             "localizador": "la concentración debe notificarse antes de "
+                            "realizar la aportación de capital",
+             "motivo": "está en el texto"}]}))
+        assert r["afirmaciones"][0]["veredicto"] == SUPPORTED
+        assert r["afirmaciones"][0]["localizador_verificado"] is True
+
+    def test_un_contradicted_sin_respaldo_tampoco_pasa(self):
+        """
+        No se degrada a `contradicted`: afirmar un problema que no se probó es
+        el mismo error en la otra dirección.
+        """
+        import json
+        from core.verificacion_semantica import NOT_DETERMINED
+        r = self._run(json.dumps({"afirmaciones": [
+            {"afirmacion": "x", "marcadores": ["C1"], "veredicto": "contradicted",
+             "localizador": "texto que no existe en ninguna parte del acervo",
+             "motivo": "inventado"}]}))
+        assert r["afirmaciones"][0]["veredicto"] == NOT_DETERMINED
+
+    def test_una_afirmacion_que_cita_y_no_se_sostiene_es_hallazgo(self):
+        """
+        Es el caso de H16-C: el verificador dio el motivo correcto con
+        veredicto `not_determined`. Contar sólo `contradicted` daba el caso
+        por limpio.
+        """
+        import json
+        r = self._run(json.dumps({"afirmaciones": [
+            {"afirmacion": "los aumentos fueron independientes",
+             "marcadores": ["C1"], "veredicto": "not_determined",
+             "localizador": "", "motivo": "la evidencia no lo establece"}]}))
+        assert r["resumen"]["sin_soporte_citando"] == 1
+
+    def test_json_invalido_no_revienta(self):
+        r = self._run("lo siento, no puedo")
+        assert r["ejecutado"] is False and r["afirmaciones"] == []
+
+    def test_el_adaptador_que_falla_no_tumba_la_respuesta(self):
+        import asyncio
+        from core.verificacion_semantica import verificar
+
+        class _Roto:
+            async def quick_completion(self, **kw): raise RuntimeError("502")
+
+        r = asyncio.run(verificar("p", "b", self.EV, _Roto(), "m"))
+        assert r["ejecutado"] is False
+        assert "RuntimeError" in r["error"]

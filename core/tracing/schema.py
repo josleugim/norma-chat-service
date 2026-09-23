@@ -164,6 +164,11 @@ class Decisions(BaseModel):
     # HTTP hubo detrás, que es el punto ciego que señaló COFECE en I1.7.
     evidencia_verificada: Optional[dict[str, Any]] = None
     presupuesto_peticiones: Optional[dict[str, Any]] = None
+    # I5: ¿el pasaje sostiene la afirmación? En evaluación, no bloquea.
+    verificacion_semantica: Optional[dict[str, Any]] = None
+    # El payload exacto de evidencia que recibió el modelo. Sin esto, una
+    # verificación semántica no se puede replicar sobre una corrida pasada.
+    evidencia_payload: list[dict[str, Any]] = Field(default_factory=list)
     used_cached_evidence: bool = False
     answered_without_retrieval: bool = False
     final_answer_path: Optional[str] = None

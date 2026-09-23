@@ -126,6 +126,9 @@ class TurnState:
     # `caseLink`. COFECE lo señaló en §1.7 y el punto ciego lo introdujimos
     # nosotros al hacer la búsqueda por documento.
     peticiones_http: int = 0
+    # Resultado del verificador semántico (I5). En evaluación: se guarda
+    # para medirlo, no condiciona la publicación.
+    verificacion_semantica: dict | None = None
     # Documentos que quedaron sin consultar por presupuesto. Van aparte para
     # que una comparación incompleta no se lea como una comparación.
     recortes_por_presupuesto: list[dict] = field(default_factory=list)

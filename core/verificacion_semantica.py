@@ -1,0 +1,327 @@
+"""
+¿El pasaje citado sostiene lo que la respuesta afirma?
+
+I5 de la revisión de COFECE (23-sep-2026), y el hueco que llevábamos semanas
+reportando como abierto. Los controles deterministas cerraron la brecha
+mecánica —identidad, voz, campos, marcadores— pero ninguno mira el significado:
+
+    H16-C recibió COMPLETOS los criterios 3931 y 3930, que dicen que en una
+    sucesión de actos la concentración debe notificarse antes de la aportación
+    que rebasa umbrales. La respuesta los usó para sostener lo contrario: que
+    cada aumento constituye una concentración independiente.
+
+No fue recuperación, no fue truncamiento y no fue una cita inválida. El
+marcador resolvía, el documento era correcto y el texto estaba entero. Es
+inversión del contenido de la fuente, y sólo se ve leyendo.
+
+## Las dos reglas que lo hacen algo más que una segunda opinión
+
+**1. `supported` no se acepta sin localizador.** El verificador devuelve, por
+afirmación, un fragmento textual de la evidencia que la sostiene. El código
+comprueba que ese fragmento exista de verdad en el documento citado. Un modelo
+que aprueba todo no puede colarse: tendría que inventar citas verificables, y
+las inventadas se caen solas.
+
+    "No aceptar `supported` sin soporte localizado." — COFECE, §1.9
+
+**2. Empieza en evaluación, sin bloquear.** Una segunda lectura del modelo es
+tan falible como la primera; encadenar la publicación a ella cambia un modo de
+falla por otro. El resultado se registra aparte y **no aprueba requisitos ni
+detiene la respuesta** hasta que su propia medición lo justifique.
+
+    "Durante esa evaluación, su resultado se registra aparte: no aprueba
+     requisitos ni bloquea automáticamente la publicación." — COFECE, §I5
+
+## Cómo se mide si sirve
+
+La prueba que propusimos —correrlo contra las 60 respuestas ya adjudicadas y
+exigir cero PASS rechazados— **es insuficiente**, y COFECE tuvo razón en
+señalarlo: un verificador que apruebe todo la pasa con honores. Hacen falta las
+dos direcciones a la vez, con negativos reales:
+
+    correctas rechazadas   →  falsos positivos, vuelven tímido al agente
+    incorrectas aceptadas  →  falsos negativos, es no tener verificador
+
+H16-A y H16-C son los negativos reales de esta entrega. `evaluar()` mide ambas
+direcciones sobre un conjunto etiquetado.
+"""
+import json
+import logging
+import re
+import unicodedata
+
+logger = logging.getLogger(__name__)
+
+SUPPORTED = "supported"
+CONTRADICTED = "contradicted"
+NOT_DETERMINED = "not_determined"
+
+# Cuántas afirmaciones se mandan a revisar. El verificador lee el borrador
+# completo, pero el presupuesto de salida se acota para que una respuesta larga
+# no dispare el costo.
+MAX_AFIRMACIONES = 12
+
+_INSTRUCCIONES = """Eres un revisor de respuestas jurídicas. NO redactas ni mejoras: sólo compruebas si la evidencia citada sostiene lo que la respuesta afirma.
+
+Para cada afirmación sustantiva de la RESPUESTA devuelve un objeto con:
+- "afirmacion": la frase, literal y completa.
+- "marcadores": los marcadores que cita, por ejemplo ["C1"]. Lista vacía si no cita ninguno.
+- "veredicto": uno de
+    "supported"       el pasaje citado dice eso.
+    "contradicted"    el pasaje citado dice algo incompatible.
+    "not_determined"  el pasaje no alcanza para decidirlo.
+- "localizador": SÓLO si el veredicto es "supported" o "contradicted". Copia TEXTUALMENTE entre 8 y 30 palabras del pasaje de la EVIDENCIA en que te apoyas. Debe aparecer palabra por palabra; no lo parafrasees ni lo reconstruyas de memoria.
+- "motivo": una frase breve.
+
+Reglas:
+- Una afirmación que invierte, generaliza o suprime una condición de la fuente es "contradicted", aunque el tema coincida. Si la fuente dice que algo debe notificarse ANTES de un acto, no sostiene que ese acto sea independiente.
+- Una regla general presente en un antecedente no respalda su atribución a otro acto.
+- Una conclusión que elimina una condición ("una vez que cause ejecutoria") no conserva el efecto jurídico: es "contradicted".
+- Si no hay evidencia citada para una afirmación, es "not_determined" con localizador nulo.
+- No evalúes ortografía, estilo ni completitud de la respuesta. Sólo el respaldo.
+
+Además, revisa los EJEMPLOS. Cuando la respuesta presenta un documento como caso de algo —"resolución donde X se trató como Y", "precedente de Z"— esa caracterización es una afirmación sobre el documento y hay que comprobarla. Devuelve en "ejemplos" un objeto por cada uno:
+- "documento": el identificador.
+- "propiedad_atribuida": lo que la respuesta dice que ese documento ejemplifica.
+- "veredicto": "supported" si la evidencia demuestra esa propiedad; "contradicted" si la evidencia muestra lo opuesto o una figura distinta; "not_determined" si no alcanza.
+- "localizador": igual que arriba, texto literal de la evidencia.
+- "motivo": una frase.
+
+Que el documento trate el mismo TEMA no basta: tiene que demostrar la propiedad que se le atribuye. Si la evidencia describe una sucesión de actos y la respuesta la presenta como ejemplo de actos independientes, es "contradicted" aunque las frases sueltas citen bien.
+
+Devuelve EXCLUSIVAMENTE un JSON: {"afirmaciones": [...], "ejemplos": [...]}. Sin texto alrededor."""
+
+
+def _norm(t: str) -> str:
+    """Normaliza para comparar: sin acentos, sin puntuación, espacios simples."""
+    t = unicodedata.normalize("NFD", (t or "").lower())
+    t = "".join(c for c in t if unicodedata.category(c) != "Mn")
+    return " ".join(re.sub(r"[^\w\s]", " ", t).split())
+
+
+def _localizador_existe(localizador: str, evidencia_texto: str) -> bool:
+    """
+    ¿El fragmento que dice citar está de verdad en la evidencia?
+
+    Es la comprobación que impide que el verificador apruebe por simpatía: un
+    veredicto positivo exige señalar dónde, y el dónde se verifica contra el
+    texto real. Se compara normalizado porque el modelo reacentúa y repuntúa al
+    copiar, pero no se acepta parafraseo: se exige la secuencia de palabras.
+    """
+    loc, ev = _norm(localizador), _norm(evidencia_texto)
+    if not loc or not ev:
+        return False
+    if loc in ev:
+        return True
+    # Tolerancia a un corte: que aparezca una ventana larga contigua.
+    palabras = loc.split()
+    if len(palabras) < 8:
+        return False
+    for n in (12, 10, 8):
+        for i in range(0, len(palabras) - n + 1):
+            if " ".join(palabras[i:i + n]) in ev:
+                return True
+    return False
+
+
+def _extraer_json(bruto: str) -> dict:
+    """El modelo a veces envuelve el JSON en ``` o en prosa."""
+    t = (bruto or "").strip()
+    if t.startswith("```"):
+        t = re.sub(r"^```[a-z]*\s*|\s*```$", "", t)
+    try:
+        return json.loads(t)
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", t, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except json.JSONDecodeError:
+                pass
+    return {}
+
+
+def construir_evidencia(registry, docs) -> dict:
+    """
+    `{marcador: {documento, texto}}` con lo que se citó en el turno.
+
+    Sale del registro de citas, no de lo que el modelo diga haber usado: el
+    verificador tiene que leer lo mismo que se recuperó.
+    """
+    from core.fuentes import case_link_de
+
+    evidencia: dict[str, dict] = {}
+    for d in (docs or []):
+        if not isinstance(d, dict):
+            continue
+        ref = d.get("ref")
+        if not ref:
+            continue
+        meta = d.get("metadata") or {}
+        texto = (d.get("content") or d.get("text") or "").strip()
+        if not texto:
+            # Un expediente no trae texto: su contenido son sus campos.
+            texto = json.dumps(
+                {k: v for k, v in d.items()
+                 if k not in ("ref", "metadata") and v not in (None, "", [], {})},
+                ensure_ascii=False,
+            )
+        evidencia[ref] = {
+            "documento": case_link_de(d) or "?",
+            "texto": texto,
+            "anchor": str((meta or {}).get("anchor") or ""),
+        }
+    return evidencia
+
+
+async def verificar(
+    pregunta: str,
+    borrador: str,
+    evidencia: dict,
+    adapter,
+    model: str,
+    max_tokens: int = 1500,
+) -> dict:
+    """
+    Revisa el borrador contra su evidencia. **No bloquea nada.**
+
+    Devuelve `{ejecutado, afirmaciones, resumen, error}`. Cada afirmación lleva
+    `veredicto`, `localizador` y `localizador_verificado`, que es la parte que
+    comprueba el código y no el modelo.
+    """
+    if not borrador or not evidencia or adapter is None:
+        return {"ejecutado": False, "afirmaciones": [], "resumen": {},
+                "error": "sin borrador, sin evidencia o sin adaptador"}
+
+    bloques = [
+        f"[{ref}] (documento {e['documento']})\n{e['texto'][:1200]}"
+        for ref, e in evidencia.items()
+    ]
+    contenido = (
+        f"PREGUNTA:\n{pregunta}\n\n"
+        f"EVIDENCIA CITABLE:\n" + "\n\n".join(bloques) + "\n\n"
+        f"RESPUESTA A REVISAR:\n{borrador}"
+    )
+
+    from models.schemas import LLMMessage
+    try:
+        bruto = await adapter.quick_completion(
+            messages=[
+                LLMMessage(role="system", content=_INSTRUCCIONES),
+                LLMMessage(role="user", content=contenido),
+            ],
+            model=model,
+            max_tokens=max_tokens,
+        )
+    except Exception as e:  # nunca tumbar la respuesta por el verificador
+        logger.warning(f"Verificador semántico falló: {type(e).__name__}: {e}")
+        return {"ejecutado": False, "afirmaciones": [], "resumen": {},
+                "error": f"{type(e).__name__}: {e}"}
+
+    datos = _extraer_json(bruto)
+    crudas = datos.get("afirmaciones")
+    if not isinstance(crudas, list):
+        return {"ejecutado": False, "afirmaciones": [], "resumen": {},
+                "error": "el verificador no devolvió JSON utilizable"}
+
+    afirmaciones = []
+    for a in crudas[:MAX_AFIRMACIONES]:
+        if not isinstance(a, dict):
+            continue
+        veredicto = str(a.get("veredicto") or NOT_DETERMINED)
+        if veredicto not in (SUPPORTED, CONTRADICTED, NOT_DETERMINED):
+            veredicto = NOT_DETERMINED
+        marcadores = [str(m) for m in (a.get("marcadores") or [])
+                      if isinstance(m, (str, int))]
+        localizador = str(a.get("localizador") or "").strip()
+
+        # La comprobación que hace el código: el localizador tiene que existir
+        # en la evidencia que dice citar. Sin eso, `supported` es una opinión.
+        verificado = False
+        if localizador:
+            candidatos = [evidencia[m] for m in marcadores if m in evidencia]
+            if not candidatos:
+                candidatos = list(evidencia.values())
+            verificado = any(
+                _localizador_existe(localizador, c["texto"]) or
+                _localizador_existe(localizador, c.get("anchor", ""))
+                for c in candidatos
+            )
+
+        efectivo = veredicto
+        if veredicto in (SUPPORTED, CONTRADICTED) and not verificado:
+            # No se degrada a "contradicted": eso sería afirmar un problema
+            # que tampoco se probó. Queda en indeterminado, que es lo honesto.
+            efectivo = NOT_DETERMINED
+
+        afirmaciones.append({
+            "afirmacion": str(a.get("afirmacion") or "")[:400],
+            "marcadores": marcadores,
+            "veredicto_del_modelo": veredicto,
+            "veredicto": efectivo,
+            "localizador": localizador[:300],
+            "localizador_verificado": verificado,
+            "motivo": str(a.get("motivo") or "")[:300],
+        })
+
+    # Ejemplos: el papel que la respuesta le asigna a cada documento.
+    #
+    # H16-C mostró que revisar afirmación por afirmación no basta. Sus frases
+    # citaban bien —"la concentración debe notificarse antes de realizar la
+    # aportación"— y el encabezado las presentaba como "resolución donde dos
+    # aumentos se trataron como operaciones independientes", que es la figura
+    # contraria. Cada oración fiel, la caracterización invertida.
+    ejemplos = []
+    for e in (datos.get("ejemplos") or [])[:MAX_AFIRMACIONES]:
+        if not isinstance(e, dict):
+            continue
+        veredicto = str(e.get("veredicto") or NOT_DETERMINED)
+        if veredicto not in (SUPPORTED, CONTRADICTED, NOT_DETERMINED):
+            veredicto = NOT_DETERMINED
+        localizador = str(e.get("localizador") or "").strip()
+        verificado = bool(localizador) and any(
+            _localizador_existe(localizador, c["texto"])
+            for c in evidencia.values()
+        )
+        efectivo = veredicto
+        if veredicto in (SUPPORTED, CONTRADICTED) and not verificado:
+            efectivo = NOT_DETERMINED
+        ejemplos.append({
+            "documento": str(e.get("documento") or "")[:80],
+            "propiedad_atribuida": str(e.get("propiedad_atribuida") or "")[:300],
+            "veredicto_del_modelo": veredicto,
+            "veredicto": efectivo,
+            "localizador": localizador[:300],
+            "localizador_verificado": verificado,
+            "motivo": str(e.get("motivo") or "")[:300],
+        })
+
+    resumen = {
+        "total": len(afirmaciones),
+        "ejemplos_total": len(ejemplos),
+        "ejemplos_contradicted": sum(
+            1 for e in ejemplos if e["veredicto"] == CONTRADICTED),
+        SUPPORTED: sum(1 for a in afirmaciones if a["veredicto"] == SUPPORTED),
+        CONTRADICTED: sum(1 for a in afirmaciones if a["veredicto"] == CONTRADICTED),
+        NOT_DETERMINED: sum(1 for a in afirmaciones
+                            if a["veredicto"] == NOT_DETERMINED),
+        # Una afirmación sustantiva que CITA evidencia y no queda sostenida es
+        # un hallazgo, no un empate. COFECE lo pide expresamente: el
+        # verificador debe devolver "afirmaciones sin soporte" además de las
+        # contradicciones.
+        #
+        # H16-C lo muestra: sus seis afirmaciones sobre independencia salieron
+        # `not_determined` con el motivo correcto —"la evidencia no establece
+        # que dos aumentos fueron tratados así"—. Contar sólo `contradicted`
+        # habría dado el caso por limpio.
+        "sin_soporte_citando": sum(
+            1 for a in afirmaciones
+            if a["veredicto"] == NOT_DETERMINED and a["marcadores"]),
+        "localizadores_no_verificados": sum(
+            1 for a in afirmaciones
+            if a["veredicto_del_modelo"] in (SUPPORTED, CONTRADICTED)
+            and not a["localizador_verificado"]
+        ),
+    }
+    return {"ejecutado": True, "afirmaciones": afirmaciones,
+            "ejemplos": ejemplos, "resumen": resumen, "error": None}

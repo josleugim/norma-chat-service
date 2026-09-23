@@ -26,6 +26,10 @@ from prompts.system import AGENT_SYSTEM_PROMPT, TITLE_GENERATION_PROMPT
 from core.fuentes import case_link_de, clasificar_fuente, composicion
 from core.identidades import ResolutorDeIdentidades
 from core.requisitos import construir_requisitos, verificar as verificar_requisitos
+from core.verificacion_semantica import (
+    construir_evidencia as construir_evidencia_semantica,
+    verificar as verificar_semantica,
+)
 from core.validacion_salida import validar_borrador
 from core.voz import clasificar_voz, etiqueta as etiqueta_voz, VOTO_PARTICULAR, NO_IDENTIFICADA
 from models.schemas import (
@@ -70,6 +74,7 @@ class NormaPlusAgent:
         evidence_cache: EvidenceCache,
         max_tool_calls: int = 6,
         max_http_requests: int = 12,
+        verificacion_semantica: bool = False,
         trace_sink=None,
         manifest_store=None,
         settings=None,
@@ -84,6 +89,10 @@ class NormaPlusAgent:
         # Peticiones de recuperación, que no es lo mismo: una llamada
         # sobre N documentos hace N peticiones. Ver config.py.
         self.max_http_requests = max_http_requests
+        # Verificación semántica (I5). Arranca en EVALUACIÓN: se registra y
+        # no bloquea. Configurable porque agrega una llamada al modelo por
+        # turno, y el presupuesto de LLM se cuenta aparte del de HTTP.
+        self.verificacion_semantica = verificacion_semantica
 
         # Resolutor de identidades documentales (C02). Se construye desde el
         # universo consultable, así que sólo puede devolver expedientes que
@@ -302,8 +311,8 @@ class NormaPlusAgent:
                     # resuelve dejaba el marcador y su afirmación en el texto,
                     # con la fuente ausente de la lista. La defensa llegaba
                     # tarde por el orden, no por falta de mecanismo.
-                    final_text = self._emitir_validado(
-                        response.content, state, collector, "content")
+                    final_text = await self._emitir_validado(
+                        response.content, state, collector, "content", adapter, model)
                     for chunk in self._chunk_text(final_text):
                         yield StreamEvent(type="token", data={"text": chunk})
                 else:
@@ -327,8 +336,8 @@ class NormaPlusAgent:
                             total_input_tokens += chunk.input_tokens
                         if chunk.output_tokens:
                             total_output_tokens += chunk.output_tokens
-                    final_text = self._emitir_validado(
-                        "".join(final_parts), state, collector, "stream")
+                    final_text = await self._emitir_validado(
+                        "".join(final_parts), state, collector, "stream", adapter, model)
                     for _c in self._chunk_text(final_text):
                         yield StreamEvent(type="token", data={"text": _c})
                     if collector is not None:
@@ -376,9 +385,9 @@ class NormaPlusAgent:
                 total_output_tokens += fallback_response.output_tokens
 
                 if fallback_response.content:
-                    final_text = self._emitir_validado(
+                    final_text = await self._emitir_validado(
                         fallback_response.content, state, collector,
-                        "forced_synthesis")
+                        "forced_synthesis", adapter, model)
                     for chunk in self._chunk_text(final_text):
                         yield StreamEvent(type="token", data={"text": chunk})
                 else:
@@ -397,9 +406,9 @@ class NormaPlusAgent:
                             total_input_tokens += chunk.input_tokens
                         if chunk.output_tokens:
                             total_output_tokens += chunk.output_tokens
-                    final_text = self._emitir_validado(
+                    final_text = await self._emitir_validado(
                         "".join(final_parts), state, collector,
-                        "forced_synthesis_stream")
+                        "forced_synthesis_stream", adapter, model)
                     for _c in self._chunk_text(final_text):
                         yield StreamEvent(type="token", data={"text": _c})
             except Exception as e:
@@ -475,6 +484,23 @@ class NormaPlusAgent:
                 "derived")
             # El presupuesto real gastado. `tool_calls_count` cuenta lo que
             # eligió el modelo; esto cuenta lo que costó de verdad.
+            # El payload exacto de evidencia que vio el modelo, con marcador,
+            # documento y texto. COFECE lo pide en su punto 3 de evidencia
+            # ("Exportar el payload exacto de evidencia recibido por el
+            # modelo") y sin él no se puede replicar una verificación
+            # semántica sobre una corrida pasada: las trazas anteriores sólo
+            # guardaban conteos.
+            collector.set_decision(
+                "evidencia_payload",
+                [
+                    {"ref": d.get("ref"),
+                     "documento": case_link_de(d),
+                     "texto": (d.get("content") or d.get("text") or "")[:1500],
+                     "anchor": str((d.get("metadata") or {}).get("anchor") or "")[:400]}
+                    for d in state.evidencia_acumulada
+                    if isinstance(d, dict) and d.get("ref")
+                ],
+                "derived")
             collector.set_decision(
                 "presupuesto_peticiones",
                 {
@@ -822,7 +848,8 @@ class NormaPlusAgent:
 
     # ── Ejecutores de herramientas ──────────────────────────
 
-    def _emitir_validado(self, texto: str, state, collector, ruta: str):
+    async def _emitir_validado(self, texto: str, state, collector, ruta: str,
+                               adapter=None, model: str = ""):
         """
         Salida única para TODAS las rutas: valida y después emite.
 
@@ -854,6 +881,47 @@ class NormaPlusAgent:
                     f"[{ruta}] marcadores fuera del registro: "
                     + ", ".join(revision["marcadores_invalidos"]),
                 )
+
+        # Verificación semántica (I5), en EVALUACIÓN.
+        #
+        # Lee el borrador ya reparado contra la evidencia del turno y dice, por
+        # afirmación, si el pasaje la sostiene. Es lo único que mira el
+        # significado: H16-C recibió sus dos criterios completos y los usó para
+        # sostener lo contrario de lo que dicen.
+        #
+        # **No bloquea.** COFECE fue explícito: "no aprueba requisitos ni
+        # bloquea automáticamente la publicación" hasta que su propia medición
+        # lo justifique. Una segunda lectura del modelo es tan falible como la
+        # primera, y encadenar la publicación a ella cambia un modo de falla
+        # por otro. Aquí se registra para poder medirla.
+        if (getattr(self, "verificacion_semantica", False)
+                and adapter is not None and state is not None):
+            try:
+                evidencia = construir_evidencia_semantica(
+                    state.registry, state.evidencia_acumulada
+                )
+                if evidencia:
+                    ver = await verificar_semantica(
+                        pregunta=getattr(state, "query", "") or "",
+                        borrador=revision["texto"],
+                        evidencia=evidencia,
+                        adapter=adapter,
+                        model=model or "gpt-4.1",
+                    )
+                    state.verificacion_semantica = {"ruta": ruta, **ver}
+                    if collector is not None:
+                        collector.set_decision(
+                            "verificacion_semantica",
+                            {"ruta": ruta, "resumen": ver.get("resumen"),
+                             "afirmaciones": ver.get("afirmaciones", []),
+                             "error": ver.get("error")},
+                            "derived")
+            except Exception as e:
+                # El verificador no puede tumbar una respuesta. Si falla, se
+                # anota y la respuesta sale igual: está en evaluación.
+                logger.warning(
+                    f"Verificación semántica omitida: {type(e).__name__}: {e}")
+
         return revision["texto"]
 
     async def _buscar_criterios_por_documento(
