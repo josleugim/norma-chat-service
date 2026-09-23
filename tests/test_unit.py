@@ -2258,3 +2258,100 @@ class TestLaVozEsDelPasajeNoDelDocumento:
         doc = self._doc(anchor="a", contexto="<<<PAGINA:1>>> a, sin marcas")
         v = clasificar_voz(doc)
         assert v["voz"] == NO_IDENTIFICADA and v["voz"] != MAYORIA
+
+
+class TestLasFechasSalenDelRegistroNoDelModelo:
+    """
+    I7 de la revisión del 23-sep. Dos defectos reproducidos por COFECE sobre
+    entradas construidas, no sobre las respuestas reales de H04:
+
+      "Mantener los cinco IDs y alterar una fecha entregada por el modelo
+       produce 63.6 sin detectar que el valor difiere del registro original."
+      "Un registro artificial marcado no calculable puede entrar al promedio."
+
+    Confirmados aquí antes de arreglar: alterar una fecha movía el promedio de
+    15.0 a 20.0 sin aviso, y un no calculable aparecía en `ids_incluidos`
+    aunque no aportara valor — tres identificadores para un promedio de dos.
+
+    El modelo elige QUÉ se calcula; los valores los pone el código.
+    """
+
+    REG = [
+        {"caseLink": "A-1", "startAgreementDate": "01-01-2024",
+         "resolutionDate": "11-01-2024"},
+        {"caseLink": "A-2", "startAgreementDate": "01-01-2024",
+         "resolutionDate": "21-01-2024"},
+    ]
+
+    def _agente(self):
+        from agent.agent import NormaPlusAgent
+        from temporal.analyzer import TemporalAnalyzer
+        from temporal.holidays import HolidayCalendar
+        ag = NormaPlusAgent.__new__(NormaPlusAgent)
+        ag.temporal = TemporalAnalyzer(HolidayCalendar("data/dias_inhabiles.xlsx"))
+        return ag
+
+    def _calcular(self, expedientes, recuperados=None):
+        import asyncio
+        from agent.turn_state import TurnState
+        st = TurnState()
+        st.last_expedientes = [dict(r) for r in (recuperados or self.REG)]
+        return asyncio.run(self._agente()._exec_calcular_plazos(
+            {"expedientes": expedientes, "campo_inicio": "startAgreementDate",
+             "campo_fin": "resolutionDate", "unidad": "dias_naturales",
+             "compute_stats": True}, None, st))
+
+    def test_base(self):
+        r = self._calcular([dict(x) for x in self.REG])
+        assert r["stats"]["promedio"] == 15.0
+
+    # ── 1. Fecha alterada por el modelo ──────────────────────────────
+    def test_una_fecha_alterada_no_cambia_el_resultado(self):
+        alterado = [dict(x) for x in self.REG]
+        alterado[1]["resolutionDate"] = "31-01-2024"   # diez días más
+        r = self._calcular(alterado)
+        assert r["stats"]["promedio"] == 15.0, (
+            "el promedio debe salir del registro, no de lo que reenvió el modelo")
+
+    def test_la_discrepancia_se_declara(self):
+        alterado = [dict(x) for x in self.REG]
+        alterado[1]["resolutionDate"] = "31-01-2024"
+        r = self._calcular(alterado)
+        d = r["FECHAS_CORREGIDAS_DESDE_EL_REGISTRO"]["casos"]
+        assert d[0]["expediente"] == "A-2"
+        assert d[0]["enviado_por_el_modelo"] == "31-01-2024"
+        assert d[0]["valor_del_registro"] == "21-01-2024"
+
+    def test_sin_alteracion_no_hay_aviso(self):
+        r = self._calcular([dict(x) for x in self.REG])
+        assert "FECHAS_CORREGIDAS_DESDE_EL_REGISTRO" not in r
+
+    # ── 2. Reconciliación de la auditoría ────────────────────────────
+    def test_un_no_calculable_no_aparece_entre_los_incluidos(self):
+        nc = {"caseLink": "A-3", "startAgreementDate": None,
+              "resolutionDate": "11-01-2024"}
+        todos = [dict(x) for x in self.REG] + [nc]
+        r = self._calcular(todos, recuperados=todos)
+        assert r["stats"]["ids_incluidos"] == ["A-1", "A-2"]
+        assert r["stats"]["ids_sin_valor"] == ["A-3"]
+
+    def test_ids_incluidos_reconcilia_con_count(self):
+        """
+        Es la propiedad que hace auditable la cifra: la lista con la que se
+        reconstruye el promedio tiene que tener tantos elementos como
+        registros se promediaron.
+        """
+        nc = {"caseLink": "A-3", "startAgreementDate": None,
+              "resolutionDate": "11-01-2024"}
+        todos = [dict(x) for x in self.REG] + [nc]
+        r = self._calcular(todos, recuperados=todos)
+        assert len(r["stats"]["ids_incluidos"]) == r["stats"]["count"]
+        assert r["stats"]["universo_calculado"] == r["stats"]["count"]
+
+    def test_el_no_calculable_sigue_reportandose(self):
+        """Excluirlo del promedio no es ocultarlo."""
+        nc = {"caseLink": "A-3", "startAgreementDate": None,
+              "resolutionDate": "11-01-2024"}
+        todos = [dict(x) for x in self.REG] + [nc]
+        r = self._calcular(todos, recuperados=todos)
+        assert r["NO_CALCULABLES"]["count"] == 1

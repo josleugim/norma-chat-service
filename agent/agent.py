@@ -1752,6 +1752,43 @@ class NormaPlusAgent:
                         if isinstance(e, dict) and case_link_de(e)}
             excluidos = sorted(recuperados - enviados)
 
+        # Las fechas salen del registro recuperado, no de lo que reenvía el
+        # modelo (I7).
+        #
+        # COFECE lo reprodujo: "Mantener los cinco IDs y alterar una fecha
+        # entregada por el modelo produce 63.6 sin detectar que el valor
+        # difiere del registro original." Confirmado aquí — alterar una fecha
+        # movía el promedio de 15.0 a 20.0 sin que nada lo notara.
+        #
+        # El modelo elige QUÉ se calcula; los valores con los que se calcula
+        # los pone el código. Una cifra cuyo insumo puede reescribirse en el
+        # camino no es auditable, por correcta que salga.
+        discrepancias: list[dict] = []
+        if state and state.last_expedientes:
+            por_id = {case_link_de(e): e for e in state.last_expedientes
+                      if isinstance(e, dict) and case_link_de(e)}
+            restaurados = []
+            for e in expedientes:
+                if not isinstance(e, dict):
+                    restaurados.append(e)
+                    continue
+                origen = por_id.get(case_link_de(e))
+                if not origen:
+                    restaurados.append(e)
+                    continue
+                e = dict(e)
+                for campo, valor in origen.items():
+                    if campo in e and e[campo] != valor:
+                        discrepancias.append({
+                            "expediente": case_link_de(e),
+                            "campo": campo,
+                            "enviado_por_el_modelo": e[campo],
+                            "valor_del_registro": valor,
+                        })
+                    e[campo] = valor
+                restaurados.append(e)
+            expedientes = restaurados
+
         # Calculadora general entre cualquier par de campos de fecha. Antes
         # estaba cableada a notificación → resolución, que NO EXISTE en VCN.
         calculos = self.temporal.compute_between_fields(
@@ -1835,11 +1872,27 @@ class NormaPlusAgent:
                 data_for_stats, plazo_field=plazo_field
             )
             result["stats"]["unidad"] = plazo_field
-            result["stats"]["universo_calculado"] = len(elegibles)
+            # Sólo los que REALMENTE entraron al promedio.
+            #
+            # Un no calculable no aportaba valor pero sí aparecía aquí, así
+            # que `ids_incluidos` listaba tres expedientes para un promedio
+            # de dos. Es la lista con la que se reconstruye la cifra: si no
+            # reconcilia con `count`, la auditoría no sirve.
+            contados = [
+                e for e in elegibles
+                if isinstance(e, dict) and e.get(plazo_field) is not None
+            ]
+            result["stats"]["universo_calculado"] = len(contados)
             result["stats"]["ids_incluidos"] = sorted(
+                case_link_de(e) for e in contados if case_link_de(e)
+            )
+            omitidos = sorted(
                 case_link_de(e) for e in elegibles
                 if isinstance(e, dict) and case_link_de(e)
+                and e.get(plazo_field) is None
             )
+            if omitidos:
+                result["stats"]["ids_sin_valor"] = omitidos
             result["stats"]["alcance"] = (
                 "subconjunto filtrado" if (max_dh is not None or min_dh is not None)
                 else "universo completo"
@@ -1863,6 +1916,16 @@ class NormaPlusAgent:
             }
         if sin_id:
             result["REGISTROS_SIN_IDENTIDAD_DESCARTADOS"] = len(sin_id)
+        if discrepancias:
+            result["FECHAS_CORREGIDAS_DESDE_EL_REGISTRO"] = {
+                "casos": discrepancias[:10],
+                "regla": (
+                    "Los valores que enviaste no coincidían con el registro "
+                    "recuperado. Se calculó con los del registro. No "
+                    "transcribas fechas: manda los identificadores y deja que "
+                    "la herramienta las lea de la fuente."
+                ),
+            }
 
         no_calculables = [c for c in calculos if not c["calculable"]]
         if no_calculables:
