@@ -2161,3 +2161,100 @@ class TestFechaContradictoriaYPrincipalSinFecha:
     def test_un_expediente_sin_derivados_no_se_rompe(self):
         r = self._r().resolver("¿qué dice 677/2024?")
         assert any("677_2024_1SCJN" in i["candidatos"] for i in r)
+
+
+class TestLaVozEsDelPasajeNoDelDocumento:
+    """
+    H16-A, el FAIL CRÍTICO de la adjudicación del 23-sep.
+
+    El criterio 4035 de VCN-005-2024 es razonamiento de la MAYORÍA, en la
+    página 13. El clasificador barría los 14,911 caracteres del contexto
+    completo, encontraba en la página 14 la fórmula de firmas —"Con voto
+    concurrente del Comisionado José Eduardo Mendoza Contreras"— y se la
+    atribuía al criterio. El gold lo identifica como `pleno_mayoria`.
+
+    Textual de COFECE en I4: "No basta encontrar la palabra «voto» en
+    cualquier parte del contexto. Se necesita vincularla a la sección que
+    contiene el criterio."
+
+    La frontera es la página del documento, no una distancia en caracteres:
+    un umbral ajustado a tres observaciones sería un número inventado.
+    """
+
+    FIRMA = ("Comisionados Andrea Marván Saltiel, Giovanni Tapia Lezama y "
+             "Alejandro Faya Rodríguez. Con voto concurrente del Comisionado "
+             "José Eduardo Mendoza Contreras, quien considera que...")
+
+    def _doc(self, anchor, contexto, content="texto del criterio"):
+        return {"caseLink": "VCN-005-2024", "content": content,
+                "metadata": {"anchor": anchor, "context": contexto}}
+
+    # ── El caso H16-A ────────────────────────────────────────────────
+    def test_la_firma_de_otra_pagina_no_es_la_voz_del_criterio(self):
+        from core.voz import clasificar_voz, NO_IDENTIFICADA
+        doc = self._doc(
+            anchor="no se actualiza el supuesto de sucesión de actos",
+            contexto=("<<<PAGINA:13>>> Los propósitos son distintos y "
+                      "no se actualiza el supuesto de sucesión de actos "
+                      "respecto de la INVERSIÓN 2018.\n"
+                      f"<<<PAGINA:14>>> {self.FIRMA}"))
+        assert clasificar_voz(doc)["voz"] == NO_IDENTIFICADA
+
+    def test_pero_la_marca_del_documento_se_reporta(self):
+        """
+        Callarla sería el error opuesto: que la resolución lleve un voto
+        concurrente es un hecho del documento. Lo prohibido es atribuírselo
+        a este pasaje.
+        """
+        from core.voz import clasificar_voz
+        doc = self._doc(
+            anchor="no se actualiza el supuesto",
+            contexto=("<<<PAGINA:13>>> no se actualiza el supuesto de "
+                      "sucesión.\n"
+                      f"<<<PAGINA:14>>> {self.FIRMA}"))
+        v = clasificar_voz(doc)
+        assert v["marca_en_documento"]
+        assert "concurrente" in v["marca_en_documento"].lower()
+
+    # ── Y lo que NO puede romperse: H19 ──────────────────────────────
+    def test_la_marca_en_la_misma_pagina_si_atribuye(self):
+        from core.voz import clasificar_voz, VOTO_PARTICULAR
+        doc = self._doc(
+            anchor="la multa debió individualizarse de otro modo",
+            contexto=("<<<PAGINA:152>>> la multa debió individualizarse de "
+                      "otro modo. Magistrada Irma Leticia Flores Díaz. "
+                      "Respetuosamente, formulo voto particular."))
+        v = clasificar_voz(doc)
+        assert v["voz"] == VOTO_PARTICULAR
+        assert v["autor"] == "Irma Leticia Flores Díaz"
+
+    def test_la_marca_en_el_texto_del_criterio_siempre_atribuye(self):
+        from core.voz import clasificar_voz, VOTO_PARTICULAR
+        doc = self._doc(anchor="x", contexto="<<<PAGINA:9>>> otra cosa",
+                        content="Formulo voto particular porque disiento.")
+        assert clasificar_voz(doc)["voz"] == VOTO_PARTICULAR
+
+    # ── Fallbacks, que es donde se decide el sesgo ───────────────────
+    def test_documento_sin_paginar_se_lee_completo(self):
+        """Sin paginado el contexto ES una sección: no hay de dónde separar."""
+        from core.voz import clasificar_voz, VOTO_PARTICULAR
+        doc = self._doc(anchor="", contexto="Magistrada X. Formulo voto particular.")
+        assert clasificar_voz(doc)["voz"] == VOTO_PARTICULAR
+
+    def test_paginado_sin_anchor_ubicable_no_atribuye(self):
+        """
+        Con páginas y sin poder situar el pasaje, no hay forma de afirmar que
+        la marca sea suya. Se prefiere no identificar sobre atribuir mal: una
+        voz perdida es una reserva; una voz inventada es H16-A.
+        """
+        from core.voz import clasificar_voz, NO_IDENTIFICADA
+        doc = self._doc(anchor="frase que no aparece en el contexto",
+                        contexto=f"<<<PAGINA:13>>> algo\n<<<PAGINA:14>>> {self.FIRMA}")
+        assert clasificar_voz(doc)["voz"] == NO_IDENTIFICADA
+
+    def test_no_inventa_mayoria_por_ausencia_de_marca(self):
+        """La regla de siempre, que este cambio no puede erosionar."""
+        from core.voz import clasificar_voz, NO_IDENTIFICADA, MAYORIA
+        doc = self._doc(anchor="a", contexto="<<<PAGINA:1>>> a, sin marcas")
+        v = clasificar_voz(doc)
+        assert v["voz"] == NO_IDENTIFICADA and v["voz"] != MAYORIA
