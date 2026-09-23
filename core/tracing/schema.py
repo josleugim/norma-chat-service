@@ -158,6 +158,12 @@ class Decisions(BaseModel):
     requisitos_verificados: Optional[dict[str, Any]] = None
     cobertura_por_documento: list[dict[str, Any]] = Field(default_factory=list)
     reparacion_salida: Optional[dict[str, Any]] = None
+    # Sobre cuánta evidencia se verificaron los requisitos, y qué costó
+    # recuperarla. Un requisito cumplido no dice si lo sostuvo el registro,
+    # los criterios o los dos; y `tool_call_count` no dice cuántas peticiones
+    # HTTP hubo detrás, que es el punto ciego que señaló COFECE en I1.7.
+    evidencia_verificada: Optional[dict[str, Any]] = None
+    presupuesto_peticiones: Optional[dict[str, Any]] = None
     used_cached_evidence: bool = False
     answered_without_retrieval: bool = False
     final_answer_path: Optional[str] = None

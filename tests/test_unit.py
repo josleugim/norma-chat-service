@@ -2413,3 +2413,36 @@ class TestUnaAfirmacionSinCitaSeRetiraNoSeAnota:
         r = self._v("Todo correcto [C1].")
         assert r["reparado"] is False
         assert r["texto"] == "Todo correcto [C1]."
+
+
+class TestNingunaDecisionSeCaeEnSilencio:
+    """
+    El agente escribe decisiones con `set_decision(nombre, ...)` y el esquema
+    de trazas las valida. Un nombre que no esté declarado **se descarta sin
+    error**: la decisión se calcula bien, no llega a la traza, y nadie se
+    entera hasta que alguien la busca.
+
+    Pasó hoy con `evidencia_verificada` y `presupuesto_peticiones`, y ya había
+    pasado en septiembre con `composicion_fuentes`, que vivía sólo en la traza
+    completa y no en el renglón plano que leen `compare.py` y el XLSX. Es la
+    misma clase de falla que perseguimos en el producto: algo que existe, se
+    calcula correctamente, y no llega a donde se lee.
+
+    Esta prueba la cierra por construcción en vez de por lista.
+    """
+
+    def test_todo_set_decision_existe_en_el_esquema(self):
+        import re
+        from pathlib import Path
+        from core.tracing.schema import Decisions
+
+        fuente = Path("agent/agent.py").read_text(encoding="utf-8")
+        usados = set(re.findall(r'set_decision\(\s*"([a-z_]+)"', fuente))
+        assert usados, "no se encontró ninguna llamada a set_decision"
+
+        declarados = set(Decisions.model_fields)
+        huerfanos = sorted(usados - declarados)
+        assert not huerfanos, (
+            "estas decisiones se escriben y el esquema las descarta en "
+            f"silencio: {huerfanos}. Decláralas en core/tracing/schema.py"
+        )
