@@ -21,7 +21,12 @@ antes de trocearse en tokens; sólo se emitía sin revisar.
 ## Qué hace y qué no
 
 Repara lo que es determinista: quita del texto los marcadores que no resuelven
-y, cuando una afirmación entera dependía de uno, la marca como no sustentada.
+y, cuando una afirmación entera dependía de uno, la **retira**.
+
+Antes la conservaba con un aviso pegado. COFECE lo rechazó en I8 de su revisión
+del 23-sep: *"Si se retira una cita inválida, no debe conservarse una afirmación
+categórica que dependía exclusivamente de ella."* Tenían razón — el lector se
+queda con la frase, no con la nota. El texto retirado sigue en la traza.
 
 **No pretende verificar que el fragmento sostenga la afirmación.** Eso exige un
 verificador semántico, y el diagnóstico es explícito en que no debe presentarse
@@ -44,13 +49,15 @@ def validar_borrador(texto: str, registry) -> dict:
     """
     if not texto or registry is None:
         return {"texto": texto, "marcadores_invalidos": [],
-                "frases_sin_respaldo": [], "reparado": False}
+                "frases_sin_respaldo": [], "frases_con_cita_parcial": [],
+                "reparado": False}
 
     usados = MARCADOR.findall(texto)
     invalidos = sorted({m for m in usados if registry.resolve(m) is None})
     if not invalidos:
         return {"texto": texto, "marcadores_invalidos": [],
-                "frases_sin_respaldo": [], "reparado": False}
+                "frases_sin_respaldo": [], "frases_con_cita_parcial": [],
+                "reparado": False}
 
     logger.warning(
         f"Borrador con {len(invalidos)} marcador(es) fuera del registro: "
@@ -65,6 +72,7 @@ def validar_borrador(texto: str, registry) -> dict:
     # Se trabaja por frase: si al quitar los marcadores inválidos una frase se
     # queda sin ninguna cita, es una afirmación que colgaba de una referencia
     # que no existe.
+    cita_parcial: list[str] = []
     for frase in _frases(cuerpo):
         marcas = set(MARCADOR.findall(frase))
         if not marcas & invalidos_set:
@@ -76,12 +84,28 @@ def validar_borrador(texto: str, registry) -> dict:
         )
         limpia = re.sub(r"\s{2,}", " ", limpia).strip()
         if quedan:
-            salida.append(limpia)
-        else:
+            # Conserva otras citas, pero perdió una. I8: "Tener otro marcador
+            # en la frase no prueba que respalde todo su contenido." Se deja
+            # la frase y se advierte, porque lo que ya no se puede afirmar es
+            # que esté enteramente sustentada.
+            cita_parcial.append(limpia)
+            salida.append(limpia + " [una cita de esta frase no resolvió]")
+        elif limpia:
+            # Perdió su ÚNICA cita.
+            #
+            # Antes se conservaba la afirmación con un aviso pegado. COFECE lo
+            # rechazó en I8: "Si se retira una cita inválida, no debe
+            # conservarse una afirmación categórica que dependía
+            # exclusivamente de ella." Un aviso no deshace una aseveración: el
+            # lector se queda con la frase.
+            #
+            # Se retira. El texto retirado viaja en `frases_sin_respaldo` para
+            # la traza, así que no se pierde para auditar — sólo deja de
+            # afirmarse ante quien lee.
             sin_respaldo.append(limpia)
             salida.append(
-                (limpia + " [SIN RESPALDO EN LAS FUENTES DE ESTA RESPUESTA]")
-                if limpia else ""
+                "[AFIRMACIÓN RETIRADA: su única cita no correspondía a "
+                "ninguna fuente de esta respuesta]"
             )
 
     nuevo = " ".join(s for s in salida if s)
@@ -96,6 +120,7 @@ def validar_borrador(texto: str, registry) -> dict:
         "texto": nuevo,
         "marcadores_invalidos": invalidos,
         "frases_sin_respaldo": sin_respaldo,
+        "frases_con_cita_parcial": cita_parcial,
         "reparado": True,
     }
 

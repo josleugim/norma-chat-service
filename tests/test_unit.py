@@ -1273,7 +1273,11 @@ class TestValidacionAntesDeEmitir:
         from core.validacion_salida import validar_borrador
         r = validar_borrador("El voto lo emitió la magistrada X [C14].",
                              self._Reg(["C1"]))
-        assert "SIN RESPALDO" in r["texto"]
+        # Se retira, no se anota: un aviso pegado no deshace una aseveración.
+        assert "AFIRMACIÓN RETIRADA" in r["texto"]
+        assert "magistrada X" not in r["texto"]
+        # Y sigue disponible para auditar.
+        assert any("magistrada X" in f for f in r["frases_sin_respaldo"])
         assert len(r["frases_sin_respaldo"]) == 1
 
     def test_un_borrador_limpio_no_se_toca(self):
@@ -2355,3 +2359,57 @@ class TestLasFechasSalenDelRegistroNoDelModelo:
         todos = [dict(x) for x in self.REG] + [nc]
         r = self._calcular(todos, recuperados=todos)
         assert r["NO_CALCULABLES"]["count"] == 1
+
+
+class TestUnaAfirmacionSinCitaSeRetiraNoSeAnota:
+    """
+    I8 de la revisión del 23-sep. Textual:
+
+        "Si se retira una cita inválida, no debe conservarse una afirmación
+         categórica que dependía exclusivamente de ella."
+        "Tener otro marcador en la frase no prueba que respalde todo su
+         contenido."
+
+    Antes la frase se conservaba con "[SIN RESPALDO…]" pegado al final. Un
+    aviso no deshace una aseveración: el lector se queda con la frase.
+    """
+
+    class _Reg:
+        def __init__(self, validos): self.validos = set(validos)
+        def resolve(self, m): return {"id": m} if m in self.validos else None
+
+    def _v(self, texto, validos=("C1",)):
+        from core.validacion_salida import validar_borrador
+        return validar_borrador(texto, self._Reg(validos))
+
+    def test_la_afirmacion_desaparece_del_texto(self):
+        r = self._v("La COFECE impuso una multa de 40 millones [C9].")
+        assert "40 millones" not in r["texto"]
+        assert "AFIRMACIÓN RETIRADA" in r["texto"]
+
+    def test_pero_queda_en_la_traza(self):
+        """Retirarla del texto no es borrarla del expediente."""
+        r = self._v("La COFECE impuso una multa de 40 millones [C9].")
+        assert any("40 millones" in f for f in r["frases_sin_respaldo"])
+
+    def test_una_frase_con_cita_valida_no_se_toca(self):
+        r = self._v("El pleno resolvió no sancionar [C1].")
+        assert "no sancionar" in r["texto"]
+        assert "RETIRADA" not in r["texto"]
+
+    def test_la_frase_que_pierde_una_de_dos_citas_se_advierte(self):
+        r = self._v("El criterio se sostuvo en dos precedentes [C1][C9].")
+        assert "dos precedentes" in r["texto"], "conserva otra cita: no se retira"
+        assert "no resolvió" in r["texto"]
+        assert r["frases_con_cita_parcial"]
+
+    def test_solo_se_toca_la_frase_afectada(self):
+        r = self._v("Primero esto [C1].\nSegundo aquello [C9].\nTercero lo otro [C1].")
+        assert "Primero esto" in r["texto"]
+        assert "Tercero lo otro" in r["texto"]
+        assert "Segundo aquello" not in r["texto"]
+
+    def test_sin_marcadores_invalidos_no_hay_reparacion(self):
+        r = self._v("Todo correcto [C1].")
+        assert r["reparado"] is False
+        assert r["texto"] == "Todo correcto [C1]."
