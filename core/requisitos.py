@@ -55,37 +55,90 @@ _COMPARA = re.compile(
 
 # Preguntas que exigen campos concretos del registro, no criterios. Van con
 # los nombres reales del modelo para que el requisito sea comprobable.
+#
+# Cada entrada declara **un dato pedido**, con la lista de campos que pueden
+# probarlo. La distinción la fijó COFECE en I2 de su revisión del 23-sep:
+#
+#   "`AND` se aplica a los datos distintos efectivamente pedidos. `OR` se
+#    reserva a fuentes alternativas que prueben EL MISMO dato."
+#
+# Antes esto era una sola lista plana por patrón, y `verificar` la aprobaba con
+# cualquiera de sus campos. El efecto medido: en H14 bastaba `judicialBody`
+# —el órgano que DICTA la resolución— para dar por satisfecha una pregunta
+# sobre el tribunal relacionado y su expediente, que son otro papel y otros dos
+# campos. H14 salía PASS en las tres repeticiones porque el modelo acertaba,
+# no porque el control lo sostuviera.
+#
+# Por eso los patrones van separados por dato: una pregunta que sólo pide el
+# tribunal no debe exigir además el expediente. Exigir de más devuelve al
+# agente a abstenerse sobre datos que nadie pidió.
 _CAMPOS_PEDIDOS = [
     # Sólo en forma INTERROGATIVA. "del Segundo Tribunal Colegiado" nombra el
     # órgano; "¿qué tribunal colegiado?" lo pregunta. La primera versión
     # disparaba con cualquier mención y exigía campos del registro a una
     # comparación que sólo estaba identificando su documento.
-    (re.compile(r"\bqu[ée]\s+tribunal\b|\bcu[áa]l\s+(?:tribunal|[óo]rgano)\b|"
-                r"\bqu[ée]\s+expediente\b|\bde\s+qu[ée]\s+(?:tribunal|[óo]rgano)\b|"
-                r"\bqu[ée]\s+[óo]rgano\b", re.IGNORECASE),
-     ["relatedCollegiateCourt", "relatedTccCaseFile", "judicialBody"],
-     "el tribunal y su expediente, tomados del registro"),
+    (re.compile(r"\bqu[ée]\s+tribunal\b|\bcu[áa]l\s+tribunal\b|"
+                r"\bde\s+qu[ée]\s+tribunal\b", re.IGNORECASE),
+     "tribunal relacionado",
+     ["relatedCollegiateCourt"],
+     "el tribunal relacionado, tomado del registro"),
+    # Va aparte del tribunal: "¿qué expediente?" y "¿qué tribunal?" son dos
+    # datos. H14 pide los dos; una pregunta que pida uno no exige el otro.
+    (re.compile(r"\bqu[ée]\s+expediente\b|\bcu[áa]l\s+expediente\b|"
+                r"\bn[úu]mero\s+de\s+expediente\b", re.IGNORECASE),
+     "expediente relacionado",
+     ["relatedTccCaseFile"],
+     "el expediente relacionado, tomado del registro"),
+    # El órgano EMISOR es un papel distinto del relacionado, y por eso tiene
+    # su propio patrón y su propio campo. Confundirlos fue el defecto de H17,
+    # donde el Juzgado Tercero apareció como Tribunal Colegiado.
+    (re.compile(r"\bqu[ée]\s+[óo]rgano\b|\bcu[áa]l\s+[óo]rgano\b|"
+                r"\bde\s+qu[ée]\s+[óo]rgano\b|\bqui[ée]n\s+(?:dict[óo]|emiti[óo])\b",
+                re.IGNORECASE),
+     "órgano emisor",
+     ["judicialBody", "authority"],
+     "el órgano que dictó el documento, tomado del registro"),
     (re.compile(r"\bqui[ée]n(?:es)?\s+(?:vot[óo]|resolvi[óo]|firm)|"
                 r"\bcomisionad[oa]s?\b|\bintegrantes\b", re.IGNORECASE),
-     ["decisionOfficials", "dissentingOpinions",
-      "dissentingAndConcurringOpinions"],
+     "quiénes decidieron",
+     ["decisionOfficials"],
      "quiénes decidieron, tomados del registro"),
+    # Los dos campos de disidencia SÍ son alternativas del mismo dato: el
+    # servicio lo expone en uno u otro según el documento.
+    (re.compile(r"\bvot[oó]\s+(?:particular|concurrente|en\s+contra|disidente)|"
+                r"\bdiscrep\w+|\ben\s+contra\b", re.IGNORECASE),
+     "votos disidentes",
+     ["dissentingOpinions", "dissentingAndConcurringOpinions"],
+     "los votos disidentes, tomados del registro"),
     (re.compile(r"\bmulta\w*\b.{0,40}\b(?:a\s+qui[ée]n|agente|impuso)|"
                 r"\ba\s+qui[ée]n\s+se\s+(?:le\s+)?multó", re.IGNORECASE),
+     "agentes multados",
      ["agentFines"],
      "los agentes multados y sus montos, tomados del registro"),
-    # Qué resolvió una sentencia y a quién obliga. H18: los datos estaban en
+    # Qué resolvió una sentencia. H18: los datos estaban en
     # `judicialDecisionEffects` —"el Pleno de la Comisión Nacional
-    # Antimonopolio deberá…"— y en `originAdministrativeAuthority` —COFECE,
-    # que dictó el acto reclamado—, no en los criterios. El agente usó sólo
+    # Antimonopolio deberá…"—, no en los criterios. El agente usó sólo
     # `buscar_criterios` y acabó confundiendo emisor con destinatario.
+    #
+    # Estos cuatro campos sí son alternativas: cada documento expresa el
+    # sentido de lo resuelto en el que tenga poblado.
     (re.compile(r"\bqu[ée]\s+se\s+resolvi[óo]\b|\bqu[ée]\s+efectos?\b|"
                 r"\bpuntos?\s+resolutivos?\b|\bqu[ée]\s+orden[óa]\b|"
                 r"\bsentido\s+del?\s+(?:amparo|fallo|sentencia)\b",
                 re.IGNORECASE),
+     "qué se resolvió",
      ["judicialDecisionEffects", "senseOfAmparo", "scopeOfCompliance",
-      "judgmentImplementation", "originAdministrativeAuthority"],
-     "qué se resolvió y a quién obliga, tomados del registro"),
+      "judgmentImplementation"],
+     "qué se resolvió, tomado del registro"),
+    # La autoridad que dictó el acto reclamado es OTRO dato, y confundirlo con
+    # la obligada al cumplimiento fue exactamente el error de H18-B: COFECE
+    # dictó la multa, la CNA quedó obligada a reindividualizarla.
+    (re.compile(r"\bqu[ée]\s+autoridad\b|\bcu[áa]l\s+autoridad\b|"
+                r"\bautoridad\s+(?:responsable|emisora)\b|"
+                r"\bacto\s+reclamado\b", re.IGNORECASE),
+     "autoridad del acto reclamado",
+     ["originAdministrativeAuthority"],
+     "la autoridad que dictó el acto reclamado, tomada del registro"),
 ]
 
 
@@ -134,10 +187,14 @@ def construir_requisitos(query: str, identidades: list[dict] | None) -> list[dic
     # `relatedTccCaseFile: 565/2023`, `relatedCollegiateCourt: Primer Tribunal
     # Colegiado…`— y nadie los fue a buscar. Un identificador canónico correcto
     # no equivale a haber recuperado todos los campos pedidos.
-    for patron, campos, desc in _CAMPOS_PEDIDOS:
+    # Un requisito por DATO pedido, no uno por patrón con todos sus campos
+    # dentro. Dos datos distintos se comprueban por separado; sólo las fuentes
+    # alternativas del mismo dato comparten requisito.
+    for patron, papel, campos, desc in _CAMPOS_PEDIDOS:
         if patron.search(query or ""):
             req.append({
                 "tipo": "campos_registro",
+                "papel": papel,
                 "valor": campos,
                 "descripcion": desc,
                 "obligatorio": True,
@@ -205,17 +262,20 @@ def verificar(requisitos: list[dict], docs: list[dict]) -> dict:
                     else "no se recuperó ningún voto particular identificado"
                 )
         elif r["tipo"] == "campos_registro":
-            # Se cumple si ALGUNO de los campos pedidos llegó con valor en
-            # algún documento recuperado. No basta tener el expediente
-            # correcto: hay que haber traído el campo.
+            # Cada requisito es UN dato; sus campos son fuentes alternativas
+            # que prueban ese mismo dato, así que basta uno de ellos. Lo que
+            # ya no ocurre es aprobar un dato con el campo de otro: eso vive
+            # ahora en requisitos separados y se exigen todos.
             traidos = [
                 c for c in r["valor"]
                 if any(d.get(c) not in (None, "", [], {}) for d in (docs or []))
             ]
             ok = bool(traidos)
+            papel = r.get("papel", "el dato pedido")
             detalle = (
-                "presentes: " + ", ".join(traidos) if ok
-                else "ninguno de estos campos llegó: " + ", ".join(r["valor"])
+                f"{papel}: presente en " + ", ".join(traidos) if ok
+                else f"falta {papel}. Ninguno de estos campos llegó con valor: "
+                     + ", ".join(r["valor"])
                      + ". Están en el registro del expediente, no en los "
                        "criterios: hay que consultarlo con buscar_expedientes"
             )

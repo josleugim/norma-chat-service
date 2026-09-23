@@ -1519,10 +1519,17 @@ class TestCamposDelRegistroComoRequisito:
         assert not [r for r in req if r["tipo"] == "campos_registro"]
 
     def test_quien_voto_pide_los_campos_de_votos(self):
+        """
+        Dos datos distintos en una pregunta producen dos requisitos, no uno
+        con todos los campos dentro: quiénes decidieron y quiénes discreparon
+        se prueban por separado.
+        """
         req = self._req("En el VCN-003-2025, ¿quiénes votaron y hubo "
                         "comisionados en contra?")
-        campos = [r for r in req if r["tipo"] == "campos_registro"]
-        assert campos and "dissentingOpinions" in campos[0]["valor"]
+        porpapel = {r["papel"]: r["valor"]
+                    for r in req if r["tipo"] == "campos_registro"}
+        assert "decisionOfficials" in porpapel["quiénes decidieron"]
+        assert "dissentingOpinions" in porpapel["votos disidentes"]
 
 
 class TestTodasLasRutasDeSalidaValidan:
@@ -1951,3 +1958,113 @@ class TestPresupuestoDePeticionesNoDeLlamadas:
         ag = self._agente(1)
         asyncio.run(self._correr(ag, ["VCN-001-2025", "VCN-002-2024"], None))
         assert len(ag.criterios.llamadas) == 2
+
+
+class TestUnDatoNoSeApruebaConElCampoDeOtro:
+    """
+    I2 de la revisión del 23-sep. Textual:
+
+        "`AND` se aplica a los datos distintos efectivamente pedidos. `OR` se
+         reserva a fuentes alternativas que prueben EL MISMO dato."
+
+    El defecto medido: en H14 bastaba `judicialBody` —el órgano que DICTA la
+    resolución— para dar por satisfecha una pregunta sobre el tribunal
+    relacionado y su expediente. H14 salía PASS en las tres repeticiones
+    porque el modelo acertaba, no porque el control lo sostuviera. Es el
+    patrón del filtro de negación: un mecanismo que parece funcionar.
+
+    La otra mitad importa igual: no exigir datos que nadie pidió.
+    """
+
+    Q14 = ("En el amparo en revisión 677/2024, ¿la Primera Sala resolvió todos "
+           "los agravios? ¿Qué tribunal colegiado y qué expediente dieron origen?")
+
+    def _req(self, q):
+        from core.identidades import ResolutorDeIdentidades
+        from core.requisitos import construir_requisitos
+        u = ["677_2024_1SCJN", "VCN-001-2025", "178_2017_2TCC", "43_2021_3JD"]
+        return construir_requisitos(q, ResolutorDeIdentidades(u).resolver(q))
+
+    def _papeles(self, q):
+        return {r["papel"] for r in self._req(q) if r["tipo"] == "campos_registro"}
+
+    # ── El defecto exacto ────────────────────────────────────────────
+    def test_el_organo_emisor_no_satisface_el_tribunal_relacionado(self):
+        from core.requisitos import verificar
+        v = verificar(self._req(self.Q14), [{
+            "caseLink": "677_2024_1SCJN",
+            "judicialBody": "Primera Sala de la SCJN",
+        }])
+        assert not v["cumple"]
+        assert any("tribunal relacionado" in f for f in v["faltantes"])
+        assert any("expediente relacionado" in f for f in v["faltantes"])
+
+    def test_un_solo_lado_deja_el_otro_pendiente(self):
+        """El tribunal sin el expediente no completa el encargo."""
+        from core.requisitos import verificar
+        v = verificar(self._req(self.Q14), [{
+            "caseLink": "677_2024_1SCJN",
+            "relatedCollegiateCourt": "Primer Tribunal Colegiado…",
+        }])
+        assert not v["cumple"]
+        assert any("expediente relacionado" in f for f in v["faltantes"])
+        assert not any("tribunal relacionado" in f for f in v["faltantes"])
+
+    def test_con_los_dos_campos_cumple(self):
+        from core.requisitos import verificar
+        v = verificar(self._req(self.Q14), [{
+            "caseLink": "677_2024_1SCJN",
+            "relatedCollegiateCourt": "Primer Tribunal Colegiado…",
+            "relatedTccCaseFile": "565/2023",
+        }])
+        assert v["cumple"]
+
+    # ── La otra mitad: no exigir de más ──────────────────────────────
+    def test_pedir_solo_el_tribunal_no_exige_el_expediente(self):
+        p = self._papeles("En el amparo 677/2024, ¿qué tribunal colegiado "
+                          "conoció del asunto?")
+        assert "tribunal relacionado" in p
+        assert "expediente relacionado" not in p
+
+    def test_pedir_solo_el_expediente_no_exige_el_tribunal(self):
+        p = self._papeles("En el amparo 677/2024, ¿qué expediente le dio origen?")
+        assert "expediente relacionado" in p
+        assert "tribunal relacionado" not in p
+
+    def test_nombrar_un_tribunal_sigue_sin_exigir_campos(self):
+        """
+        "del Segundo Tribunal Colegiado" identifica el documento; no pregunta
+        cuál es. La regresión que esto evita ya nos costó una vez.
+        """
+        assert not self._papeles(
+            "Compara lo de VCN-001-2025 con lo del amparo 178/2017 del "
+            "Segundo Tribunal Colegiado")
+
+    # ── Fuentes alternativas del MISMO dato siguen en OR ─────────────
+    def _componente(self, v, papel):
+        """
+        El componente de un papel concreto. Mirar el `cumple` global mezcla
+        requisitos: "¿hubo algún voto en contra?" pide además evidencia de
+        voz, que un registro de expediente no puede satisfacer.
+        """
+        for c in v["componentes"]:
+            if papel in c["detalle"] or papel in c["descripcion"]:
+                return c
+        raise AssertionError(f"no hay componente para {papel}: {v['componentes']}")
+
+    def test_los_dos_campos_de_disidencia_son_alternativas(self):
+        from core.requisitos import verificar
+        q = "En el VCN-003-2025, ¿hubo algún voto en contra?"
+        for campo in ("dissentingOpinions", "dissentingAndConcurringOpinions"):
+            v = verificar(self._req(q), [{"caseLink": "VCN-003-2025",
+                                          campo: "Voto del comisionado X"}])
+            c = self._componente(v, "votos disidentes")
+            assert c["cumple"], f"{campo} debería bastar por sí solo"
+
+    def test_el_emisor_se_prueba_con_cualquiera_de_sus_dos_campos(self):
+        from core.requisitos import verificar
+        q = "¿Qué órgano dictó el criterio del 43/2021?"
+        for campo in ("judicialBody", "authority"):
+            v = verificar(self._req(q), [{"caseLink": "43_2021_3JD",
+                                          campo: "Juzgado Tercero de Distrito"}])
+            assert v["cumple"], f"{campo} debería bastar por sí solo"
