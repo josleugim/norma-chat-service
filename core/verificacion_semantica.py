@@ -78,6 +78,7 @@ Reglas:
 - Una regla general presente en un antecedente no respalda su atribución a otro acto.
 - Una conclusión que elimina una condición ("una vez que cause ejecutoria") no conserva el efecto jurídico: es "contradicted".
 - Si no hay evidencia citada para una afirmación, es "not_determined" con localizador nulo.
+- Cuando la evidencia sea un registro con renglones "campo: valor", cita el renglón completo tal cual, por ejemplo "relatedTccCaseFile: 565/2023". No lo parafrasees ni lo describas.
 - No evalúes ortografía, estilo ni completitud de la respuesta. Sólo el respaldo.
 
 Además, revisa los EJEMPLOS. Cuando la respuesta presenta un documento como caso de algo —"resolución donde X se trató como Y", "precedente de Z"— esa caracterización es una afirmación sobre el documento y hay que comprobarla. Devuelve en "ejemplos" un objeto por cada uno:
@@ -141,6 +142,34 @@ def _extraer_json(bruto: str) -> dict:
     return {}
 
 
+def texto_de_evidencia(doc: dict) -> str:
+    """
+    El contenido citable de un documento, como texto que se pueda citar.
+
+    Un criterio trae prosa y se usa tal cual. Un expediente son campos, y ahí
+    estaba el defecto que destapó la banda del 23-sep: se serializaban como
+    JSON crudo, el verificador no tenía una frase que copiar, y el contrato de
+    localizador —"copia entre 8 y 30 palabras textuales"— rechazaba casi todo.
+
+    Medido sobre 301 afirmaciones:
+
+        evidencia de criterios (prosa)   20% marcadas sin soporte
+        evidencia de registros (campos)  57%, con 22 de 27 localizadores fallidos
+
+    No era que las respuestas sobre registros estuvieran mal sustentadas: era
+    que no había nada citable. Renderizar `campo: valor` por renglón le da al
+    verificador algo que copiar y al código algo que comprobar.
+    """
+    texto = (doc.get("content") or doc.get("text") or "").strip()
+    if texto:
+        return texto
+    return "\n".join(
+        f"{k}: {v}" for k, v in doc.items()
+        if k not in ("ref", "metadata", "tipo_fuente")
+        and v not in (None, "", [], {})
+    )
+
+
 def construir_evidencia(registry, docs) -> dict:
     """
     `{marcador: {documento, texto}}` con lo que se citó en el turno.
@@ -158,14 +187,7 @@ def construir_evidencia(registry, docs) -> dict:
         if not ref:
             continue
         meta = d.get("metadata") or {}
-        texto = (d.get("content") or d.get("text") or "").strip()
-        if not texto:
-            # Un expediente no trae texto: su contenido son sus campos.
-            texto = json.dumps(
-                {k: v for k, v in d.items()
-                 if k not in ("ref", "metadata") and v not in (None, "", [], {})},
-                ensure_ascii=False,
-            )
+        texto = texto_de_evidencia(d)
         evidencia[ref] = {
             "documento": case_link_de(d) or "?",
             "texto": texto,
@@ -180,7 +202,10 @@ async def verificar(
     evidencia: dict,
     adapter,
     model: str,
-    max_tokens: int = 1500,
+    # 3000 y no 1500: con el default anterior, 13 de 60 respuestas de la
+    # banda del 23-sep devolvieron JSON truncado. Un verificador que no
+    # corre no es un verificador que aprueba.
+    max_tokens: int = 3000,
 ) -> dict:
     """
     Revisa el borrador contra su evidencia. **No bloquea nada.**

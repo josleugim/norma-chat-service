@@ -29,6 +29,7 @@ from core.requisitos import construir_requisitos, verificar as verificar_requisi
 from core.verificacion_semantica import (
     construir_evidencia as construir_evidencia_semantica,
     verificar as verificar_semantica,
+    texto_de_evidencia as texto_de_evidencia_semantica,
 )
 from core.validacion_salida import validar_borrador
 from core.voz import clasificar_voz, etiqueta as etiqueta_voz, VOTO_PARTICULAR, NO_IDENTIFICADA
@@ -495,7 +496,7 @@ class NormaPlusAgent:
                 [
                     {"ref": d.get("ref"),
                      "documento": case_link_de(d),
-                     "texto": (d.get("content") or d.get("text") or "")[:1500],
+                     "texto": texto_de_evidencia_semantica(d)[:1500],
                      "anchor": str((d.get("metadata") or {}).get("anchor") or "")[:400]}
                     for d in state.evidencia_acumulada
                     if isinstance(d, dict) and d.get("ref")

@@ -2556,3 +2556,59 @@ class TestVerificadorSemantico:
         r = asyncio.run(verificar("p", "b", self.EV, _Roto(), "m"))
         assert r["ejecutado"] is False
         assert "RuntimeError" in r["error"]
+
+
+class TestElRegistroTambienTieneQueSerCitable:
+    """
+    Lo destapó la banda del 23-sep. El verificador marcaba "sin soporte" el
+    57% de las afirmaciones cuando la evidencia era un registro de expediente,
+    contra 20% cuando era un criterio, y 22 de 27 localizadores fallidos caían
+    de ese lado.
+
+    No era que esas respuestas estuvieran mal sustentadas: los registros se
+    serializaban como JSON crudo y no había nada que citar. El contrato de
+    localizador estaba pensado para prosa.
+    """
+
+    REGISTRO = {
+        "ref": "E1", "caseLink": "677_2024_1SCJN",
+        "relatedTccCaseFile": "565/2023",
+        "relatedCollegiateCourt": "Primer Tribunal Colegiado",
+        "senseOfResolution": None, "metadata": {},
+    }
+
+    def test_un_registro_se_rinde_por_renglones(self):
+        from core.verificacion_semantica import texto_de_evidencia
+        t = texto_de_evidencia(self.REGISTRO)
+        assert "relatedTccCaseFile: 565/2023" in t
+        assert "ref" not in t, "el marcador no es contenido"
+        assert "senseOfResolution" not in t, "los vacíos no viajan"
+
+    def test_un_criterio_se_deja_como_esta(self):
+        from core.verificacion_semantica import texto_de_evidencia
+        doc = {"ref": "C1", "content": "La concentración debe notificarse antes."}
+        assert texto_de_evidencia(doc) == "La concentración debe notificarse antes."
+
+    def test_el_renglon_de_un_registro_es_localizable(self):
+        """
+        Es la propiedad que faltaba: que el código pueda comprobar una cita al
+        registro igual que comprueba una cita a un criterio.
+        """
+        from core.verificacion_semantica import (
+            _localizador_existe, texto_de_evidencia)
+        t = texto_de_evidencia(self.REGISTRO)
+        assert _localizador_existe("relatedTccCaseFile: 565/2023", t)
+        assert not _localizador_existe("relatedTccCaseFile: 999/2099", t)
+
+    def test_la_exportacion_y_el_verificador_usan_el_mismo_render(self):
+        """
+        El payload de la traza guardaba `content`, que en un registro está
+        vacío: la traza no llevaba el contenido de los registros. Tienen que
+        salir de la misma función o vuelven a divergir.
+        """
+        import re
+        from pathlib import Path
+        src = Path("agent/agent.py").read_text(encoding="utf-8")
+        bloque = src[src.index('"evidencia_payload"'):][:600]
+        assert "texto_de_evidencia_semantica(d)" in bloque, (
+            "la exportación debe usar el render del verificador")
