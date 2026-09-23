@@ -1864,3 +1864,90 @@ class TestElCacheNoBorraCondicionesEnSilencio:
         t = "El pleno resolvió. " * 12 + "En consecuencia, no se sanciona."
         r = recortar_sin_borrar_en_silencio(t, limite=100)
         assert "negaciones" in r
+
+
+class TestPresupuestoDePeticionesNoDeLlamadas:
+    """
+    §1.7 de COFECE: *"Una llamada `buscar_criterios` para dos documentos
+    realiza dos HTTP internos: contar sólo llamadas elegidas por el modelo
+    oculta ese coste."*
+
+    Tiene razón, y el punto ciego lo introdujimos nosotros con la búsqueda por
+    documento del 22-sep. El límite de seis llamadas no acota nada si una sola
+    puede abrir diez peticiones.
+
+    Lo que se fija aquí no es sólo el tope: es que al agotarse **se declare**
+    qué documentos quedaron sin consultar. Una comparación a la que le falta
+    un lado tiene que poder saberse incompleta.
+    """
+
+    def _agente(self, limite):
+        from agent.agent import NormaPlusAgent
+
+        class _Criterio:
+            def __init__(self, cid, case_link):
+                self.id, self.case_link = cid, case_link
+
+            def model_dump(self):
+                return {"id": self.id,
+                        "metadata": {"id_expediente": self.case_link},
+                        "content": "texto"}
+
+        class _Criterios:
+            def __init__(self): self.llamadas = []
+
+            async def search(self, query, top_k=15, filters=None, collector=None):
+                cl = (filters or {}).get("caseLink")
+                self.llamadas.append(cl)
+                # El cliente real devuelve objetos con `.id` y `.model_dump()`,
+                # no diccionarios. Un doble que devuelva dicts pasa la prueba y
+                # esconde el contrato.
+                return [_Criterio(f"c{len(self.llamadas)}", cl)]
+
+        ag = NormaPlusAgent.__new__(NormaPlusAgent)
+        ag.criterios = _Criterios()
+        ag.estadistica = type("E", (), {"universo": None})()
+        ag.max_http_requests = limite
+        return ag
+
+    async def _correr(self, ag, exps, state):
+        return await ag._buscar_criterios_por_documento(
+            "query", exps, 15, None, state)
+
+    def test_cada_documento_gasta_una_peticion(self):
+        import asyncio
+        from agent.turn_state import TurnState
+        ag, st = self._agente(12), TurnState()
+        asyncio.run(self._correr(ag, ["VCN-001-2025", "VCN-002-2024"], st))
+        assert st.peticiones_http == 2
+        assert ag.criterios.llamadas == ["VCN-001-2025", "VCN-002-2024"]
+
+    def test_al_agotarse_no_se_consulta_de_mas(self):
+        import asyncio
+        from agent.turn_state import TurnState
+        ag, st = self._agente(2), TurnState()
+        exps = ["VCN-001-2025", "VCN-002-2024", "VCN-003-2020", "VCN-004-2020"]
+        asyncio.run(self._correr(ag, exps, st))
+        assert len(ag.criterios.llamadas) == 2
+        assert st.peticiones_http == 2
+
+    def test_lo_no_consultado_queda_declarado(self):
+        """Lo que importa: el recorte no puede ser silencioso."""
+        import asyncio
+        from agent.turn_state import TurnState
+        ag, st = self._agente(1), TurnState()
+        asyncio.run(self._correr(ag, ["VCN-001-2025", "VCN-002-2024"], st))
+
+        omitidos = [r["expediente"] for r in st.recortes_por_presupuesto]
+        assert omitidos == ["VCN-002-2024"]
+
+        cob = {c["expediente"]: c for c in st.cobertura_por_documento}
+        assert "presupuesto" in cob["VCN-002-2024"]["motivo"]
+        assert cob["VCN-002-2024"]["recuperados"] == 0
+
+    def test_sin_estado_no_revienta(self):
+        """El agente se usa sin `TurnState` en pruebas y humos."""
+        import asyncio
+        ag = self._agente(1)
+        asyncio.run(self._correr(ag, ["VCN-001-2025", "VCN-002-2024"], None))
+        assert len(ag.criterios.llamadas) == 2

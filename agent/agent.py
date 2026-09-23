@@ -69,6 +69,7 @@ class NormaPlusAgent:
         citation_builder: CitationBuilder,
         evidence_cache: EvidenceCache,
         max_tool_calls: int = 6,
+        max_http_requests: int = 12,
         trace_sink=None,
         manifest_store=None,
         settings=None,
@@ -80,6 +81,9 @@ class NormaPlusAgent:
         self.citations = citation_builder
         self.evidence_cache = evidence_cache
         self.max_tool_calls = max_tool_calls
+        # Peticiones de recuperación, que no es lo mismo: una llamada
+        # sobre N documentos hace N peticiones. Ver config.py.
+        self.max_http_requests = max_http_requests
 
         # Resolutor de identidades documentales (C02). Se construye desde el
         # universo consultable, así que sólo puede devolver expedientes que
@@ -467,6 +471,17 @@ class NormaPlusAgent:
                         case_link_de(d) for d in state.evidencia_acumulada
                         if case_link_de(d)
                     }),
+                },
+                "derived")
+            # El presupuesto real gastado. `tool_calls_count` cuenta lo que
+            # eligió el modelo; esto cuenta lo que costó de verdad.
+            collector.set_decision(
+                "presupuesto_peticiones",
+                {
+                    "peticiones_http": state.peticiones_http,
+                    "limite": self.max_http_requests,
+                    "agotado": state.peticiones_http >= self.max_http_requests,
+                    "documentos_no_consultados": state.recortes_por_presupuesto,
                 },
                 "derived")
             collector.set_decision(
@@ -887,6 +902,27 @@ class NormaPlusAgent:
                 cobertura.append({"expediente": exp, "recuperados": 0,
                                   "motivo": "fuera del universo consultable"})
                 continue
+            # Presupuesto de peticiones, no de llamadas (§1.7 de COFECE). Cada
+            # documento es una petición porque el endpoint acepta un solo
+            # `caseLink`; sin este control, comparar diez documentos gasta diez
+            # peticiones bajo una sola llamada del modelo.
+            #
+            # Y si se agota NO se calla: el documento no consultado se declara
+            # en la cobertura. Una comparación a la que le falta un lado tiene
+            # que poder saberse incompleta — es el defecto de H15.
+            if state is not None and state.peticiones_http >= self.max_http_requests:
+                cobertura.append({
+                    "expediente": exp, "recuperados": 0,
+                    "motivo": "no se consultó: presupuesto de peticiones agotado",
+                })
+                state.recortes_por_presupuesto.append({
+                    "expediente": exp,
+                    "peticiones_gastadas": state.peticiones_http,
+                    "limite": self.max_http_requests,
+                })
+                continue
+            if state is not None:
+                state.peticiones_http += 1
             parciales = await self.criterios.search(
                 query=query,
                 top_k=top_k,

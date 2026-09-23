@@ -119,6 +119,17 @@ class TurnState:
     # buscara otra cosa. La verificación se hace sobre esta acumulación.
     evidencia_acumulada: list[dict] = field(default_factory=list)
 
+    # Peticiones HTTP de recuperación gastadas en el turno.
+    #
+    # No es `tool_calls_count`. Una llamada a `buscar_criterios` sobre dos
+    # documentos hace dos peticiones, porque el endpoint acepta un solo
+    # `caseLink`. COFECE lo señaló en §1.7 y el punto ciego lo introdujimos
+    # nosotros al hacer la búsqueda por documento.
+    peticiones_http: int = 0
+    # Documentos que quedaron sin consultar por presupuesto. Van aparte para
+    # que una comparación incompleta no se lea como una comparación.
+    recortes_por_presupuesto: list[dict] = field(default_factory=list)
+
     def acumular_evidencia(self, docs) -> int:
         """
         Agrega documentos recuperados, sin repetir. Devuelve cuántos son nuevos.

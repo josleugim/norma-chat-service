@@ -181,6 +181,7 @@ async def lifespan(app: FastAPI):
         citation_builder=citation_builder,
         evidence_cache=evidence_cache,
         max_tool_calls=settings.agent_max_tool_calls,
+        max_http_requests=settings.agent_max_http_requests,
         trace_sink=trace_sink,
         manifest_store=manifest_store,
         settings=settings,

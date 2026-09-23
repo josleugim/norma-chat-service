@@ -23,6 +23,17 @@ class Settings(BaseSettings):
 
     # --- Agente ---
     agent_max_tool_calls: int = 6
+    # Peticiones HTTP de recuperación por turno, que NO es lo mismo.
+    #
+    # Lo señaló COFECE en §1.7 de su revisión del 22-sep y tiene razón: una
+    # llamada a `buscar_criterios` sobre dos documentos hace dos peticiones al
+    # endpoint, porque el filtro acepta un solo `caseLink`. Contar sólo las
+    # llamadas que elige el modelo oculta ese costo, y el punto ciego lo
+    # introdujimos nosotros con la búsqueda por documento del 22-sep.
+    #
+    # Doce es su propuesta inicial. Cuando se agota no se calla: los
+    # documentos que quedaron sin consultar se declaran en la cobertura.
+    agent_max_http_requests: int = 12
     agent_default_temperature: float = 0.3
     agent_max_tokens: int = 4096
 
