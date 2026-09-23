@@ -1809,3 +1809,58 @@ class TestLaEvidenciaSeAcumulaEntreHerramientas:
         st = TurnState()
         otro = dict(self.CRITERIO, id="c2", content="voto particular")
         assert st.acumular_evidencia([self.CRITERIO, otro]) == 2
+
+
+class TestElCacheNoBorraCondicionesEnSilencio:
+    """
+    §7 de la revisión del 22-sep: *"El límite de 400 caracteres del cache no
+    debe eliminar autor, negación, condición o atribución"*.
+
+    El caso testigo es H18: la conclusión pierde "una vez que cause ejecutoria"
+    y una multa condicionada se lee como firme. Un efecto sin su condición es
+    un hecho distinto, y desde el texto recortado no se nota.
+    """
+
+    def test_corto_pasa_intacto(self):
+        from core.evidence_cache import recortar_sin_borrar_en_silencio
+        t = "La Sala concedió el amparo."
+        assert recortar_sin_borrar_en_silencio(t) == t
+
+    def test_declara_que_falta_texto(self):
+        from core.evidence_cache import recortar_sin_borrar_en_silencio
+        t = "Hecho. " * 300
+        r = recortar_sin_borrar_en_silencio(t, limite=100)
+        assert "fragmento recortado" in r
+        assert len(r) < len(t)
+
+    def test_avisa_cuando_lo_omitido_lleva_una_condicion(self):
+        from core.evidence_cache import recortar_sin_borrar_en_silencio
+        t = ("Se ordena la reindividualización de la multa. " * 8
+             + "Lo anterior una vez que cause ejecutoria la presente.")
+        r = recortar_sin_borrar_en_silencio(t, limite=120)
+        assert "condiciones" in r
+        assert "buscar_criterios" in r
+
+    def test_no_avisa_de_material_sensible_si_no_lo_hay(self):
+        from core.evidence_cache import recortar_sin_borrar_en_silencio
+        t = "Se analizó el mercado relevante de la zona. " * 20
+        r = recortar_sin_borrar_en_silencio(t, limite=120)
+        assert "fragmento recortado" in r
+        assert "condiciones" not in r
+
+    def test_no_corta_a_media_palabra(self):
+        from core.evidence_cache import recortar_sin_borrar_en_silencio
+        t = "palabra " * 200
+        r = recortar_sin_borrar_en_silencio(t, limite=100)
+        cabeza = r.split("[…")[0].strip()
+        assert cabeza.endswith("palabra")
+
+    def test_la_negacion_cuenta_como_material_sensible(self):
+        """
+        Es el par que ya nos costó una vez: "no sanciona" y "sanciona"
+        comparten casi todas las palabras y significan lo contrario.
+        """
+        from core.evidence_cache import recortar_sin_borrar_en_silencio
+        t = "El pleno resolvió. " * 12 + "En consecuencia, no se sanciona."
+        r = recortar_sin_borrar_en_silencio(t, limite=100)
+        assert "negaciones" in r
