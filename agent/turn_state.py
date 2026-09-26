@@ -126,6 +126,9 @@ class TurnState:
     # `caseLink`. COFECE lo señaló en §1.7 y el punto ciego lo introdujimos
     # nosotros al hacer la búsqueda por documento.
     peticiones_http: int = 0
+    # Ampliación dentro del precedente mejor rankeado: una vez por turno.
+    amplio_precedente: bool = False
+    ampliacion_precedente: list[dict] = field(default_factory=list)
     # Resultado del verificador semántico (I5). En evaluación: se guarda
     # para medirlo, no condiciona la publicación.
     verificacion_semantica: dict | None = None

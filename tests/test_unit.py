@@ -3355,3 +3355,159 @@ class TestUnEjemploTieneQueDemostrarSuPropiedad:
         c = self._comp(self.Q16, [self._crit("VCN-005-2024")])
         assert c["cumple"]
         assert "no que el pasaje demuestre" in c["detalle"]
+
+
+class TestAmpliarDentroDelPrecedente:
+    """
+    §4.4 de la revisión del 25-sep. H08 pide "una resolución VCN que lo
+    explique" y las tres corridas hicieron dos búsquedas ABIERTAS, omitiendo la
+    evaluación conjunta de actos. El criterio que la sostiene —4212 de
+    VCN-001-2025— nunca llegó al contexto.
+
+    Verificado contra staging el 26-sep: no estaba fuera de alcance. Filtrando
+    por ese documento sale en posición 2 o 3. Estaba fuera del top-k de una
+    consulta que no acotaba documento.
+
+    **El selector es el ranking, no el conteo.** La primera versión de esto
+    eligió "el documento que más aportó" y amplió sobre dos documentos
+    irrelevantes, llevando la evidencia de 20 a 66 entradas. El conteo amplifica
+    lo que la búsqueda abierta devolvió más, que no es pertinencia.
+    """
+
+    class _Cli:
+        """Devuelve por documento, en orden de ranking."""
+        def __init__(self, abierta, por_doc):
+            self.abierta, self.por_doc, self.llamadas = abierta, por_doc, []
+
+        async def search(self, query, top_k=15, filters=None, collector=None):
+            cl = (filters or {}).get("caseLink")
+            self.llamadas.append(cl)
+            return self.abierta if cl is None else self.por_doc.get(cl, [])
+
+    class _Crit:
+        def __init__(self, cid, cl): self.id, self.cl = cid, cl
+        def model_dump(self):
+            return {"id": self.id, "metadata": {"id_expediente": self.cl},
+                    "content": f"texto {self.id}"}
+
+    def _agente(self, cli, limite=12):
+        from agent.agent import NormaPlusAgent
+        ag = NormaPlusAgent.__new__(NormaPlusAgent)
+        ag.criterios = cli
+        ag.max_http_requests = limite
+        return ag
+
+    def _estado(self, con_ejemplo=True):
+        from agent.turn_state import TurnState
+        st = TurnState()
+        if con_ejemplo:
+            st.requisitos = [{"tipo": "ejemplo", "valor": 1,
+                              "tipo_documento": "resolucion",
+                              "propiedad": "x", "descripcion": "d",
+                              "obligatorio": True}]
+        return st
+
+    def _correr(self, ag, st, abierta):
+        import asyncio
+        return asyncio.run(ag._ampliar_precedente("q", abierta, None, st))
+
+    def test_amplia_sobre_el_mejor_rankeado_no_sobre_el_que_mas_aporta(self):
+        """
+        `B` aparece tres veces y `A` una, pero `A` va primero. El ranking del
+        servicio es la señal de pertinencia; el conteo no.
+        """
+        C = self._Crit
+        abierta = [C("1", "A"), C("2", "B"), C("3", "B"), C("4", "B")]
+        cli = self._Cli(abierta, {"A": [C("9", "A")], "B": [C("8", "B")]})
+        ag, st = self._agente(cli), self._estado()
+        self._correr(ag, st, abierta)
+        assert cli.llamadas[0] == "A"
+
+    def test_solo_amplia_si_la_pregunta_pide_ejemplares(self):
+        C = self._Crit
+        abierta = [C("1", "A")]
+        cli = self._Cli(abierta, {"A": [C("9", "A")]})
+        ag, st = self._agente(cli), self._estado(con_ejemplo=False)
+        r = self._correr(ag, st, abierta)
+        assert cli.llamadas == [] and len(r) == 1
+
+    def test_una_sola_vez_por_turno(self):
+        C = self._Crit
+        abierta = [C("1", "A")]
+        cli = self._Cli(abierta, {"A": [C("9", "A")]})
+        ag, st = self._agente(cli), self._estado()
+        self._correr(ag, st, abierta)
+        n = len(cli.llamadas)
+        self._correr(ag, st, abierta)
+        assert len(cli.llamadas) == n
+
+    def test_no_repite_lo_que_ya_estaba(self):
+        C = self._Crit
+        abierta = [C("1", "A")]
+        cli = self._Cli(abierta, {"A": [C("1", "A"), C("9", "A")]})
+        ag, st = self._agente(cli), self._estado()
+        r = self._correr(ag, st, abierta)
+        assert [x.id for x in r] == ["1", "9"]
+
+    def test_descarta_lo_que_no_es_del_documento(self):
+        """El filtro de la API es substring, no igualdad."""
+        C = self._Crit
+        abierta = [C("1", "A")]
+        cli = self._Cli(abierta, {"A": [C("9", "A_2025_10_09"), C("7", "A")]})
+        ag, st = self._agente(cli), self._estado()
+        r = self._correr(ag, st, abierta)
+        assert [x.id for x in r] == ["1", "7"]
+
+    def test_acota_cuantos_pasajes_trae(self):
+        """
+        El tope importa: una primera versión traía 23 por documento y llenó la
+        evidencia de ruido.
+        """
+        from agent.agent import NormaPlusAgent
+        C = self._Crit
+        abierta = [C("1", "A")]
+        muchos = [C(str(100 + i), "A") for i in range(30)]
+        cli = self._Cli(abierta, {"A": muchos})
+        ag, st = self._agente(cli), self._estado()
+        r = self._correr(ag, st, abierta)
+        assert len(r) == 1 + NormaPlusAgent._AMPLIAR_PASAJES
+
+    def test_declara_cobertura_parcial(self):
+        """
+        Un top-k dentro de un documento no prueba que no tenga más
+        condiciones, y COFECE prohíbe afirmar "no hay más" por eso.
+        """
+        C = self._Crit
+        abierta = [C("1", "A")]
+        cli = self._Cli(abierta, {"A": [C("9", "A")]})
+        ag, st = self._agente(cli), self._estado()
+        self._correr(ag, st, abierta)
+        amp = st.ampliacion_precedente[0]
+        assert amp["cobertura"] == "parcial"
+        assert "no acredita" in amp["motivo_limite"]
+
+    def test_respeta_el_presupuesto(self):
+        C = self._Crit
+        abierta = [C("1", "A"), C("2", "B")]
+        cli = self._Cli(abierta, {"A": [C("9", "A")], "B": [C("8", "B")]})
+        ag, st = self._agente(cli, limite=1), self._estado()
+        self._correr(ag, st, abierta)
+        assert len(cli.llamadas) == 1
+        assert any("presupuesto" in (x.get("motivo_limite") or "")
+                   for x in st.ampliacion_precedente)
+
+    def test_un_error_del_servicio_no_tumba_la_busqueda(self):
+        C = self._Crit
+
+        class _Roto(self._Cli):
+            async def search(self, query, top_k=15, filters=None, collector=None):
+                if (filters or {}).get("caseLink"):
+                    raise RuntimeError("502")
+                return self.abierta
+
+        abierta = [C("1", "A")]
+        cli = _Roto(abierta, {})
+        ag, st = self._agente(cli), self._estado()
+        r = self._correr(ag, st, abierta)
+        assert [x.id for x in r] == ["1"]
+        assert st.ampliacion_precedente[0]["motivo_limite"] == "RuntimeError"

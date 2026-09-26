@@ -939,6 +939,105 @@ class NormaPlusAgent:
 
         return revision["texto"]
 
+    # Cuántos documentos se amplían y cuántos pasajes se toman de cada uno.
+    #
+    # Medido contra staging el 26-sep: filtrando por el documento, el criterio
+    # que H08 necesitaba sale en posición 2 o 3. Ocho alcanza de sobra, y el
+    # tope importa: una primera versión traía 23 por documento y llevó la
+    # evidencia de 20 a 66 entradas de ruido.
+    _AMPLIAR_DOCUMENTOS = 2
+    _AMPLIAR_PASAJES = 8
+
+    async def _ampliar_precedente(self, query: str, results: list,
+                                  collector, state) -> list:
+        """
+        Una búsqueda dirigida dentro del precedente mejor rankeado.
+
+        §4.4 de la revisión del 25-sep. H08 pide "una resolución VCN que lo
+        explique" y las tres corridas hicieron dos búsquedas ABIERTAS, omitiendo
+        la evaluación conjunta de actos. El criterio que la sostiene —4212 de
+        VCN-001-2025, 221 caracteres— nunca llegó al contexto.
+
+        Verificado contra staging: no estaba fuera de alcance, estaba fuera del
+        top-k de una consulta que no acotaba documento. Filtrando por
+        VCN-001-2025 sale en posición 2 o 3.
+
+        **El selector es el ranking, no el conteo.** La primera versión de esto
+        eligió "el documento que más aportó" y amplió sobre dos documentos
+        irrelevantes: el conteo amplifica lo que la búsqueda abierta devolvió
+        más, que no es lo mismo que pertinencia. Medido, el mejor rankeado sí es
+        el precedente correcto —VCN-005-2024 en H16, VCN-001-2025 en la segunda
+        consulta de H08—.
+
+        Lo que NO se puede afirmar es cobertura completa: una búsqueda semántica
+        con tope dentro de un documento no prueba que no tenga más condiciones.
+        """
+        if state is None or not getattr(state, "requisitos", None):
+            return results
+        if not [r for r in state.requisitos if r["tipo"] == "ejemplo"]:
+            return results
+        if getattr(state, "amplio_precedente", False):
+            return results          # una sola vez por turno
+
+        def doc_de(r):
+            return case_link_de(r.model_dump() if hasattr(r, "model_dump") else r)
+
+        # Por orden de aparición, que es el orden del ranking del servicio.
+        candidatos: list[str] = []
+        for r in results:
+            cl = doc_de(r)
+            if cl and cl not in candidatos:
+                candidatos.append(cl)
+            if len(candidatos) >= self._AMPLIAR_DOCUMENTOS:
+                break
+        if not candidatos:
+            return results
+
+        vistos = {str((r.model_dump() if hasattr(r, "model_dump") else r).get("id"))
+                  for r in results}
+        agregados, ampliacion = [], []
+        for cl in candidatos:
+            if getattr(state, "peticiones_http", 0) >= self.max_http_requests:
+                ampliacion.append({"documento": cl, "recuperados": 0,
+                                   "motivo_limite": "presupuesto agotado"})
+                continue
+            state.peticiones_http += 1
+            try:
+                extra = await self.criterios.search(
+                    query=query, top_k=25, filters={"caseLink": cl},
+                    collector=collector,
+                )
+            except Exception as e:
+                ampliacion.append({"documento": cl, "recuperados": 0,
+                                   "motivo_limite": type(e).__name__})
+                continue
+            nuevos = 0
+            for r in extra:
+                if nuevos >= self._AMPLIAR_PASAJES:
+                    break
+                d = r.model_dump() if hasattr(r, "model_dump") else r
+                # El filtro de la API es substring, no igualdad.
+                if case_link_de(d) != cl or str(d.get("id")) in vistos:
+                    continue
+                vistos.add(str(d.get("id")))
+                agregados.append(r)
+                nuevos += 1
+            ampliacion.append({
+                "documento": cl,
+                "recuperados": nuevos,
+                "cobertura": "parcial",
+                "motivo_limite": (
+                    "búsqueda semántica con tope: no acredita que el documento "
+                    "no tenga más reglas o condiciones"
+                ),
+            })
+
+        state.amplio_precedente = True
+        state.ampliacion_precedente = ampliacion
+        if collector is not None:
+            collector.set_decision("ampliacion_precedente", ampliacion, "derived")
+        return list(results) + agregados
+
     def _avisos_de_plazos(self, calculos: list[dict]) -> tuple[list, dict]:
         """
         Acuerdos coincidentes y estado de cobertura para los plazos calculados.
@@ -1164,6 +1263,9 @@ class NormaPlusAgent:
                 query=args["query"],
                 top_k=args.get("top_k", 15),
                 collector=collector,
+            )
+            results = await self._ampliar_precedente(
+                args["query"], results, collector, state
             )
         # Voz del criterio (C05). Un voto particular dice lo contrario de la
         # sentencia: atribuirlo al tribunal cambia el sentido de lo resuelto.

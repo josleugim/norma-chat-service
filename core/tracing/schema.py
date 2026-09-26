@@ -169,6 +169,8 @@ class Decisions(BaseModel):
     # El payload exacto de evidencia que recibió el modelo. Sin esto, una
     # verificación semántica no se puede replicar sobre una corrida pasada.
     evidencia_payload: list[dict[str, Any]] = Field(default_factory=list)
+    # Ampliación dirigida dentro del precedente, con su cobertura declarada.
+    ampliacion_precedente: list[dict[str, Any]] = Field(default_factory=list)
     used_cached_evidence: bool = False
     answered_without_retrieval: bool = False
     final_answer_path: Optional[str] = None
