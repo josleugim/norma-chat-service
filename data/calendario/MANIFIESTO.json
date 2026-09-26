@@ -1,0 +1,70 @@
+{
+  "version": "norma_calendario_2026-09-22.1",
+  "archivos": [
+    {
+      "archivo": "LEEME_integracion.md",
+      "bytes": 6371,
+      "sha256": "90e74b72e45f651946f8b2e17ba41797facaa3315a95ae7502110b2039d90143"
+    },
+    {
+      "archivo": "calendario_diario.csv",
+      "bytes": 744116,
+      "sha256": "b891f87ec5f769b99dfd45cbbf4a79baa95c2394e5246b148e4e2eef1ab359ed"
+    },
+    {
+      "archivo": "calendario_norma.json",
+      "bytes": 3045385,
+      "sha256": "ed021a0abb0a9fb2c238d3888a03174ffadf5fa294c2c93781429241c37b24f5"
+    },
+    {
+      "archivo": "controles.csv",
+      "bytes": 4407,
+      "sha256": "35061705eb31fe656bf8c228e9e2fe2d981adf1c30a172c5bd3a684227af68f6"
+    },
+    {
+      "archivo": "eventos_juridicos.csv",
+      "bytes": 2384,
+      "sha256": "5a7c7e1cc4ae360127eaae15897f6b8793f686a00c6c0984ccd0de8b2fe6f47d"
+    },
+    {
+      "archivo": "excepciones.csv",
+      "bytes": 18554,
+      "sha256": "c473fd2d8590e9e8ca866b18b7fec3f28eac5647ed4a9b1af2c2494f69f9c59d"
+    },
+    {
+      "archivo": "fuentes.csv",
+      "bytes": 14642,
+      "sha256": "a86050c5e9315dab2b40f6ae582031a03e397d251589371b3b38b9aba3fb5183"
+    },
+    {
+      "archivo": "inhabiles_generales.csv",
+      "bytes": 310134,
+      "sha256": "82d473ac8c4d8b0b2785f5860ec5a15acbd7f06dfa48ce3033e123cbc2c48c63"
+    },
+    {
+      "archivo": "pruebas_logica.json",
+      "bytes": 52303,
+      "sha256": "e9d6517fb409d0802c0ca2a233660ca029a75f3550378b64c354b9aeb1183eda"
+    },
+    {
+      "archivo": "suspensiones.csv",
+      "bytes": 4996,
+      "sha256": "3613f6226c7cd4256f3f5d5b4cea13c61d019812c418aa00f3c8ad184a19638a"
+    },
+    {
+      "archivo": "validacion_entrega.json",
+      "bytes": 569,
+      "sha256": "f93f2f02a86adf3bc378a5597fd94f2555b8405e75e63d09748ca81d3e96623e"
+    },
+    {
+      "archivo": "validar_calendario.py",
+      "bytes": 3137,
+      "sha256": "99383c5a3527fbc83e9fec68605780aa85f189b75162d429e1c7b1968975c4fd"
+    },
+    {
+      "archivo": "calendario_COFECE_CNA_Norma_2026-09-22.xlsx",
+      "bytes": 518372,
+      "sha256": "9ada90c1d95a5183d7d7880630cf0b18ca81002c8c8b848e8c74999e30f51c68"
+    }
+  ]
+}

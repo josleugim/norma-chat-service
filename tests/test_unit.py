@@ -3030,3 +3030,138 @@ class TestLaCorridaSeIdentificaYLaSuiteViajaCompleta:
         assert 'pruebas.glob("*.py")' in src, (
             "el ZIP debe copiar la suite completa, no un archivo elegido a mano")
         assert "COMO_EJECUTAR" in src, "y el comando exacto para reejecutarla"
+
+
+class TestAvisosDeSuspensionSinDecidirSuAplicacion:
+    """
+    §8 de la revisión del 25-sep, con el alcance que Imanol aprobó:
+
+        "Contar días hábiles conforme al calendario general de la autoridad y
+         mostrar por separado acuerdos de suspensión coincidentes, con fechas y
+         enlaces, sin decidir ni descontar su aplicación al expediente."
+
+    Eso desbloqueó lo que arrastrábamos desde el 22-sep. Habíamos pedido que
+    alguien decidiera si las concentraciones estaban en la excepción de
+    CFCE-084-2020, porque sin esa respuesta siete VCN no tenían número
+    defendible. La decisión fue mejor que la pregunta: no hace falta decidirlo.
+    """
+
+    SIETE = [
+        ("VCN-001-2020", "2020-03-02", "2020-07-13", ["S01","S02","S03","S04","S05","S06"]),
+        ("VCN-002-2020", "2020-03-20", "2020-04-16", ["S01"]),
+        ("VCN-003-2020", "2020-05-25", "2020-07-22", ["S03","S04","S05","S06"]),
+        ("VCN-004-2020", "2020-06-18", "2020-07-22", ["S05","S06"]),
+        ("VCN-005-2020", "2020-11-24", "2021-02-04", ["S07","S08","S09","S10"]),
+        ("VCN-001-2025", "2025-08-05", "2025-08-28", ["S14"]),
+        ("VCN-002-2024", "2025-06-20", "2025-09-25", ["S14"]),
+    ]
+
+    def _cat(self):
+        from temporal.avisos import CatalogoAvisos
+        return CatalogoAvisos.desde_directorio("data/calendario")
+
+    def _d(self, s):
+        import datetime as dt
+        return dt.date.fromisoformat(s)
+
+    def test_los_siete_intervalos_recuperan_sus_acuerdos(self):
+        """Su criterio de aceptación, tal cual lo tabuló."""
+        cat = self._cat()
+        for exp, i, f, esperado in self.SIETE:
+            avisos = cat.avisos_para(self._d(i), self._d(f), "COFECE") or \
+                     cat.avisos_para(self._d(i), self._d(f))
+            assert [a["id"] for a in avisos] == esperado, exp
+
+    def test_ningun_aviso_decide_su_aplicacion(self):
+        from temporal.avisos import NO_EVALUADA
+        cat = self._cat()
+        avisos = cat.avisos_para(self._d("2020-03-20"), self._d("2020-04-16"))
+        assert avisos
+        for a in avisos:
+            assert a["aplicabilidad_al_expediente"] == NO_EVALUADA
+
+    def test_el_aviso_lleva_periodo_y_enlace(self):
+        """Sin fechas ni fuente, el usuario no puede revisar la aplicación."""
+        cat = self._cat()
+        a = cat.avisos_para(self._d("2020-03-20"), self._d("2020-04-16"))[0]
+        assert a["periodo_inicio"] == "2020-03-23"
+        assert a["periodo_fin"] == "2020-04-17"
+        assert a["url"] and a["url"].startswith("http")
+        assert a["acuerdo"] == "CFCE-084-2020"
+
+    def test_un_periodo_ajeno_no_produce_avisos(self):
+        cat = self._cat()
+        assert cat.avisos_para(self._d("2016-01-01"), self._d("2016-03-01")) == []
+
+    def test_no_se_duplica_el_mismo_acuerdo(self):
+        cat = self._cat()
+        avisos = cat.avisos_para(self._d("2020-01-01"), self._d("2021-12-31"))
+        ids = [a["id"] for a in avisos]
+        assert len(ids) == len(set(ids))
+
+    # ── Las dos coberturas, separadas ────────────────────────────────
+    def test_un_periodo_sin_calendario_confirmado_se_declara(self):
+        """C01: el calendario de 2018 no se revalidó."""
+        c = self._cat().cobertura_calendario_general(
+            self._d("2018-05-01"), self._d("2018-06-01"))
+        assert c["completa"] is False
+        assert "C01" in [p["id"] for p in c["periodos_sin_confirmar"]]
+
+    def test_un_periodo_con_calendario_confirmado_pasa(self):
+        c = self._cat().cobertura_calendario_general(
+            self._d("2020-03-20"), self._d("2020-04-16"))
+        assert c["completa"] is True
+
+    def test_una_limitacion_de_avisos_no_toca_la_cobertura_del_conteo(self):
+        """
+        Textual: "Un pendiente de otro periodo no bloquea la operación ajena a
+        él." C04 es sobre excepciones COVID: limita los avisos, no el conteo.
+        """
+        cat = self._cat()
+        ini, fin = self._d("2020-04-20"), self._d("2020-06-12")
+        assert cat.cobertura_calendario_general(ini, fin)["completa"] is True
+        av = cat.cobertura_avisos(ini, fin)
+        assert av["completa"] is False
+        assert "C04" in [x["id"] for x in av["limitaciones"]]
+
+    def test_un_catalogo_ausente_no_dice_que_no_hubo_suspensiones(self):
+        """
+        Un error de lectura no puede convertirse en "no hubo acuerdos": son
+        cosas distintas y COFECE lo señala expresamente.
+        """
+        from temporal.avisos import CatalogoAvisos
+        vacio = CatalogoAvisos.desde_directorio("data/no_existe")
+        assert vacio.cargado is False
+        c = vacio.cobertura_avisos(self._d("2020-03-20"), self._d("2020-04-16"))
+        assert c["completa"] is False and c["catalogo_cargado"] is False
+
+    def test_un_acuerdo_sin_periodo_se_declara_y_no_se_inventa(self):
+        """
+        S11 y S12 no tienen inicio ni fin: su rango está pendiente de
+        normalizar. No se les puede calcular coincidencia, y saltarlos en
+        silencio afirmaría una lista completa que no lo es.
+
+        Lo encontró esta prueba: la primera versión los descartaba sin decir
+        nada. Control C03: "Fin vacío NO significa suspensión indefinida."
+        """
+        cat = self._cat()
+        sin_periodo = cat.acuerdos_sin_periodo()
+        assert {s["id"] for s in sin_periodo} == {"S11", "S12"}
+        for s in sin_periodo:
+            assert "no está normalizado" in s["motivo"]
+
+    def test_esos_acuerdos_dejan_la_cobertura_de_avisos_incompleta(self):
+        cat = self._cat()
+        c = cat.cobertura_avisos(self._d("2016-01-01"), self._d("2016-03-01"))
+        assert c["completa"] is False
+        assert {s["id"] for s in c["acuerdos_sin_periodo"]} == {"S11", "S12"}
+
+    def test_pero_no_se_presentan_como_coincidencias(self):
+        """Declarar la limitación no es inventar una coincidencia."""
+        cat = self._cat()
+        avisos = cat.avisos_para(self._d("2013-01-01"), self._d("2030-01-01"))
+        assert "S11" not in [a["id"] for a in avisos]
+
+    def test_la_cifra_lleva_su_etiqueta_de_alcance(self):
+        from temporal.avisos import ETIQUETA_ALCANCE
+        assert "sin ajustar suspensiones" in ETIQUETA_ALCANCE
