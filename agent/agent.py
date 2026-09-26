@@ -25,6 +25,7 @@ from agent.tools import TOOLS
 from prompts.system import AGENT_SYSTEM_PROMPT, TITLE_GENERATION_PROMPT
 from core.fuentes import case_link_de, clasificar_fuente, composicion
 from core.identidades import ResolutorDeIdentidades
+from temporal.avisos import ETIQUETA_ALCANCE
 from core.requisitos import construir_requisitos, verificar as verificar_requisitos
 from core.verificacion_semantica import (
     construir_evidencia as construir_evidencia_semantica,
@@ -84,6 +85,7 @@ class NormaPlusAgent:
         max_tool_calls: int = 6,
         max_http_requests: int = 12,
         verificacion_semantica: bool = False,
+        avisos=None,
         trace_sink=None,
         manifest_store=None,
         settings=None,
@@ -102,6 +104,10 @@ class NormaPlusAgent:
         # no bloquea. Configurable porque agrega una llamada al modelo por
         # turno, y el presupuesto de LLM se cuenta aparte del de HTTP.
         self.verificacion_semantica = verificacion_semantica
+        # Catálogo de acuerdos de suspensión. Puede ser None: en ese caso la
+        # cifra sale con la revisión de suspensiones declarada incompleta, no
+        # con una lista vacía que se lea como exhaustiva.
+        self.avisos = avisos
 
         # Resolutor de identidades documentales (C02). Se construye desde el
         # universo consultable, así que sólo puede devolver expedientes que
@@ -932,6 +938,76 @@ class NormaPlusAgent:
                     f"Verificación semántica omitida: {type(e).__name__}: {e}")
 
         return revision["texto"]
+
+    def _avisos_de_plazos(self, calculos: list[dict]) -> tuple[list, dict]:
+        """
+        Acuerdos coincidentes y estado de cobertura para los plazos calculados.
+
+        Devuelve `([], {})` si no hay catálogo: la ausencia de avisos por falta
+        de datos no puede leerse como ausencia de acuerdos, así que en ese caso
+        se declara la limitación en la cobertura y no se presenta una lista
+        vacía como si fuera exhaustiva.
+        """
+        cat = getattr(self, "avisos", None)
+        if cat is None:
+            return [], {}
+
+        from datetime import date as _date, datetime as _dt
+
+        def fecha(v):
+            if isinstance(v, _date):
+                return v
+            t = str(v or "").strip()[:10]
+            for f in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y"):
+                try:
+                    return _dt.strptime(t, f).date()
+                except ValueError:
+                    pass
+            return None
+
+        ventanas = [
+            (fecha(c.get("fecha_inicio")), fecha(c.get("fecha_fin")),
+             c.get("authority"))
+            for c in calculos if c.get("calculable")
+        ]
+        ventanas = [(i, f, a) for i, f, a in ventanas if i and f]
+        if not ventanas:
+            return [], {}
+
+        avisos, vistos = [], set()
+        sin_confirmar, limitaciones = [], []
+        for ini, fin, aut in ventanas:
+            for a in (cat.avisos_para(ini, fin, aut) or cat.avisos_para(ini, fin)):
+                if a["id"] in vistos:
+                    continue
+                vistos.add(a["id"])
+                avisos.append(a)
+            cg = cat.cobertura_calendario_general(ini, fin)
+            for p in cg["periodos_sin_confirmar"]:
+                if p["id"] not in [x["id"] for x in sin_confirmar]:
+                    sin_confirmar.append(p)
+            ca = cat.cobertura_avisos(ini, fin)
+            for p in ca["limitaciones"] + ca.get("acuerdos_sin_periodo", []):
+                if p["id"] not in [x["id"] for x in limitaciones]:
+                    limitaciones.append(p)
+
+        cobertura = {}
+        if sin_confirmar:
+            cobertura["calendario_general_sin_confirmar"] = sin_confirmar
+            cobertura["regla_calendario"] = (
+                "El calendario ordinario no está confirmado para parte del "
+                "periodo. NO presentes la cifra de días hábiles como "
+                "comprobada: di qué periodo falta. Los días naturales siguen "
+                "siendo válidos si sus fechas lo son."
+            )
+        if limitaciones or not cat.cargado:
+            cobertura["revision_de_suspensiones_incompleta"] = limitaciones
+            cobertura["regla_avisos"] = (
+                "La revisión de acuerdos quedó incompleta. Dilo; no afirmes "
+                "que no existen acuerdos coincidentes. Esto NO altera la cifra "
+                "de días hábiles."
+            )
+        return avisos, cobertura
 
     async def _buscar_criterios_por_documento(
         self, query: str, expedientes: list[str], top_k: int, collector, state
@@ -1920,6 +1996,44 @@ class NormaPlusAgent:
             plazo_field = "dias_habiles"
 
         result = {"total_expedientes": len(enriched)}
+
+        # Alcance de la métrica y acuerdos coincidentes (§8, alcance aprobado
+        # por Imanol el 25-sep).
+        #
+        # La cifra de días hábiles describe tiempo transcurrido según el
+        # calendario ordinario. NO es tiempo procesal efectivo, y sin decirlo se
+        # lee como si lo fuera. Por eso la etiqueta viaja con la cifra y con sus
+        # agregaciones, no como nota al pie.
+        #
+        # Los acuerdos de suspensión que coinciden con el periodo se informan
+        # con su enlace y `aplicabilidad_al_expediente = no_evaluada`: la
+        # coincidencia es un cruce de fechas, no un juicio jurídico. No se
+        # descuenta ni un día por ellos.
+        if plazo_field == "dias_habiles":
+            result["ALCANCE_DE_LA_CIFRA"] = {
+                "denominacion": ETIQUETA_ALCANCE,
+                "ajusta_suspensiones": False,
+                "convencion": "excluye el día inicial, incluye el final",
+                "regla": (
+                    "Conserva esta denominación al citar la cifra y también en "
+                    "promedios, mínimos y tablas. Si la pregunta es por un "
+                    "vencimiento legal o por si se cumplió un plazo, esta "
+                    "cuenta NO lo resuelve: dilo en vez de sustituirla."
+                ),
+            }
+            avisos, cobertura = self._avisos_de_plazos(calculos)
+            if avisos:
+                result["ACUERDOS_DE_SUSPENSION_COINCIDENTES"] = {
+                    "acuerdos": avisos,
+                    "regla": (
+                        "Coinciden en fechas con los periodos calculados. NO "
+                        "afirmes que aplican, que no aplican ni que el "
+                        "procedimiento estuvo suspendido: preséntalos y pide "
+                        "al usuario revisar su aplicación."
+                    ),
+                }
+            if cobertura:
+                result["COBERTURA_DEL_CALENDARIO"] = cobertura
 
         # Filtrar por plazo si se pidió
         max_dh = args.get("max_dias_habiles")

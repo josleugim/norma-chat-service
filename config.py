@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     # Verificación semántica (I5), apagada por default: agrega una llamada
     # al modelo por turno y arranca en evaluación, sin bloquear nada.
     agent_verificacion_semantica: bool = False
+    # Catálogo de acuerdos de suspensión para los avisos del §8.
+    avisos_path: str = "data/calendario"
     agent_default_temperature: float = 0.3
     agent_max_tokens: int = 4096
 

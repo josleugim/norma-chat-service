@@ -3165,3 +3165,92 @@ class TestAvisosDeSuspensionSinDecidirSuAplicacion:
     def test_la_cifra_lleva_su_etiqueta_de_alcance(self):
         from temporal.avisos import ETIQUETA_ALCANCE
         assert "sin ajustar suspensiones" in ETIQUETA_ALCANCE
+
+
+class TestLaCifraDeHabilesLlevaSuAlcanceYSusAvisos:
+    """
+    La prueba de aceptación que COFECE fijó para el calendario, textual:
+
+        "VCN-002-2020 con las fuentes del ejemplo: 27 naturales y 14 hábiles de
+         calendario general; inicio excluido, fin incluido; aviso CFCE-084-2020
+         con periodo y enlace. No declara una decisión de excepción."
+
+    La etiqueta no es decorativa: esta cuenta describe tiempo transcurrido según
+    el calendario ordinario, no tiempo procesal efectivo, y sin decirlo se lee
+    como si lo fuera.
+    """
+
+    REG = [{"caseLink": "VCN-002-2020", "authority": "COFECE",
+            "startAgreementDate": "20-03-2020", "resolutionDate": "16-04-2020"}]
+
+    def _calc(self, unidad="dias_habiles", con_catalogo=True):
+        import asyncio
+        from agent.agent import NormaPlusAgent
+        from agent.turn_state import TurnState
+        from temporal.analyzer import TemporalAnalyzer
+        from temporal.holidays import HolidayCalendar
+        from temporal.avisos import CatalogoAvisos
+        ag = NormaPlusAgent.__new__(NormaPlusAgent)
+        ag.temporal = TemporalAnalyzer(HolidayCalendar("data/dias_inhabiles.xlsx"))
+        ag.avisos = CatalogoAvisos.desde_directorio(
+            "data/calendario" if con_catalogo else "data/no_existe")
+        st = TurnState()
+        st.last_expedientes = [dict(r) for r in self.REG]
+        return asyncio.run(ag._exec_calcular_plazos(
+            {"expedientes": [dict(x) for x in self.REG],
+             "campo_inicio": "startAgreementDate",
+             "campo_fin": "resolutionDate", "unidad": unidad}, None, st))
+
+    def test_las_dos_cifras_del_ejemplo(self):
+        e = self._calc()["expedientes"][0]
+        assert e["dias_naturales"] == 27
+        assert e["dias_habiles"] == 14
+
+    def test_la_cifra_declara_que_no_ajusta_suspensiones(self):
+        r = self._calc()
+        a = r["ALCANCE_DE_LA_CIFRA"]
+        assert "sin ajustar suspensiones" in a["denominacion"]
+        assert a["ajusta_suspensiones"] is False
+        assert "excluye el día inicial" in a["convencion"]
+
+    def test_la_regla_prohibe_presentarla_como_vencimiento(self):
+        r = self._calc()
+        assert "vencimiento" in r["ALCANCE_DE_LA_CIFRA"]["regla"]
+
+    def test_el_acuerdo_coincidente_se_informa_con_periodo_y_enlace(self):
+        r = self._calc()
+        acuerdos = r["ACUERDOS_DE_SUSPENSION_COINCIDENTES"]["acuerdos"]
+        s01 = next(a for a in acuerdos if a["id"] == "S01")
+        assert s01["acuerdo"] == "CFCE-084-2020"
+        assert s01["periodo_inicio"] == "2020-03-23"
+        assert s01["periodo_fin"] == "2020-04-17"
+        assert s01["url"].startswith("http")
+
+    def test_no_decide_si_la_suspension_aplica(self):
+        r = self._calc()
+        for a in r["ACUERDOS_DE_SUSPENSION_COINCIDENTES"]["acuerdos"]:
+            assert a["aplicabilidad_al_expediente"] == "no_evaluada"
+        regla = r["ACUERDOS_DE_SUSPENSION_COINCIDENTES"]["regla"]
+        assert "NO afirmes que aplican" in regla
+
+    def test_no_se_descuenta_ni_un_dia_por_el_aviso(self):
+        """
+        S01 cubre 23-mar a 17-abr, casi toda la ventana. Si se descontara,
+        los hábiles no serían 14.
+        """
+        assert self._calc()["expedientes"][0]["dias_habiles"] == 14
+
+    def test_los_dias_naturales_no_llevan_esta_etiqueta(self):
+        """La etiqueta es de la métrica de hábiles; los naturales no la usan."""
+        assert "ALCANCE_DE_LA_CIFRA" not in self._calc(unidad="dias_naturales")
+
+    def test_sin_catalogo_se_declara_incompleta_la_revision(self):
+        """
+        No se puede presentar una lista vacía como exhaustiva cuando el
+        catálogo no se pudo leer.
+        """
+        r = self._calc(con_catalogo=False)
+        cob = r.get("COBERTURA_DEL_CALENDARIO") or {}
+        assert "revision_de_suspensiones_incompleta" in cob
+        assert "no afirmes que no existen acuerdos" in cob["regla_avisos"].lower()
+        assert "ACUERDOS_DE_SUSPENSION_COINCIDENTES" not in r
