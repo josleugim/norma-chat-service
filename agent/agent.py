@@ -2433,6 +2433,50 @@ class NormaPlusAgent:
                 )
                 state.requisitos_verificados = v
                 payload["REQUISITOS"] = v["componentes"]
+
+                # Candidatos de ejemplo, con su pasaje ya emparejado.
+                #
+                # H16-A tuvo que reconstruir esa pareja y la reconstruyó mal:
+                # presentó VCN-005-2018 apoyándose en el criterio 4035, que es
+                # de VCN-005-2024. El pasaje era auténtico y el documento
+                # existía; lo que no existía era la relación entre los dos.
+                #
+                # Entregar el agrupamiento hecho no decide la pertinencia —eso
+                # lo juzga el modelo leyendo el pasaje— pero elimina el paso
+                # donde se perdía la atribución.
+                ejemplos = [r for r in state.requisitos if r["tipo"] == "ejemplo"]
+                if ejemplos:
+                    por_doc: dict[str, list] = {}
+                    for d in state.evidencia_acumulada:
+                        if not isinstance(d, dict):
+                            continue
+                        cl = case_link_de(d)
+                        texto = (d.get("content") or d.get("text") or "").strip()
+                        if not cl or not texto:
+                            continue
+                        por_doc.setdefault(cl, []).append({
+                            "ref": d.get("ref"),
+                            "tipo_fuente": clasificar_fuente(cl),
+                            "pasaje": texto[:400],
+                        })
+                    if por_doc:
+                        payload["CANDIDATOS_DE_EJEMPLO"] = {
+                            "propiedad_pedida": ejemplos[0].get("propiedad"),
+                            "cuantos_se_piden": ejemplos[0]["valor"],
+                            "tipo_pedido": ejemplos[0].get("tipo_documento"),
+                            "por_documento": por_doc,
+                            "regla": (
+                                "Elige el ejemplo SÓLO de un documento cuyos "
+                                "propios pasajes demuestren la propiedad "
+                                "pedida. Un pasaje de otro documento puede "
+                                "citarse como antecedente, diciéndolo, pero no "
+                                "acredita lo que resolvió el documento que "
+                                "presentas como ejemplo. Si ninguno la "
+                                "demuestra, contesta la parte general y di que "
+                                "no encontraste un precedente verificado; no "
+                                "afirmes que no existe en el acervo."
+                            ),
+                        }
                 if not v["cumple"]:
                     payload["REQUISITOS_INCUMPLIDOS"] = {
                         "faltan": v["faltantes"],

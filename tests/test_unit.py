@@ -3254,3 +3254,104 @@ class TestLaCifraDeHabilesLlevaSuAlcanceYSusAvisos:
         assert "revision_de_suspensiones_incompleta" in cob
         assert "no afirmes que no existen acuerdos" in cob["regla_avisos"].lower()
         assert "ACUERDOS_DE_SUSPENSION_COINCIDENTES" not in r
+
+
+class TestUnEjemploTieneQueDemostrarSuPropiedad:
+    """
+    H16-A, el FAIL CRÍTICO. La pregunta pide "una resolución VCN en la que dos
+    aumentos de capital se hayan tratado como operaciones independientes", y la
+    respuesta presentó VCN-005-2018 apoyándose en el criterio 4035, que es de
+    VCN-005-2024. El documento existía y el pasaje era auténtico; la atribución
+    no. La traza tenía `requisitos=[]`: no había ninguna defensa.
+
+    El patrón es estructural y cubre los tres frentes abiertos, que es la señal
+    de que es el mecanismo y no un parche por pregunta:
+
+        H16  "Busca una resolución VCN en la que…"        1 resolución
+        H08  "Busca una resolución VCN que lo explique"   1 resolución
+        H17  "Muéstrame dos sentencias… que lo expliquen" 2 sentencias
+
+    COFECE es explícito en que no puede activarse por una palabra del dominio ni
+    codificarse por número de pregunta. El código comprueba cantidad, tipo y
+    procedencia; **que el pasaje demuestre la propiedad lo juzga el modelo**.
+    """
+
+    U = ["VCN-005-2018", "VCN-005-2024", "43_2021_3JD", "96_2023_2TCC"]
+    Q16 = ("¿Qué significa que una concentración se realice mediante una "
+           "sucesión de actos? Busca una resolución VCN en la que dos aumentos "
+           "de capital se hayan tratado como operaciones independientes.")
+    Q17 = ("¿El plazo puede empezar a correr si ya conoce el acto? Muéstrame "
+           "dos sentencias relacionadas con VCN que lo expliquen y qué "
+           "condiciones exigen.")
+
+    def _req(self, q):
+        from core.identidades import ResolutorDeIdentidades
+        from core.requisitos import construir_requisitos
+        return construir_requisitos(q, ResolutorDeIdentidades(self.U).resolver(q))
+
+    def _comp(self, q, docs):
+        from core.requisitos import verificar
+        v = verificar(self._req(q), docs)
+        return next(c for c in v["componentes"] if c["tipo"] == "ejemplo")
+
+    def _crit(self, cl, i="c1"):
+        return {"id": i, "metadata": {"id_expediente": cl}, "content": "texto"}
+
+    # ── La detección ─────────────────────────────────────────────────
+    def test_reconoce_cantidad_y_tipo_documental(self):
+        e16 = next(r for r in self._req(self.Q16) if r["tipo"] == "ejemplo")
+        e17 = next(r for r in self._req(self.Q17) if r["tipo"] == "ejemplo")
+        assert (e16["valor"], e16["tipo_documento"]) == (1, "resolucion")
+        assert (e17["valor"], e17["tipo_documento"]) == (2, "sentencia")
+
+    def test_conserva_la_propiedad_en_palabras_del_usuario(self):
+        e = next(r for r in self._req(self.Q16) if r["tipo"] == "ejemplo")
+        assert "independientes" in e["propiedad"]
+
+    def test_no_se_activa_por_una_palabra_del_dominio(self):
+        """
+        Mencionar la propiedad sin pedir ejemplares no genera el requisito. Si
+        se activara por "independientes", sería la regla que COFECE prohíbe.
+        """
+        req = self._req("¿Cuándo se consideran dos aumentos de capital "
+                        "operaciones independientes?")
+        assert not [r for r in req if r["tipo"] == "ejemplo"]
+
+    def test_una_pregunta_sin_peticion_de_ejemplares_no_lo_genera(self):
+        req = self._req("¿Qué multa se impuso en el VCN-005-2024?")
+        assert not [r for r in req if r["tipo"] == "ejemplo"]
+
+    # ── La verificación ──────────────────────────────────────────────
+    def test_dos_fragmentos_del_mismo_documento_cuentan_como_uno(self):
+        """Su criterio de aceptación para H17, textual."""
+        c = self._comp(self.Q17, [self._crit("43_2021_3JD", "c1"),
+                                  self._crit("43_2021_3JD", "c2")])
+        assert not c["cumple"]
+        assert "cuentan como uno" in c["detalle"]
+
+    def test_dos_sentencias_distintas_cumplen(self):
+        c = self._comp(self.Q17, [self._crit("43_2021_3JD"),
+                                  self._crit("96_2023_2TCC")])
+        assert c["cumple"]
+
+    def test_una_resolucion_no_satisface_una_peticion_de_sentencias(self):
+        c = self._comp(self.Q17, [self._crit("VCN-005-2018"),
+                                  self._crit("VCN-005-2024")])
+        assert not c["cumple"]
+        assert "no es una resolución" in c["detalle"]
+
+    def test_un_registro_sin_criterio_no_demuestra_nada(self):
+        c = self._comp(self.Q16, [{"caseLink": "VCN-005-2024",
+                                   "authority": "COFECE"}])
+        assert not c["cumple"]
+        assert "no demuestra" in c["detalle"]
+
+    def test_el_codigo_no_pretende_juzgar_la_pertinencia(self):
+        """
+        Lo dice en el propio detalle, porque es el límite del mecanismo: con el
+        documento correcto recuperado, sigue siendo el modelo el que tiene que
+        sostener que el pasaje demuestra la propiedad.
+        """
+        c = self._comp(self.Q16, [self._crit("VCN-005-2024")])
+        assert c["cumple"]
+        assert "no que el pasaje demuestre" in c["detalle"]

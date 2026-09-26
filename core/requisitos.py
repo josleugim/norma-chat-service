@@ -142,6 +142,50 @@ _CAMPOS_PEDIDOS = [
 ]
 
 
+
+# Pedir uno o más documentos que DEMUESTREN algo.
+#
+# H16-A, el FAIL crítico del 25-sep: la pregunta pide "una resolución VCN en la
+# que dos aumentos de capital se hayan tratado como operaciones
+# independientes", y la respuesta presentó VCN-005-2018 apoyándose en un
+# criterio de VCN-005-2024. El documento existía y el pasaje era auténtico; la
+# atribución no.
+#
+# La traza tenía `requisitos=[]`: no había ninguna defensa que exigiera
+# acreditar la propiedad del ejemplo.
+#
+# El patrón es estructural y cubre los tres frentes abiertos a la vez, que es
+# la señal de que es el mecanismo y no un parche por pregunta:
+#
+#   H16  "Busca una resolución VCN en la que…"        1 resolución
+#   H08  "Busca una resolución VCN que lo explique"   1 resolución
+#   H17  "Muéstrame dos sentencias… que lo expliquen" 2 sentencias
+#
+# COFECE es explícito en que esto no puede activarse por una palabra del
+# dominio —"no una regla que se active por la palabra «independiente»"— ni
+# codificarse por número de pregunta. Lo que se detecta es la petición de
+# ejemplares, su cantidad y su tipo documental; **qué demuestra el pasaje lo
+# juzga el modelo**, y el código sólo comprueba que el documento traiga
+# evidencia propia.
+_PIDE_EJEMPLARES = re.compile(
+    r"\b(?:busca|búscame|buscame|mu[ée]strame|ens[ée]ñame|encuentra|"
+    r"identifica|dame|cita|se[ñn]ala)\b[^.?!]{0,40}?"
+    r"\b(?P<cantidad>un|una|dos|tres|cuatro|cinco)\b\s+"
+    r"(?P<tipo>resoluci[óo]n(?:es)?|sentencias?|criterios?|precedentes?|"
+    r"expedientes?|casos?|asuntos?)\b",
+    re.IGNORECASE,
+)
+_CARDINALES = {"un": 1, "una": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5}
+
+# Qué clase de documento satisface la petición. Una sentencia no es una
+# resolución de la autoridad de competencia: fue el defecto de q10 en
+# septiembre y aquí decide si H17 se cumple.
+_TIPO_ESPERADO = {
+    "resolucion": "resolucion", "resoluciones": "resolucion",
+    "sentencia": "sentencia", "sentencias": "sentencia",
+}
+
+
 def construir_requisitos(query: str, identidades: list[dict] | None) -> list[dict]:
     """
     Requisitos verificables de una pregunta.
@@ -161,6 +205,29 @@ def construir_requisitos(query: str, identidades: list[dict] | None) -> list[dic
             "tipo": "documento",
             "valor": d,
             "descripcion": f"evidencia del documento {d}",
+            "obligatorio": True,
+        })
+
+    m = _PIDE_EJEMPLARES.search(query or "")
+    if m:
+        import unicodedata as _ud
+        crudo = m.group("tipo").lower()
+        base = "".join(c for c in _ud.normalize("NFD", crudo)
+                       if _ud.category(c) != "Mn")
+        cantidad = _CARDINALES.get(m.group("cantidad").lower(), 1)
+        # La propiedad que deben demostrar es lo que sigue a la mención, en
+        # las palabras del usuario. No se interpreta aquí: viaja al modelo y
+        # al verificador para que la juzguen contra el pasaje.
+        propiedad = (query[m.end():].strip(" ,;:")[:220] or "").strip()
+        req.append({
+            "tipo": "ejemplo",
+            "valor": cantidad,
+            "tipo_documento": _TIPO_ESPERADO.get(base),
+            "propiedad": propiedad,
+            "descripcion": (
+                f"{cantidad} {crudo} con evidencia propia que demuestre: "
+                f"{propiedad[:90]}"
+            ),
             "obligatorio": True,
         })
 
@@ -261,6 +328,52 @@ def verificar(requisitos: list[dict], docs: list[dict]) -> dict:
                     "voto identificado" if ok
                     else "no se recuperó ningún voto particular identificado"
                 )
+        elif r["tipo"] == "ejemplo":
+            # Cuántos documentos DISTINTOS traen evidencia propia del tipo
+            # pedido. Lo que el código puede afirmar es la procedencia; que el
+            # pasaje demuestre la propiedad lo juzgan el modelo y la revisión
+            # semántica, y por eso el detalle lo dice expresamente.
+            from core.fuentes import clasificar_fuente
+            docs_con_evidencia = {}
+            for d in (docs or []):
+                cl = case_link_de(d)
+                if not cl:
+                    continue
+                texto = (d.get("content") or d.get("text") or "").strip()
+                if not texto:
+                    continue          # un registro no demuestra una propiedad
+                docs_con_evidencia.setdefault(cl, clasificar_fuente(cl))
+            esperado = r.get("tipo_documento")
+            if esperado:
+                aptos = [c for c, t in docs_con_evidencia.items() if t == esperado]
+            else:
+                aptos = list(docs_con_evidencia)
+            ok = len(aptos) >= r["valor"]
+            # La razón concreta, porque es el texto que lee el modelo y una
+            # razón equivocada lo manda a buscar lo que no falta.
+            if ok:
+                motivo = ("El código comprueba la procedencia, no que el "
+                          "pasaje demuestre la propiedad pedida: eso lo tienes "
+                          "que sostener tú con el texto.")
+            elif not docs_con_evidencia:
+                motivo = ("No hay ningún documento con criterio propio "
+                          "recuperado. Un registro de expediente no demuestra "
+                          "una propiedad: hace falta el texto.")
+            elif esperado and not aptos:
+                otros = sorted(set(docs_con_evidencia.values()))
+                motivo = (f"Los documentos con evidencia son de tipo "
+                          f"{', '.join(otros)}, y se pidió {esperado}. "
+                          f"Una sentencia no es una resolución de la autoridad "
+                          f"de competencia.")
+            else:
+                motivo = (f"Sólo {len(aptos)} documento(s) distinto(s) tienen "
+                          f"evidencia propia. Dos fragmentos del mismo "
+                          f"documento cuentan como uno.")
+            detalle = (
+                f"{len(aptos)} de {r['valor']} con evidencia propia"
+                + (f" ({esperado})" if esperado else "") + ". " + motivo
+            )
+
         elif r["tipo"] == "campos_registro":
             # Cada requisito es UN dato; sus campos son fuentes alternativas
             # que prueban ese mismo dato, así que basta uno de ellos. Lo que
