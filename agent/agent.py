@@ -63,6 +63,14 @@ COMPLEMENTO_DE_BUSQUEDA = {
 CRITERIO_CONTEXT_CHARS = 700
 
 
+# Campos con los que se calcula un plazo. Si el registro no los trae, no se
+# aceptan del modelo: una fecha transcrita no tiene procedencia.
+_CAMPOS_DE_CALCULO = frozenset({
+    "startAgreementDate", "notificationDate", "admissionDate",
+    "resolutionDate", "basicInfoRequestDate", "additionalInfoRequestDate",
+    "complaintFilingDate", "complaintAdmissionDate", "judgmentDate",
+})
+
 class NormaPlusAgent:
 
     def __init__(
@@ -1845,17 +1853,43 @@ class NormaPlusAgent:
                 if not origen:
                     restaurados.append(e)
                     continue
-                e = dict(e)
-                for campo, valor in origen.items():
-                    if campo in e and e[campo] != valor:
+                # Se parte del REGISTRO, no de lo que reenvió el modelo.
+                #
+                # Antes se hacía `e = dict(e)` y se superponían los campos del
+                # origen. Si el origen no traía la clave, el valor del modelo
+                # sobrevivía. COFECE lo reprodujo y lo confirmamos: origen sin
+                # `resolutionDate`, el modelo agrega 11-01-2024, y sale un
+                # promedio de 10.0 sin que nada lo advierta. El arreglo
+                # anterior sólo cubría el campo presente con valor distinto —
+                # la mitad fácil del problema.
+                #
+                # Un campo que el registro no tiene no se puede completar con
+                # una transcripción: queda no disponible.
+                nuevo = dict(origen)
+                for campo, valor in e.items():
+                    if campo in origen:
+                        if origen[campo] != valor:
+                            discrepancias.append({
+                                "expediente": case_link_de(e),
+                                "campo": campo,
+                                "enviado_por_el_modelo": valor,
+                                "valor_del_registro": origen[campo],
+                            })
+                        continue
+                    # Campo que el registro NO tiene. Los de cálculo se
+                    # descartan; los demás (ref, marcadores) pueden pasar.
+                    if campo in _CAMPOS_DE_CALCULO:
                         discrepancias.append({
                             "expediente": case_link_de(e),
                             "campo": campo,
-                            "enviado_por_el_modelo": e[campo],
-                            "valor_del_registro": valor,
+                            "enviado_por_el_modelo": valor,
+                            "valor_del_registro": None,
+                            "motivo": "el registro no tiene este campo: no se "
+                                      "puede calcular con un valor transcrito",
                         })
-                    e[campo] = valor
-                restaurados.append(e)
+                        continue
+                    nuevo[campo] = valor
+                restaurados.append(nuevo)
             expedientes = restaurados
 
         # Calculadora general entre cualquier par de campos de fecha. Antes
@@ -2015,10 +2049,43 @@ class NormaPlusAgent:
         # `state`, que esta herramienta nunca llenaba. Por eso COFECE reportó
         # que "`computation_audit` está vacío" pese a que el cálculo sí se
         # registraba: se registraba en el otro lado.
+        # La operación agregada se registra SIEMPRE, se haya pedido o no.
+        #
+        # En H04 el modelo llamó la herramienta sin `compute_stats`, así que el
+        # código nunca calculó el promedio: el 63.4 lo enunció leyendo el
+        # desglose. La cifra era correcta y **no reconstruible**, y nada habría
+        # detectado un error de aritmética del modelo.
+        #
+        # COFECE: "Pedir promedio genera una operación de promedio; no basta una
+        # lista de diferencias con stats=null." Registrarla siempre cuesta nada
+        # y deja la cuenta auditable aunque la pregunta no la pidiera
+        # explícitamente.
+        elegibles_auditoria = [
+            c for c in calculos
+            if c.get("calculable") and c.get(plazo_field) is not None
+        ]
+        valores = [c[plazo_field] for c in elegibles_auditoria]
+        operacion = None
+        if valores:
+            operacion = {
+                "operacion": "promedio",
+                "unidad": plazo_field,
+                "n": len(valores),
+                "suma": sum(valores),
+                "promedio": round(sum(valores) / len(valores), 1),
+                "ids": sorted(
+                    case_link_de(e) for e, c in zip(expedientes, calculos)
+                    if isinstance(e, dict) and case_link_de(e)
+                    and c.get("calculable") and c.get(plazo_field) is not None
+                ),
+                "solicitada_por_el_modelo": bool(args.get("compute_stats")),
+            }
+
         auditoria = {
             "tool_called": True,
             "modo": "entre_campos",
             "unidad": plazo_field,
+            "operacion_agregada": operacion,
             "ids_incluidos": sorted(
                 case_link_de(e) for e in expedientes
                 if isinstance(e, dict) and case_link_de(e)
@@ -2050,6 +2117,7 @@ class NormaPlusAgent:
                 ),
                 "ids_excluidos_de_la_busqueda": excluidos,
                 "unidad": plazo_field,
+                "operacion_agregada": operacion,
                 "per_case": [
                     {**c, "date_start": c["fecha_inicio"], "date_end": c["fecha_fin"],
                      "business_days": c["dias_habiles"],

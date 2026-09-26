@@ -2875,3 +2875,112 @@ class TestAmpliarNoEsRefutar:
         from core.verificacion_semantica import _INSTRUCCIONES
         assert "cause ejecutoria" in _INSTRUCCIONES
         assert "incondicional" in _INSTRUCCIONES
+
+
+class TestNoSePuedeCalcularConUnaFechaTranscrita:
+    """
+    §6.3 de la revisión del 25-sep. El arreglo anterior cubría la mitad fácil:
+    un campo presente en el registro con valor distinto se restauraba. Pero si
+    el registro **no tenía** el campo, el valor que enviaba el modelo
+    sobrevivía.
+
+    Reproducido: origen sin `resolutionDate`, el modelo agrega 11-01-2024, y
+    sale un promedio de 10.0 sin aviso. Una fecha que el registro no tiene no
+    se puede completar con una transcripción.
+
+    Y el segundo defecto: en H04 el modelo llamó la herramienta sin pedir
+    estadísticas, así que el promedio nunca se calculó como operación. El 63.4
+    lo enunció leyendo el desglose — correcto y no reconstruible.
+    """
+
+    def _ag(self):
+        from agent.agent import NormaPlusAgent
+        from temporal.analyzer import TemporalAnalyzer
+        from temporal.holidays import HolidayCalendar
+        ag = NormaPlusAgent.__new__(NormaPlusAgent)
+        ag.temporal = TemporalAnalyzer(HolidayCalendar("data/dias_inhabiles.xlsx"))
+        return ag
+
+    def _calc(self, enviado, origen, **extra):
+        import asyncio
+        from agent.turn_state import TurnState
+        st = TurnState()
+        st.last_expedientes = [dict(r) for r in origen]
+        args = {"expedientes": enviado, "campo_inicio": "startAgreementDate",
+                "campo_fin": "resolutionDate", "unidad": "dias_naturales"}
+        args.update(extra)
+        r = asyncio.run(self._ag()._exec_calcular_plazos(args, None, st))
+        return r, st
+
+    # ── Campo ausente en el origen ───────────────────────────────────
+    def test_un_campo_que_el_registro_no_tiene_no_se_acepta(self):
+        origen = [{"caseLink": "A-1", "startAgreementDate": "01-01-2024"}]
+        enviado = [{"caseLink": "A-1", "startAgreementDate": "01-01-2024",
+                    "resolutionDate": "11-01-2024"}]
+        r, _ = self._calc(enviado, origen, compute_stats=True)
+        assert (r.get("stats") or {}).get("count") == 0, (
+            "no se puede promediar con una fecha que el registro no tiene")
+
+    def test_y_se_declara_con_su_motivo(self):
+        origen = [{"caseLink": "A-1", "startAgreementDate": "01-01-2024"}]
+        enviado = [{"caseLink": "A-1", "startAgreementDate": "01-01-2024",
+                    "resolutionDate": "11-01-2024"}]
+        r, _ = self._calc(enviado, origen, compute_stats=True)
+        caso = r["FECHAS_CORREGIDAS_DESDE_EL_REGISTRO"]["casos"][0]
+        assert caso["campo"] == "resolutionDate"
+        assert caso["valor_del_registro"] is None
+        assert "no tiene este campo" in caso["motivo"]
+
+    def test_un_campo_presente_y_distinto_sigue_restaurandose(self):
+        """El arreglo anterior no puede perderse."""
+        origen = [{"caseLink": "A-1", "startAgreementDate": "01-01-2024",
+                   "resolutionDate": "11-01-2024"}]
+        enviado = [{"caseLink": "A-1", "startAgreementDate": "01-01-2024",
+                    "resolutionDate": "31-01-2024"}]
+        r, _ = self._calc(enviado, origen, compute_stats=True)
+        assert r["stats"]["promedio"] == 10.0
+
+    def test_un_campo_no_calculable_del_modelo_no_pasa_por_la_puerta_de_atras(self):
+        """Ni siquiera con otro nombre de campo de fecha."""
+        origen = [{"caseLink": "A-1", "startAgreementDate": "01-01-2024"}]
+        enviado = [{"caseLink": "A-1", "startAgreementDate": "01-01-2024",
+                    "judgmentDate": "11-01-2024"}]
+        r, _ = self._calc(enviado, origen, campo_fin="judgmentDate",
+                          compute_stats=True)
+        assert (r.get("stats") or {}).get("count") == 0
+
+    # ── La operación se registra siempre ─────────────────────────────
+    H04 = [("VCN-005-2024", "25-10-2024", "20-12-2024"),
+           ("VCN-004-2024", "03-10-2024", "21-11-2024"),
+           ("VCN-005-2023", "26-08-2024", "24-10-2024"),
+           ("VCN-003-2024", "18-06-2024", "05-09-2024"),
+           ("VCN-001-2024", "01-02-2024", "15-04-2024")]
+
+    def test_el_promedio_queda_registrado_aunque_no_se_pida(self):
+        """
+        El fixture de H04 de COFECE: suma 317, n 5, media 63.4. Antes salía
+        `stats=null` porque el modelo no pidió estadísticas.
+        """
+        regs = [{"caseLink": c, "startAgreementDate": i, "resolutionDate": f}
+                for c, i, f in self.H04]
+        _, st = self._calc([dict(x) for x in regs], regs)   # sin compute_stats
+        op = st.computation_audit[0]["operacion_agregada"]
+        assert op["suma"] == 317
+        assert op["n"] == 5
+        assert op["promedio"] == 63.4
+        assert op["solicitada_por_el_modelo"] is False
+
+    def test_la_operacion_solo_cuenta_los_elegibles(self):
+        regs = [{"caseLink": c, "startAgreementDate": i, "resolutionDate": f}
+                for c, i, f in self.H04]
+        regs.append({"caseLink": "A-9", "startAgreementDate": None,
+                     "resolutionDate": "11-01-2024"})
+        _, st = self._calc([dict(x) for x in regs], regs)
+        op = st.computation_audit[0]["operacion_agregada"]
+        assert op["n"] == 5 and "A-9" not in op["ids"]
+
+    def test_sin_valores_no_se_inventa_una_operacion(self):
+        origen = [{"caseLink": "A-1", "startAgreementDate": None,
+                   "resolutionDate": None}]
+        _, st = self._calc([dict(x) for x in origen], origen)
+        assert st.computation_audit[0]["operacion_agregada"] is None
