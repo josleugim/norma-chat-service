@@ -3511,3 +3511,73 @@ class TestAmpliarDentroDelPrecedente:
         r = self._correr(ag, st, abierta)
         assert [x.id for x in r] == ["1"]
         assert st.ampliacion_precedente[0]["motivo_limite"] == "RuntimeError"
+
+
+class TestCoberturaSeparadaDelRespaldo:
+    """
+    §4.4/§5 de la revisión del 25-sep: "Separar respaldo de completitud."
+
+    Una respuesta puede tener todas sus frases respaldadas y dejar fuera algo
+    que la evidencia sostenía. Es el caso de H08, y no es una frase falsa:
+    contarlo como contradicción sería el error opuesto.
+
+    Lo que se prueba aquí es el contrato determinista. **Que el revisor detecte
+    la omisión es otra cosa, y medida no la detecta** — ver el commit.
+    """
+
+    EV = {"C1": {"documento": "VCN-001-2025", "anchor": "",
+                 "texto": "La adquisición del control no se produce "
+                          "exclusivamente mediante acciones."},
+          "C2": {"documento": "VCN-001-2025", "anchor": "",
+                 "texto": "Los actos relacionados, considerados en conjunto, "
+                          "producen la adquisición de control."}}
+
+    class _Ad:
+        def __init__(self, p): self.p = p
+        async def quick_completion(self, messages, model, max_tokens=50):
+            return self.p
+
+    def _run(self, payload):
+        import asyncio
+        from core.verificacion_semantica import verificar
+        return asyncio.run(verificar("pregunta", "borrador", self.EV,
+                                     self._Ad(payload), "m"))
+
+    def test_un_componente_incompleto_se_distingue_de_uno_omitido(self):
+        import json
+        r = self._run(json.dumps({"afirmaciones": [], "cobertura": [
+            {"componente": "qué mecanismos", "estado": "cubierto_parcial",
+             "evidencia_disponible": ["C1", "C2"],
+             "evidencia_sin_usar": ["C2"], "motivo": "usó sólo C1"}]}))
+        c = r["cobertura"][0]
+        assert c["estado"] == "cubierto_parcial"
+        assert c["evidencia_sin_usar"] == ["C2"]
+        assert r["resumen"]["componentes_incompletos"] == 1
+        assert r["resumen"]["componentes_omitidos"] == 0
+
+    def test_no_se_declara_incompleto_sin_señalar_qué_quedó_sin_usar(self):
+        """Sin el marcador concreto es una opinión sobre lo que 'debería' decir."""
+        import json
+        r = self._run(json.dumps({"afirmaciones": [], "cobertura": [
+            {"componente": "x", "estado": "cubierto_parcial",
+             "evidencia_disponible": ["C1"], "motivo": "falta algo"}]}))
+        assert r["cobertura"][0]["estado"] == "cubierto"
+
+    def test_no_se_declara_omitido_con_evidencia_inexistente(self):
+        import json
+        r = self._run(json.dumps({"afirmaciones": [], "cobertura": [
+            {"componente": "x", "estado": "omitido",
+             "evidencia_disponible": ["C99"], "motivo": "y"}]}))
+        assert r["cobertura"][0]["estado"] == "no_resuelto"
+
+    def test_la_cobertura_no_es_un_veredicto_de_falsedad(self):
+        """
+        Un componente incompleto no cuenta como contradicción: son dimensiones
+        distintas y mezclarlas es el error que COFECE señaló en H08-C.
+        """
+        import json
+        r = self._run(json.dumps({"afirmaciones": [], "cobertura": [
+            {"componente": "x", "estado": "omitido",
+             "evidencia_disponible": ["C2"], "motivo": "y"}]}))
+        assert r["resumen"]["contradicted"] == 0
+        assert r["resumen"]["componentes_omitidos"] == 1

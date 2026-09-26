@@ -98,7 +98,22 @@ Además, revisa los EJEMPLOS. Cuando la respuesta presenta un documento como cas
 
 Que el documento trate el mismo TEMA no basta: tiene que demostrar la propiedad que se le atribuye. Si la evidencia describe una sucesión de actos y la respuesta la presenta como ejemplo de actos independientes, es "contradicted" aunque las frases sueltas citen bien.
 
-Devuelve EXCLUSIVAMENTE un JSON: {"afirmaciones": [...], "ejemplos": [...]}. Sin texto alrededor."""
+Por último, revisa la COBERTURA. Una respuesta puede tener todas sus frases respaldadas y aun así dejar fuera algo que la evidencia sí sostenía y la pregunta pedía. Devuelve en "cobertura" un objeto por cada componente del encargo:
+- "componente": qué pide la pregunta, en tus palabras.
+- "estado": uno de
+    "cubierto"        el borrador lo responde y usa la evidencia que hay sobre él.
+    "cubierto_parcial" el borrador lo responde, pero **quedó sin usar** evidencia disponible que aporta a ese mismo componente.
+    "omitido"         el borrador no lo responde aunque hay evidencia que lo sostiene.
+    "no_resuelto"     ninguna evidencia alcanza para responderlo.
+- "evidencia_disponible": los marcadores que aportan a ese componente.
+- "evidencia_sin_usar": los marcadores que aportan y el borrador NO recoge. Obligatorio si el estado es "cubierto_parcial".
+- "motivo": una frase.
+
+Recorre la evidencia completa antes de decidir. Si una pregunta pide "qué mecanismos contempla" y hay dos pasajes que describen mecanismos distintos, usar sólo uno es "cubierto_parcial", no "cubierto": la respuesta es correcta y está incompleta.
+
+Un componente incompleto u omitido NO es una frase falsa. No lo declares por vocabulario ausente; declara lo que la evidencia aporta y la respuesta no recoge.
+
+Devuelve EXCLUSIVAMENTE un JSON: {"afirmaciones": [...], "ejemplos": [...], "cobertura": [...]}. Sin texto alrededor."""
 
 
 def _norm(t: str) -> str:
@@ -424,8 +439,51 @@ async def verificar(
             "motivo": str(e.get("motivo") or "")[:300],
         })
 
+    # Cobertura: qué pedía el encargo y quedó fuera teniendo evidencia.
+    #
+    # Es la medición que faltaba, y el par controlado de H08 del 26-sep mostró
+    # por qué hace falta separarla del respaldo: con el criterio 4212 en un
+    # contexto de ocho pasajes, la respuesta lo omitió **3 de 3 veces**, igual
+    # que sin él. Todas sus frases estaban respaldadas; lo que faltaba era una
+    # parte del encargo.
+    #
+    # COFECE: "Separar respaldo de completitud." Un componente omitido no es
+    # una frase falsa, y contarlo como contradicción sería el error opuesto.
+    cobertura = []
+    for c in (datos.get("cobertura") or [])[:MAX_AFIRMACIONES]:
+        if not isinstance(c, dict):
+            continue
+        estado = str(c.get("estado") or "no_resuelto")
+        if estado not in ("cubierto", "cubierto_parcial", "omitido",
+                          "no_resuelto"):
+            estado = "no_resuelto"
+        marcadores = [str(m) for m in (c.get("evidencia_disponible") or [])
+                      if isinstance(m, (str, int))]
+        sin_usar = [str(m) for m in (c.get("evidencia_sin_usar") or [])
+                    if isinstance(m, (str, int)) and str(m) in evidencia]
+        # Un hallazgo de cobertura sólo cuenta si la evidencia que se dice
+        # disponible existe de verdad en el turno. Sin eso es una opinión sobre
+        # lo que la respuesta "debería" decir.
+        if estado == "omitido" and not [m for m in marcadores if m in evidencia]:
+            estado = "no_resuelto"
+        if estado == "cubierto_parcial" and not sin_usar:
+            estado = "cubierto"
+        cobertura.append({
+            "componente": str(c.get("componente") or "")[:250],
+            "estado": estado,
+            "estado_del_modelo": str(c.get("estado") or ""),
+            "evidencia_disponible": marcadores,
+            "evidencia_sin_usar": sin_usar,
+            "motivo": str(c.get("motivo") or "")[:250],
+        })
+
     resumen = {
         "total": len(afirmaciones),
+        "componentes_revisados": len(cobertura),
+        "componentes_omitidos": sum(
+            1 for c in cobertura if c["estado"] == "omitido"),
+        "componentes_incompletos": sum(
+            1 for c in cobertura if c["estado"] == "cubierto_parcial"),
         "ejemplos_total": len(ejemplos),
         "ejemplos_contradicted": sum(
             1 for e in ejemplos if e["veredicto"] == CONTRADICTED),
@@ -461,4 +519,5 @@ async def verificar(
         ),
     }
     return {"ejecutado": True, "afirmaciones": afirmaciones,
-            "ejemplos": ejemplos, "resumen": resumen, "error": None}
+            "ejemplos": ejemplos, "cobertura": cobertura,
+            "resumen": resumen, "error": None}
