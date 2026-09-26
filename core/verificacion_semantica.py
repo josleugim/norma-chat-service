@@ -129,6 +129,24 @@ def _localizador_existe(localizador: str, evidencia_texto: str) -> bool:
     return False
 
 
+def _existe_en_otra_evidencia(localizador: str, evidencia: dict,
+                              marcadores: list) -> bool:
+    """
+    ¿El extracto es auténtico, pero de un documento que la afirmación no cita?
+
+    Distinguirlo importa: un localizador que no aparece en ninguna parte es
+    probablemente inventado; uno que aparece en OTRO documento es una
+    atribución cruzada, que es el defecto de H16-A. Los dos invalidan el
+    veredicto, pero no son el mismo hallazgo y no deben medirse juntos.
+    """
+    ajenos = [e for m, e in evidencia.items() if m not in marcadores]
+    return any(
+        _localizador_existe(localizador, e["texto"]) or
+        _localizador_existe(localizador, e.get("anchor", ""))
+        for e in ajenos
+    )
+
+
 def _extraer_json(bruto: str) -> dict:
     """El modelo a veces envuelve el JSON en ``` o en prosa."""
     t = (bruto or "").strip()
@@ -290,18 +308,42 @@ async def verificar(
                       if isinstance(m, (str, int))]
         localizador = str(a.get("localizador") or "").strip()
 
-        # La comprobación que hace el código: el localizador tiene que existir
-        # en la evidencia que dice citar. Sin eso, `supported` es una opinión.
+        # El localizador tiene que existir en la evidencia QUE DICE CITAR.
+        #
+        # Antes, si ningún marcador resolvía, se buscaba en toda la evidencia
+        # del turno (`candidatos = list(evidencia.values())`). Eso convertía
+        # el control en un colador: un extracto auténtico de cualquier
+        # documento validaba una afirmación atribuida a otro.
+        #
+        # Es el mecanismo detrás de los dos fallos que COFECE encontró:
+        #   H16-A  "en VCN-005-2018 la COFECE sostuvo…" validado con el
+        #          criterio 4035, que es de VCN-005-2024.
+        #   H15-B  "el único factor" validado con un pasaje que dice
+        #          "un factor".
+        #
+        # Un marcador que no resuelve es un problema de integridad, no una
+        # invitación a buscar respaldo en otra parte.
         verificado = False
+        integridad = None
         if localizador:
+            invalidos = [m for m in marcadores if m not in evidencia]
             candidatos = [evidencia[m] for m in marcadores if m in evidencia]
-            if not candidatos:
-                candidatos = list(evidencia.values())
-            verificado = any(
-                _localizador_existe(localizador, c["texto"]) or
-                _localizador_existe(localizador, c.get("anchor", ""))
-                for c in candidatos
-            )
+            if invalidos and not candidatos:
+                integridad = "referencia_invalida"
+            elif not marcadores:
+                integridad = "sin_referencia"
+            else:
+                verificado = any(
+                    _localizador_existe(localizador, c["texto"]) or
+                    _localizador_existe(localizador, c.get("anchor", ""))
+                    for c in candidatos
+                )
+                if not verificado and _existe_en_otra_evidencia(
+                        localizador, evidencia, marcadores):
+                    # El extracto es auténtico pero de otro documento. No es
+                    # "no lo encontré": es una atribución cruzada, y merece un
+                    # estado propio para poder medirla.
+                    integridad = "atribucion_no_acreditada"
 
         efectivo = veredicto
         if veredicto in (SUPPORTED, CONTRADICTED) and not verificado:
@@ -316,6 +358,7 @@ async def verificar(
             "veredicto": efectivo,
             "localizador": localizador[:300],
             "localizador_verificado": verificado,
+            "integridad": integridad,
             "motivo": str(a.get("motivo") or "")[:300],
         })
 
@@ -334,10 +377,35 @@ async def verificar(
         if veredicto not in (SUPPORTED, CONTRADICTED, NOT_DETERMINED):
             veredicto = NOT_DETERMINED
         localizador = str(e.get("localizador") or "").strip()
-        verificado = bool(localizador) and any(
-            _localizador_existe(localizador, c["texto"])
-            for c in evidencia.values()
-        )
+        documento = str(e.get("documento") or "").strip()
+
+        # El ejemplo se valida contra SU documento, no contra cualquiera.
+        #
+        # Era el mismo colador que en las afirmaciones, y aquí pesa más: el
+        # defecto de H16-A es precisamente atribuir a un expediente la
+        # propiedad que demuestra otro. Buscar el extracto en toda la
+        # evidencia aprobaba exactamente eso.
+        propios = [
+            c for m, c in evidencia.items()
+            if documento and (m == documento or c.get("documento") == documento)
+        ]
+        integridad = None
+        if not localizador:
+            verificado = False
+        elif not propios:
+            verificado = False
+            integridad = "documento_no_localizado"
+        else:
+            verificado = any(
+                _localizador_existe(localizador, c["texto"]) or
+                _localizador_existe(localizador, c.get("anchor", ""))
+                for c in propios
+            )
+            if not verificado and any(
+                    _localizador_existe(localizador, c["texto"])
+                    for m, c in evidencia.items() if c not in propios):
+                integridad = "atribucion_no_acreditada"
+
         efectivo = veredicto
         if veredicto in (SUPPORTED, CONTRADICTED) and not verificado:
             efectivo = NOT_DETERMINED
@@ -348,6 +416,7 @@ async def verificar(
             "veredicto": efectivo,
             "localizador": localizador[:300],
             "localizador_verificado": verificado,
+            "integridad": integridad,
             "motivo": str(e.get("motivo") or "")[:300],
         })
 
@@ -372,6 +441,15 @@ async def verificar(
         "sin_soporte_citando": sum(
             1 for a in afirmaciones
             if a["veredicto"] == NOT_DETERMINED and a["marcadores"]),
+        # Atribuciones cruzadas: el extracto es auténtico pero de otro
+        # documento. Va aparte porque es un hallazgo distinto de un
+        # localizador inventado, y es el defecto de H16-A.
+        "atribucion_no_acreditada": sum(
+            1 for a in afirmaciones
+            if a.get("integridad") == "atribucion_no_acreditada"),
+        "referencias_invalidas": sum(
+            1 for a in afirmaciones
+            if a.get("integridad") in ("referencia_invalida", "sin_referencia")),
         "localizadores_no_verificados": sum(
             1 for a in afirmaciones
             if a["veredicto_del_modelo"] in (SUPPORTED, CONTRADICTED)

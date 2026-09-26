@@ -2694,3 +2694,131 @@ class TestLaURLFirmadaNoDesplazaLosDatos:
         from models.schemas import NO_AL_PROMPT, ExpedienteRecord
         assert "resolutionFileUrl" in NO_AL_PROMPT
         assert ExpedienteRecord._NO_AL_PROMPT.default is NO_AL_PROMPT
+
+
+class TestElExtractoDebeSerDelDocumentoQueSeAfirma:
+    """
+    El mecanismo detrás de los dos falsos `supported` que encontró COFECE.
+
+    El verificador comprobaba que el extracto EXISTIERA, no que el documento
+    dueño del extracto fuera el sujeto de la afirmación. Y si ningún marcador
+    resolvía, buscaba en toda la evidencia del turno. Con eso, un pasaje
+    auténtico de cualquier documento validaba una afirmación atribuida a otro.
+
+      H16-A  "en VCN-005-2018 la COFECE sostuvo que no todo aumento…"
+             aprobado con el criterio 4035, que es de VCN-005-2024.
+      H15-B  "el único factor de graduación es la duración"
+             aprobado con un pasaje que dice "un factor".
+
+    Textual de su criterio de aceptación: "Conservar el texto auténtico de
+    4035 y cambiar solamente la atribución 2024→2018: nunca puede quedar
+    validada la atribución al 2018 por ese texto de 2024."
+    """
+
+    # Criterio 4035, real, de VCN-005-2024
+    TEXTO_2024 = ("Dos incrementos de capital no constituyen una sucesión de "
+                  "actos cuando responden a propósitos distintos, se realizan "
+                  "de manera independiente y el segundo deriva de "
+                  "circunstancias que no podían preverse al celebrarse el "
+                  "primero.")
+    # Criterios 3930/3931, reales, de VCN-005-2018
+    TEXTO_2018 = ("En una sucesión de actos, la concentración debe notificarse "
+                  "antes de realizar la aportación de capital que provoque que "
+                  "se rebasen los umbrales legales.")
+
+    EV = {
+        "C1": {"documento": "VCN-005-2024", "texto": TEXTO_2024, "anchor": ""},
+        "C5": {"documento": "VCN-005-2018", "texto": TEXTO_2018, "anchor": ""},
+    }
+
+    class _Ad:
+        def __init__(self, payload): self.payload = payload
+        async def quick_completion(self, messages, model, max_tokens=50):
+            return self.payload
+
+    def _run(self, payload, ev=None):
+        import asyncio
+        from core.verificacion_semantica import verificar
+        return asyncio.run(verificar("pregunta", "borrador", ev or self.EV,
+                                     self._Ad(payload), "m"))
+
+    # ── El caso H16-A ────────────────────────────────────────────────
+    def test_atribuir_al_2018_el_texto_del_2024_no_queda_validado(self):
+        import json
+        from core.verificacion_semantica import NOT_DETERMINED
+        r = self._run(json.dumps({"afirmaciones": [{
+            "afirmacion": "En VCN-005-2018 la COFECE sostuvo que los aumentos "
+                          "eran independientes",
+            "marcadores": ["C5"],          # cita el 2018
+            "veredicto": "supported",
+            "localizador": self.TEXTO_2024[:120],   # pero el texto es del 2024
+            "motivo": "está en la evidencia"}]}))
+        a = r["afirmaciones"][0]
+        assert a["veredicto"] == NOT_DETERMINED
+        assert a["integridad"] == "atribucion_no_acreditada", (
+            "el extracto es auténtico pero de otro documento: es una "
+            "atribución cruzada, no un localizador inventado")
+
+    def test_atribuir_al_2024_su_propio_texto_si_se_acepta(self):
+        import json
+        from core.verificacion_semantica import SUPPORTED
+        r = self._run(json.dumps({"afirmaciones": [{
+            "afirmacion": "En VCN-005-2024 los aumentos fueron independientes",
+            "marcadores": ["C1"], "veredicto": "supported",
+            "localizador": self.TEXTO_2024[:120], "motivo": "su propio texto"}]}))
+        assert r["afirmaciones"][0]["veredicto"] == SUPPORTED
+
+    def test_un_marcador_que_no_resuelve_no_busca_respaldo_en_otra_parte(self):
+        import json
+        from core.verificacion_semantica import NOT_DETERMINED
+        r = self._run(json.dumps({"afirmaciones": [{
+            "afirmacion": "x", "marcadores": ["C999"], "veredicto": "supported",
+            "localizador": self.TEXTO_2024[:120], "motivo": "y"}]}))
+        a = r["afirmaciones"][0]
+        assert a["veredicto"] == NOT_DETERMINED
+        assert a["integridad"] == "referencia_invalida"
+
+    def test_sin_marcador_no_se_aprueba_por_coincidencia(self):
+        import json
+        from core.verificacion_semantica import NOT_DETERMINED
+        r = self._run(json.dumps({"afirmaciones": [{
+            "afirmacion": "x", "marcadores": [], "veredicto": "supported",
+            "localizador": self.TEXTO_2024[:120], "motivo": "y"}]}))
+        assert r["afirmaciones"][0]["veredicto"] == NOT_DETERMINED
+        assert r["afirmaciones"][0]["integridad"] == "sin_referencia"
+
+    # ── Los ejemplos, que es donde vive H16-A ────────────────────────
+    def test_un_ejemplo_se_valida_contra_su_documento(self):
+        import json
+        from core.verificacion_semantica import NOT_DETERMINED
+        r = self._run(json.dumps({"afirmaciones": [], "ejemplos": [{
+            "documento": "VCN-005-2018",
+            "propiedad_atribuida": "dos aumentos tratados como independientes",
+            "veredicto": "supported",
+            "localizador": self.TEXTO_2024[:120],
+            "motivo": "el texto lo dice"}]}))
+        e = r["ejemplos"][0]
+        assert e["veredicto"] == NOT_DETERMINED
+        assert e["integridad"] == "atribucion_no_acreditada"
+
+    def test_el_ejemplo_correcto_pasa(self):
+        import json
+        from core.verificacion_semantica import SUPPORTED
+        r = self._run(json.dumps({"afirmaciones": [], "ejemplos": [{
+            "documento": "VCN-005-2024",
+            "propiedad_atribuida": "dos aumentos tratados como independientes",
+            "veredicto": "supported",
+            "localizador": self.TEXTO_2024[:120], "motivo": "su texto"}]}))
+        assert r["ejemplos"][0]["veredicto"] == SUPPORTED
+
+    # ── Y el resumen tiene que distinguirlos ─────────────────────────
+    def test_el_resumen_separa_atribucion_cruzada_de_referencia_rota(self):
+        import json
+        r = self._run(json.dumps({"afirmaciones": [
+            {"afirmacion": "a", "marcadores": ["C5"], "veredicto": "supported",
+             "localizador": self.TEXTO_2024[:120], "motivo": ""},
+            {"afirmacion": "b", "marcadores": ["C999"], "veredicto": "supported",
+             "localizador": self.TEXTO_2024[:120], "motivo": ""},
+        ]}))
+        assert r["resumen"]["atribucion_no_acreditada"] == 1
+        assert r["resumen"]["referencias_invalidas"] == 1
