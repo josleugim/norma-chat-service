@@ -2984,3 +2984,49 @@ class TestNoSePuedeCalcularConUnaFechaTranscrita:
                    "resolutionDate": None}]
         _, st = self._calc([dict(x) for x in origen], origen)
         assert st.computation_audit[0]["operacion_agregada"] is None
+
+
+class TestLaCorridaSeIdentificaYLaSuiteViajaCompleta:
+    """
+    Dos defectos de ENTREGA que señaló COFECE el 25-sep, y los dos hacían que
+    una candidata congelada no fuera verificable.
+
+    Las 60 trazas decían `agent_git_sha: unknown`, porque sólo se leía la
+    variable que pone el despliegue. Y el paquete llevó un archivo de pruebas
+    de cuatro, así que el "299 aprobadas" no se podía reconciliar: contaron 212
+    métodos en lo entregado.
+
+    Ninguno se arregla recordando hacerlo: van en el código que arma el ZIP.
+    """
+
+    def test_la_traza_identifica_el_commit(self):
+        import shutil, subprocess
+        from pathlib import Path
+        from core.tracing.versioning import _git_sha
+        if not shutil.which("git"):
+            import pytest; pytest.skip("sin git")
+        raiz = Path(__file__).resolve().parents[1]
+        if subprocess.run(["git", "rev-parse", "--git-dir"], cwd=raiz,
+                          capture_output=True).returncode != 0:
+            import pytest; pytest.skip("no es un repo git")
+        sha = _git_sha()
+        assert sha != "unknown"
+        assert len(sha) >= 12
+
+    def test_un_arbol_sucio_lo_dice(self):
+        """
+        Una corrida desde un árbol con cambios sin commitear no es
+        reproducible. Decirlo vale más que un SHA que sugiere que sí lo es.
+        """
+        import inspect
+        from core.tracing import versioning
+        src = inspect.getsource(versioning._git_sha)
+        assert "sucio" in src and "status" in src
+
+    def test_el_zip_lleva_todos_los_archivos_de_prueba(self):
+        import inspect
+        from core.tracing import artifacts
+        src = inspect.getsource(artifacts._codigo)
+        assert 'pruebas.glob("*.py")' in src, (
+            "el ZIP debe copiar la suite completa, no un archivo elegido a mano")
+        assert "COMO_EJECUTAR" in src, "y el comando exacto para reejecutarla"

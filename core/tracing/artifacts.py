@@ -179,6 +179,45 @@ def _codigo(stage: Path, repo: Path) -> None:
         )
         _escribir(dst, cabecera + src.read_text(encoding="utf-8"))
 
+    # La suite completa, con su comando y su entorno.
+    #
+    # El paquete del 23-sep llevó sólo `test_unit.py` —uno de cuatro archivos—
+    # y por eso COFECE no pudo reconciliar el "299 aprobadas": contó 212
+    # métodos en el archivo entregado. Tenía razón en sospechar, y el arreglo
+    # no puede depender de que alguien se acuerde de copiar los archivos.
+    pruebas = repo / "tests"
+    if pruebas.is_dir():
+        for src in sorted(pruebas.glob("*.py")):
+            _escribir(stage / "tests" / src.name,
+                      src.read_text(encoding="utf-8"))
+        metodos = sum(
+            src.read_text(encoding="utf-8").count("def test_")
+            for src in pruebas.glob("*.py")
+        )
+        req = repo / "requirements.txt"
+        _escribir(stage / "tests" / "COMO_EJECUTAR.md", "\n".join([
+            "# Cómo reejecutar la suite",
+            "",
+            "```bash",
+            "python -m venv .venv && . .venv/bin/activate",
+            "pip install -r requirements.txt",
+            "python -m pytest tests/ -q",
+            "```",
+            "",
+            f"Archivos: {len(list(pruebas.glob('*.py')))}. "
+            f"Métodos `def test_`: {metodos}.",
+            "",
+            "Las omitidas son pruebas de integración que necesitan el mock "
+            "server en :3000 (`python mock_search_server.py`) o credenciales "
+            "de staging. Sin ellas, la suite corre y las marca `s`.",
+            "",
+            f"`requirements.txt` {'incluido' if req.exists() else 'ausente'} "
+            "en este ZIP.",
+        ]))
+        if req.exists():
+            _escribir(stage / "tests" / "requirements.txt",
+                      req.read_text(encoding="utf-8"))
+
     # El prompt del sistema, ya resuelto en texto plano.
     try:
         import sys
