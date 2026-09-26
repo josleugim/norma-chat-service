@@ -105,6 +105,16 @@ class CriterioResult(BaseModel):
     metadata: dict = Field(default_factory=dict)
 
 
+# Campos que NO se mandan a un modelo: no puede usarlos y desplazan a los que
+# sí importan. `resolutionFileUrl` son ~1,500 caracteres de URL firmada.
+#
+# Vive a nivel de módulo, y no sólo dentro de la clase, porque el
+# verificador semántico necesita la misma exclusión. Tenerla sólo como
+# atributo privado fue el defecto: al escribir una segunda ruta de render
+# no se reusó, y el revisor acabó recibiendo la URL en vez de las fechas.
+NO_AL_PROMPT = frozenset({"resolutionFileUrl", "id", "hasDigitalResolution"})
+
+
 class ExpedienteRecord(BaseModel):
     """
     Modelo que refleja la respuesta real de la API de casos de José Miguel.
@@ -204,7 +214,7 @@ class ExpedienteRecord(BaseModel):
     # lugar de la evidencia. `resolutionFileUrl` es una URL firmada de ~1,500
     # caracteres —un tercio del registro— que el agente no puede abrir; el
     # citation builder la reconstruye por su cuenta para la interfaz.
-    _NO_AL_PROMPT = frozenset({"resolutionFileUrl", "id", "hasDigitalResolution"})
+    _NO_AL_PROMPT = NO_AL_PROMPT
 
     def para_prompt(self) -> dict:
         """

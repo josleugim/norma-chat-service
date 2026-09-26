@@ -2612,3 +2612,85 @@ class TestElRegistroTambienTieneQueSerCitable:
         bloque = src[src.index('"evidencia_payload"'):][:600]
         assert "texto_de_evidencia_semantica(d)" in bloque, (
             "la exportación debe usar el render del verificador")
+
+
+class TestLaURLFirmadaNoDesplazaLosDatos:
+    """
+    Lo encontró COFECE en su revisión del 25-sep, y la causa es peor que el
+    bug: la defensa ya existía en este repositorio.
+
+    `resolutionFileUrl` son ~1,500 caracteres de URL firmada. Desde septiembre
+    se excluye del payload del agente por eso mismo. Al escribir el render del
+    verificador no se reusó la exclusión: la URL empezaba en el carácter 33 y,
+    con el corte a 1,200, el revisor recibía tres campos —id, caseLink y la
+    URL— y ningún dato comprobable.
+
+    Medido: en 208 de 239 entradas de registro. Todos los juicios del
+    verificador sobre registros se emitieron sin datos, y nosotros reportamos
+    ese 50% de "sin soporte" como si fuera un desajuste conceptual entre cifras
+    y pasajes. No lo era.
+
+    La otra mitad de su advertencia: "No basta aumentar 1,200 a otra constante:
+    el orden de campos o una descripción larga volvería a desplazar el dato."
+    """
+
+    URL = "https://s3.amazonaws.com/norma/doc.pdf?X-Amz-Signature=" + "a" * 1500
+
+    def _reg(self, **extra):
+        base = {
+            "ref": "E1", "id": 25050, "caseLink": "VCN-004-2024",
+            "resolutionFileUrl": self.URL,
+            "authority": "COFECE",
+            "startAgreementDate": "03-10-2024",
+            "resolutionDate": "21-11-2024",
+            "senseOfResolution": ["Sanciona"],
+        }
+        base.update(extra)
+        return base
+
+    def test_la_url_no_viaja(self):
+        from core.verificacion_semantica import texto_de_evidencia
+        t = texto_de_evidencia(self._reg())
+        assert "resolutionFileUrl" not in t
+        assert "X-Amz-Signature" not in t
+
+    def test_los_datos_si_llegan_dentro_del_corte(self):
+        """Es la propiedad que faltaba: que el revisor tenga qué comprobar."""
+        from core.verificacion_semantica import texto_de_evidencia
+        corte = texto_de_evidencia(self._reg())[:1200]
+        for campo in ("startAgreementDate", "resolutionDate",
+                      "senseOfResolution", "authority"):
+            assert campo in corte, f"{campo} no llega al revisor"
+
+    def test_una_url_corta_o_larga_dan_lo_mismo(self):
+        """
+        Su criterio de aceptación, textual: "el registro idéntico con URL corta
+        y de varios miles de caracteres entrega exactamente los mismos datos
+        sustantivos al revisor".
+        """
+        from core.verificacion_semantica import texto_de_evidencia
+        corta = texto_de_evidencia(self._reg(resolutionFileUrl="http://x/y.pdf"))
+        larga = texto_de_evidencia(self._reg())
+        assert corta == larga
+
+    def test_ningun_campo_largo_desplaza_a_los_demas(self):
+        """
+        Excluir la URL no basta: otro campo largo haría lo mismo. Se acota por
+        campo y se declara el recorte.
+        """
+        from core.verificacion_semantica import texto_de_evidencia
+        t = texto_de_evidencia(self._reg(operationDescription="x " * 2000))
+        corte = t[:1200]
+        assert "resolutionDate" in corte
+        assert "campos recortados por longitud" in t
+        assert "operationDescription" in t.split("campos recortados")[1]
+
+    def test_una_sola_fuente_de_verdad_para_la_exclusion(self):
+        """
+        La exclusión vivía sólo como atributo privado del modelo, así que la
+        segunda ruta de render no la reusó. Ahora es constante de módulo y las
+        dos la importan. Si alguien escribe una tercera, esto se lo recuerda.
+        """
+        from models.schemas import NO_AL_PROMPT, ExpedienteRecord
+        assert "resolutionFileUrl" in NO_AL_PROMPT
+        assert ExpedienteRecord._NO_AL_PROMPT.default is NO_AL_PROMPT

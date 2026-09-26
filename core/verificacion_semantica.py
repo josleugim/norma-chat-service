@@ -60,6 +60,10 @@ NOT_DETERMINED = "not_determined"
 # completo, pero el presupuesto de salida se acota para que una respuesta larga
 # no dispare el costo.
 MAX_AFIRMACIONES = 12
+# Tope por campo de un registro. Existe para que un campo largo no
+# desplace a los demás fuera del corte, que es exactamente lo que hacía
+# la URL firmada.
+_MAX_CAMPO = 300
 
 _INSTRUCCIONES = """Eres un revisor de respuestas jurídicas. NO redactas ni mejoras: sólo compruebas si la evidencia citada sostiene lo que la respuesta afirma.
 
@@ -163,11 +167,37 @@ def texto_de_evidencia(doc: dict) -> str:
     texto = (doc.get("content") or doc.get("text") or "").strip()
     if texto:
         return texto
-    return "\n".join(
-        f"{k}: {v}" for k, v in doc.items()
-        if k not in ("ref", "metadata", "tipo_fuente")
-        and v not in (None, "", [], {})
-    )
+
+    from models.schemas import NO_AL_PROMPT
+
+    partes, omitidos = [], []
+    for k, v in doc.items():
+        if k in ("ref", "metadata", "tipo_fuente"):
+            continue
+        # La misma exclusión que ya se aplicaba al payload del agente desde
+        # septiembre. No reusarla aquí fue el defecto: `resolutionFileUrl` son
+        # ~1,500 caracteres de URL firmada, empezaba en el carácter 33 y con el
+        # corte a 1,200 el revisor recibía tres campos —id, caseLink y la
+        # URL— y ningún dato comprobable. Todos sus juicios sobre registros se
+        # emitieron sin datos.
+        if k in NO_AL_PROMPT:
+            continue
+        if v in (None, "", [], {}):
+            continue
+        valor = str(v)
+        # Ningún campo puede acaparar el presupuesto. COFECE lo advirtió: subir
+        # 1,200 a otra constante no resuelve nada, porque el orden de campos o
+        # una descripción larga vuelve a desplazar el dato. Se acota por campo
+        # y se declara lo recortado, en vez de perderlo al final del corte.
+        if len(valor) > _MAX_CAMPO:
+            omitidos.append(k)
+            valor = valor[:_MAX_CAMPO] + f" […{len(str(v)) - _MAX_CAMPO} car omitidos]"
+        partes.append(f"{k}: {valor}")
+
+    if omitidos:
+        partes.append(
+            "[campos recortados por longitud: " + ", ".join(omitidos) + "]")
+    return "\n".join(partes)
 
 
 def construir_evidencia(registry, docs) -> dict:
