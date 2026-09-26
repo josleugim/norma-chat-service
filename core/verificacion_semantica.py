@@ -78,9 +78,13 @@ Para cada afirmación sustantiva de la RESPUESTA devuelve un objeto con:
 - "motivo": una frase breve.
 
 Reglas:
-- Una afirmación que invierte, generaliza o suprime una condición de la fuente es "contradicted", aunque el tema coincida. Si la fuente dice que algo debe notificarse ANTES de un acto, no sostiene que ese acto sea independiente.
+- Distingue tres cosas y no las mezcles: que la evidencia **respalde** la afirmación, que la **contradiga**, y que **no alcance** para decidirlo. Una afirmación más amplia que su fuente no queda por eso refutada: queda sin demostrar.
+- Separa las proposiciones materiales de una frase y evalúa cada una. "La duración es un factor de graduación y es el único que se destaca" son dos: la primera puede estar respaldada y la segunda no. Antes de comparar, identifica a qué autoridad, asunto y alcance se refiere la afirmación.
+- Una fuente que acredita "un factor" respalda su existencia y **no dice nada** sobre exclusividad: eso es "not_determined". Sólo es "contradicted" si hay evidencia de factores adicionales en el mismo ámbito, autoridad y cuestión.
+- Si la evidencia sí justifica una exclusividad, acéptala aunque la fuente lo diga con otras palabras. No busques palabras concretas: compara significados. "Ninguna otra circunstancia incide" es una exclusividad igual que "el único factor".
 - Una regla general presente en un antecedente no respalda su atribución a otro acto.
-- Una conclusión que elimina una condición ("una vez que cause ejecutoria") no conserva el efecto jurídico: es "contradicted".
+- Una conclusión que suprime una condición de la fuente ("una vez que cause ejecutoria") cambia el efecto jurídico: es "contradicted", porque afirma como incondicional algo que la evidencia condiciona.
+- No uses evidencia de otra etapa, autoridad o asunto como refutación automática.
 - Si no hay evidencia citada para una afirmación, es "not_determined" con localizador nulo.
 - Cuando la evidencia sea un registro con renglones "campo: valor", cita el renglón completo tal cual, por ejemplo "relatedTccCaseFile: 565/2023". No lo parafrasees ni lo describas.
 - No evalúes ortografía, estilo ni completitud de la respuesta. Sólo el respaldo.

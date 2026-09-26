@@ -2822,3 +2822,56 @@ class TestElExtractoDebeSerDelDocumentoQueSeAfirma:
         ]}))
         assert r["resumen"]["atribucion_no_acreditada"] == 1
         assert r["resumen"]["referencias_invalidas"] == 1
+
+
+class TestAmpliarNoEsRefutar:
+    """
+    §4.2 de la revisión del 25-sep. La instrucción anterior convertía toda
+    generalización en `contradicted`:
+
+        "Una afirmación que invierte, generaliza o suprime una condición de la
+         fuente es contradicted, aunque el tema coincida."
+
+    COFECE lo rechazó con razón: *"Una ampliación sin prueba suficiente no
+    equivale siempre a una proposición refutada."* Una fuente que dice "un
+    factor" no dice nada sobre exclusividad — no la refuta, no la sostiene.
+
+    Marcar `contradicted` lo que es `not_determined` produce falsas alarmas, y
+    las falsas alarmas son lo que vuelve tímido al agente.
+
+    Lo que se prueba aquí es la instrucción, no el juicio del modelo: que el
+    contrato pida distinguir los tres estados y no imponga palabras prohibidas.
+    """
+
+    def test_la_instruccion_distingue_los_tres_estados(self):
+        from core.verificacion_semantica import _INSTRUCCIONES
+        t = _INSTRUCCIONES.lower()
+        assert "no queda por eso refutada" in t or "queda sin demostrar" in t
+        assert "not_determined" in t and "contradicted" in t
+
+    def test_ya_no_convierte_toda_generalizacion_en_contradiccion(self):
+        from core.verificacion_semantica import _INSTRUCCIONES
+        assert "generaliza o suprime una condición de la fuente es" not in \
+            _INSTRUCCIONES
+
+    def test_pide_separar_proposiciones_materiales(self):
+        """H15-B son dos proposiciones: el factor existe, y es el único."""
+        from core.verificacion_semantica import _INSTRUCCIONES
+        assert "proposiciones materiales" in _INSTRUCCIONES
+        assert "único" in _INSTRUCCIONES
+
+    def test_no_impone_una_lista_de_palabras_prohibidas(self):
+        """
+        Su advertencia: la exclusividad puede estar expresada con otras
+        palabras, y una exclusividad acreditada debe aceptarse.
+        """
+        from core.verificacion_semantica import _INSTRUCCIONES
+        t = _INSTRUCCIONES.lower()
+        assert "compara significados" in t
+        assert "ninguna otra circunstancia incide" in t
+
+    def test_conserva_que_suprimir_una_condicion_si_contradice(self):
+        """H18: quitar "una vez que cause ejecutoria" sí cambia el efecto."""
+        from core.verificacion_semantica import _INSTRUCCIONES
+        assert "cause ejecutoria" in _INSTRUCCIONES
+        assert "incondicional" in _INSTRUCCIONES
