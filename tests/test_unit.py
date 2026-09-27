@@ -3581,3 +3581,64 @@ class TestCoberturaSeparadaDelRespaldo:
              "evidencia_disponible": ["C2"], "motivo": "y"}]}))
         assert r["resumen"]["contradicted"] == 0
         assert r["resumen"]["componentes_omitidos"] == 1
+
+
+class TestLosIndicadoresSeReportanDesdeLaHerramienta:
+    """
+    Dos cifras falsas llegaron a COFECE por no usar la herramienta que existe.
+
+    El 23-sep les mandamos "tool esperada no llamada: 0/0/0" cuando eran 7/7/7:
+    el campo es un *string* con el nombre de la herramienta, y un agregador
+    propio hacía `len(v) if isinstance(v, list) else 0`. El 27-sep estuvo a
+    punto de repetirse con `citations_unresolved`, que también es string.
+
+    `compare.py` nunca tuvo ese defecto —cuenta por veracidad, que funciona
+    igual para booleanos, strings y conteos—. El problema era que su lista de
+    indicadores se quedó en agosto, así que lo que faltaba se reportaba desde un
+    script suelto.
+    """
+
+    # Lo que se le reporta a COFECE en cada entrega.
+    REPORTADOS = [
+        "citations_unresolved", "scope_mismatch", "errors",
+        "exhaustive_but_truncated", "ausencia_sin_complemento", "abstained",
+        "coverage_truncated", "tools_expected_not_called",
+    ]
+
+    def test_todo_lo_que_reportamos_esta_en_la_lista(self):
+        from core.tracing.compare import INDICADORES
+        declarados = {c for c, _ in INDICADORES}
+        faltan = [c for c in self.REPORTADOS if c not in declarados]
+        assert not faltan, (
+            f"estos indicadores se reportan y la herramienta no los compara: "
+            f"{faltan}. Agrégalos a INDICADORES en core/tracing/compare.py")
+
+    def test_se_cuentan_por_veracidad_no_por_tipo(self):
+        """
+        Es lo que hace correcto el conteo sin adivinar el tipo. Si alguien lo
+        cambia por una suma, los campos string vuelven a contar cero.
+        """
+        import inspect
+        from core.tracing import compare
+        src = inspect.getsource(compare.comparar) \
+            if hasattr(compare, "comparar") else inspect.getsource(compare)
+        assert "sum(1 for q in comunes if r_a[q].get(campo))" in src, (
+            "el conteo debe ser por veracidad: un campo string no se suma")
+
+    def test_un_cero_confirmado_no_se_oculta(self):
+        """
+        Antes los indicadores en cero se saltaban, así que un cero confirmado y
+        un campo que ni se midió se veían igual: como un renglón ausente.
+        Cuando se reporta "0 en las tres", esa distinción es lo que hay que
+        poder demostrar.
+        """
+        import inspect
+        from core.tracing import compare
+        src = inspect.getsource(compare)
+        assert "if a == b == 0:\n            continue" not in src
+        assert "el campo no está en estas corridas" in src
+
+    def test_ningun_indicador_de_la_lista_esta_repetido(self):
+        from core.tracing.compare import INDICADORES
+        campos = [c for c, _ in INDICADORES]
+        assert len(campos) == len(set(campos))

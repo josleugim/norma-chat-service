@@ -16,15 +16,34 @@ from pathlib import Path
 from core.tracing.census import diff_census
 from core.tracing.versioning import diff_fingerprints
 
+# Los indicadores que se reportan a COFECE. La lista tiene que estar completa:
+# un indicador que no esté aquí no aparece al comparar corridas, y entonces se
+# reporta desde un script suelto — que es de donde salieron dos cifras falsas.
+#
+# El 23-sep les mandamos "tool esperada no llamada: 0/0/0" cuando eran 7/7/7,
+# porque un agregador propio trataba el string del nombre de la herramienta como
+# cero. El 27-sep estuvo a punto de repetirse con `citations_unresolved`, que
+# también es string.
+#
+# Aquí se cuenta por **veracidad** —cuántas preguntas tienen el indicador
+# encendido—, que funciona igual para booleanos, strings y conteos, y no
+# depende de adivinar el tipo.
 INDICADORES = [
     ("coverage_truncated", "Cobertura truncada"),
-    ("scope_mismatch", "Desajuste de scope"),
+    ("scope_mismatch", "Confusiones de alcance"),
     ("context_condensed", "Contexto condensado"),
     ("exhausted_tools", "Agotó tool calls"),
     ("citations_unresolved", "Citas sin resolver"),
     ("plazo_inputs_missing", "Plazos sin fecha de inicio"),
     ("plazo_out_of_coverage", "Plazos fuera de cobertura"),
     ("errors", "Errores"),
+    # Añadidos desde agosto y ausentes de esta lista hasta el 27-sep.
+    ("exhaustive_but_truncated", "Exhaustiva sobre universo truncado"),
+    ("abstained", "Se abstuvo"),
+    ("ausencia_sin_complemento", "Ausencia sin complemento"),
+    ("tools_expected_not_called", "Tool esperada no llamada"),
+    ("second_retrieval", "Segunda búsqueda"),
+    ("used_cached_evidence", "Respondió desde caché"),
 ]
 
 
@@ -84,13 +103,19 @@ def main() -> int:
     comunes = sorted(set(r_a) & set(r_b))
     print(f"  Preguntas en ambas corridas: {len(comunes)}")
 
+    # Se imprimen TODOS, incluidos los que están en cero en las dos corridas.
+    # Antes se ocultaban, y entonces un cero confirmado y un indicador que ni
+    # se midió se veían igual: como un renglón ausente. Cuando se reporta "0 en
+    # las tres", esa distinción es justo lo que hay que poder demostrar.
     for campo, etiqueta in INDICADORES:
+        presente = any(campo in r_a[q] or campo in r_b[q] for q in comunes)
+        if not presente:
+            print(f"  {etiqueta:<34} —   el campo no está en estas corridas")
+            continue
         a = sum(1 for q in comunes if r_a[q].get(campo))
         b = sum(1 for q in comunes if r_b[q].get(campo))
-        if a == b == 0:
-            continue
         flecha = "→" if a == b else ("↓ mejora" if b < a else "↑ empeora")
-        print(f"  {etiqueta:<28} {a:>3} → {b:>3}   {flecha}")
+        print(f"  {etiqueta:<34} {a:>3} → {b:>3}   {flecha}")
 
     # ── Cambios por pregunta ────────────────────────────────
     print("\n── Cambios por pregunta ──")
