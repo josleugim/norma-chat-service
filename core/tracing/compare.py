@@ -42,6 +42,15 @@ INDICADORES = [
     ("abstained", "Se abstuvo"),
     ("ausencia_sin_complemento", "Ausencia sin complemento"),
     ("tools_expected_not_called", "Tool esperada no llamada"),
+]
+
+# Contadores de conducta: describen lo que hizo el agente, no si lo hizo bien.
+#
+# Van aparte y SIN flecha de mejora o empeora. Una segunda búsqueda puede ser
+# exactamente lo correcto, y responder desde caché también. Marcarlos con
+# "empeora" haría leer una regresión donde no la hay, y esa lectura llega a
+# COFECE en la tabla que les mandamos.
+NEUTROS = [
     ("second_retrieval", "Segunda búsqueda"),
     ("used_cached_evidence", "Respondió desde caché"),
 ]
@@ -116,6 +125,15 @@ def main() -> int:
         b = sum(1 for q in comunes if r_b[q].get(campo))
         flecha = "→" if a == b else ("↓ mejora" if b < a else "↑ empeora")
         print(f"  {etiqueta:<34} {a:>3} → {b:>3}   {flecha}")
+
+    print("\n  Conducta (no son mejor ni peor):")
+    for campo, etiqueta in NEUTROS:
+        if not any(campo in r_a[q] or campo in r_b[q] for q in comunes):
+            print(f"    {etiqueta:<32} —   el campo no está en estas corridas")
+            continue
+        a = sum(1 for q in comunes if r_a[q].get(campo))
+        b = sum(1 for q in comunes if r_b[q].get(campo))
+        print(f"    {etiqueta:<32} {a:>3} → {b:>3}")
 
     # ── Cambios por pregunta ────────────────────────────────
     print("\n── Cambios por pregunta ──")

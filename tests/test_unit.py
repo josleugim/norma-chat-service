@@ -3655,9 +3655,29 @@ class TestLosIndicadoresSeReportanDesdeLaHerramienta:
         assert "el campo no está en estas corridas" in src
 
     def test_ningun_indicador_de_la_lista_esta_repetido(self):
-        from core.tracing.compare import INDICADORES
-        campos = [c for c, _ in INDICADORES]
+        from core.tracing.compare import INDICADORES, NEUTROS
+        campos = [c for c, _ in INDICADORES] + [c for c, _ in NEUTROS]
         assert len(campos) == len(set(campos))
+
+    def test_los_contadores_de_conducta_no_llevan_juicio(self):
+        """
+        `second_retrieval` y `used_cached_evidence` describen lo que hizo el
+        agente, no si lo hizo bien: una segunda búsqueda puede ser exactamente
+        lo correcto. Marcarlos "empeora" hace leer una regresión donde no la
+        hay, y esa lectura llega a COFECE en la tabla.
+        """
+        from core.tracing.compare import INDICADORES, NEUTROS
+        calidad = {c for c, _ in INDICADORES}
+        assert "second_retrieval" not in calidad
+        assert "used_cached_evidence" not in calidad
+        assert {"second_retrieval", "used_cached_evidence"} == {c for c, _ in NEUTROS}
+
+    def test_los_neutros_se_imprimen_sin_flecha(self):
+        import inspect
+        from core.tracing import compare
+        src = inspect.getsource(compare)
+        bloque = src[src.index("Conducta (no son mejor ni peor)"):][:400]
+        assert "mejora" not in bloque and "empeora" not in bloque
 
 
 class TestLaRelacionConElPrincipalEsUnDatoDelRegistro:
