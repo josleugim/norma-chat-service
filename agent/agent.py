@@ -701,6 +701,30 @@ class NormaPlusAgent:
                 session_id, registro
             ) or self.evidence_cache.get_context_summary(session_id)
 
+            # La evidencia de caché entra al MISMO control que la recién
+            # buscada.
+            #
+            # COFECE lo observó en H20-B/C: esas respuestas salen del caché sin
+            # nuevas herramientas, y el verificador no las revisaba —contaban
+            # entre las cinco "sin resultado utilizable"— porque
+            # `evidencia_acumulada` sólo se llenaba desde los resultados de
+            # herramienta. Una respuesta apoyada en evidencia recordada tiene
+            # que poder comprobarse igual que una apoyada en evidencia nueva.
+            #
+            # Se acumula DESPUÉS de `contexto_para_turno`, que es quien asigna
+            # los marcadores de este turno: el marcador tiene que ser el que el
+            # modelo va a leer, no uno nuevo.
+            if state is not None and registro is not None:
+                for pieza, kind in (
+                    [(c, "C") for c in (cached_criterios or [])]
+                    + [(e, "E") for e in (cached_expedientes or [])]
+                ):
+                    if not isinstance(pieza, dict):
+                        continue
+                    ref = registro.assign(pieza, kind)
+                    if ref:
+                        state.acumular_evidencia([{**pieza, "ref": ref}])
+
         # System prompt + cache context
         system_content = AGENT_SYSTEM_PROMPT
         if cache_context:
@@ -1970,6 +1994,15 @@ class NormaPlusAgent:
         # Guardado para usar_ultima_busqueda, que evita que el modelo tenga
         # que devolver el arreglo completo y truncar sus propios argumentos.
         state.last_expedientes = serialized
+        # Y como conjunto identificado, para que un cálculo posterior pueda
+        # decir sobre cuál se hizo aunque el modelo vuelva a buscar.
+        ds = state.nuevo_dataset(serialized)
+        if collector is not None:
+            collector.set_decision(
+                "dataset_actual",
+                {"dataset_id": ds, "registros": len(serialized),
+                 "universo_completo": state.universo_completo},
+                "derived")
 
         if collector is not None:
             collector.record_stage(
@@ -2351,6 +2384,9 @@ class NormaPlusAgent:
         auditoria = {
             "tool_called": True,
             "modo": "entre_campos",
+            # Sobre qué conjunto se calculó. Sin esto, una búsqueda posterior
+            # dejaba la auditoría apuntando a otra cosa.
+            "dataset_id": getattr(state, "dataset_actual", None) if state else None,
             "unidad": plazo_field,
             "operacion_agregada": operacion,
             "ids_incluidos": sorted(
@@ -2428,6 +2464,49 @@ class NormaPlusAgent:
                 f"({cal.coverage_ranges().get(institucion.upper())}). "
                 f"El conteo puede ser incorrecto: avísale al usuario."
             )
+
+        # La misma envoltura de alcance y avisos que la ruta por expedientes.
+        #
+        # COFECE lo señaló: esta rama retornaba antes, así que un conteo de días
+        # hábiles pedido con fechas sueltas salía **sin la etiqueta de alcance y
+        # sin los acuerdos coincidentes**, mientras el mismo intervalo pedido
+        # desde los campos de un expediente sí los llevaba. Dos entradas, dos
+        # respuestas distintas para la misma cuenta.
+        #
+        # Su prueba mínima: mismo intervalo y autoridad por las dos vías deben
+        # coincidir en cifra, convención, cobertura, etiqueta y avisos.
+        resultado["ALCANCE_DE_LA_CIFRA"] = {
+            "denominacion": ETIQUETA_ALCANCE,
+            "ajusta_suspensiones": False,
+            "convencion": "excluye el día inicial, incluye el final",
+            "regla": (
+                "Conserva esta denominación al citar la cifra. Si la pregunta "
+                "es por un vencimiento legal o por si se cumplió un plazo, esta "
+                "cuenta NO lo resuelve: dilo en vez de sustituirla."
+            ),
+        }
+        # Las fechas sueltas no vienen de un registro, así que se declara de
+        # dónde salieron: sin procedencia, una cifra no es auditable.
+        resultado["PROCEDENCIA_DE_LAS_FECHAS"] = (
+            "fechas aportadas en la consulta, no leídas de un expediente. Si "
+            "provienen de un documento, pídelas por documento y campo para que "
+            "queden auditables."
+        )
+        avisos, cobertura = self._avisos_de_plazos([{
+            "calculable": True, "fecha_inicio": d_ini, "fecha_fin": d_fin,
+            "authority": institucion,
+        }])
+        if avisos:
+            resultado["ACUERDOS_DE_SUSPENSION_COINCIDENTES"] = {
+                "acuerdos": avisos,
+                "regla": (
+                    "Coinciden en fechas con el periodo calculado. NO afirmes "
+                    "que aplican, que no aplican ni que el procedimiento estuvo "
+                    "suspendido: preséntalos y pide al usuario revisarlos."
+                ),
+            }
+        if cobertura:
+            resultado["COBERTURA_DEL_CALENDARIO"] = cobertura
 
         if collector is not None:
             collector.record_computation({

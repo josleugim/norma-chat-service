@@ -171,6 +171,9 @@ class Decisions(BaseModel):
     evidencia_payload: list[dict[str, Any]] = Field(default_factory=list)
     # Ampliación dirigida dentro del precedente, con su cobertura declarada.
     ampliacion_precedente: list[dict[str, Any]] = Field(default_factory=list)
+    # Conjunto identificado sobre el que se calculó, para que una búsqueda
+    # posterior no deje la auditoría apuntando a otra cosa.
+    dataset_actual: Optional[dict[str, Any]] = None
     used_cached_evidence: bool = False
     answered_without_retrieval: bool = False
     final_answer_path: Optional[str] = None

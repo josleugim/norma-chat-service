@@ -3888,3 +3888,191 @@ class TestUnaSolaFormaDelRegistroParaElModelo:
                              parent={"id": 1, "caseLink": "VCN-004-2022"})
         assert verificar(req, [r.para_prompt()])["cumple"]
         assert not verificar(req, [r.model_dump()])["cumple"]
+
+
+class TestLaEvidenciaDeCacheEntraAlMismoControl:
+    """
+    COFECE lo observó en H20-B/C: esas respuestas salen del caché sin llamar
+    herramientas, y el verificador **no las revisaba** —contaban entre las cinco
+    "sin resultado utilizable"— porque `evidencia_acumulada` sólo se llenaba
+    desde los resultados de herramienta.
+
+    Una respuesta apoyada en evidencia recordada tiene que poder comprobarse
+    igual que una apoyada en evidencia nueva. Textual de su I1: "La caché no
+    recorre la misma ruta del revisor."
+    """
+
+    def test_las_piezas_del_cache_se_acumulan_con_su_marcador(self):
+        import inspect
+        from agent.agent import NormaPlusAgent
+        src = inspect.getsource(NormaPlusAgent._prepare_messages) \
+            if hasattr(NormaPlusAgent, "_prepare_messages") else \
+            inspect.getsource(NormaPlusAgent)
+        bloque = src[src.index("contexto_para_turno"):][:1400]
+        assert "acumular_evidencia" in bloque, (
+            "la evidencia de caché debe entrar al acumulador del turno")
+        assert "registro.assign" in bloque, (
+            "con el marcador de ESTE turno, no uno nuevo")
+
+    def test_el_verificador_ve_la_evidencia_de_cache(self):
+        """
+        La propiedad que cierra el hueco: si la pieza está en el acumulador con
+        su ref, `construir_evidencia` la entrega al revisor.
+        """
+        from agent.turn_state import TurnState
+        from core.verificacion_semantica import construir_evidencia
+        st = TurnState()
+        st.acumular_evidencia([{
+            "ref": "C1", "id": "c1",
+            "metadata": {"id_expediente": "353_2024_1TCC"},
+            "content": "texto recordado del turno anterior"}])
+        ev = construir_evidencia(st.registry, st.evidencia_acumulada)
+        assert "C1" in ev
+        assert "recordado" in ev["C1"]["texto"]
+
+    def test_una_pieza_sin_marcador_no_entra(self):
+        """
+        Sin marcador del turno no se puede citar ni comprobar: dejarla pasar
+        sería reintroducir el problema de C04, marcadores de otro turno.
+        """
+        from agent.turn_state import TurnState
+        from core.verificacion_semantica import construir_evidencia
+        st = TurnState()
+        st.acumular_evidencia([{"id": "c9", "content": "sin ref"}])
+        assert construir_evidencia(st.registry, st.evidencia_acumulada) == {}
+
+
+class TestLasDosEntradasDanLaMismaCuenta:
+    """
+    COFECE, §7 del informe del 28-sep: `_exec_calcular_plazos` retornaba antes
+    hacia `_calcular_entre_fechas` con fechas explícitas, y esa rama **no
+    incorporaba la etiqueta de alcance ni los acuerdos coincidentes**. El mismo
+    intervalo pedido desde los campos de un expediente sí los llevaba.
+
+    Su prueba mínima, textual: "mismo intervalo y autoridad, una vez desde
+    campos de expediente y otra desde fechas explícitas; deben coincidir cifra,
+    convención, cobertura, etiqueta y avisos."
+    """
+
+    REG = [{"caseLink": "VCN-002-2020", "authority": "COFECE",
+            "startAgreementDate": "20-03-2020", "resolutionDate": "16-04-2020"}]
+
+    def _ag(self):
+        from agent.agent import NormaPlusAgent
+        from temporal.analyzer import TemporalAnalyzer
+        from temporal.holidays import HolidayCalendar
+        from temporal.avisos import CatalogoAvisos
+        ag = NormaPlusAgent.__new__(NormaPlusAgent)
+        ag.temporal = TemporalAnalyzer(HolidayCalendar("data/dias_inhabiles.xlsx"))
+        ag.avisos = CatalogoAvisos.desde_directorio("data/calendario")
+        return ag
+
+    def _por_fechas(self):
+        return self._ag()._calcular_entre_fechas("20-03-2020", "16-04-2020", "COFECE")
+
+    def _por_campos(self):
+        import asyncio
+        from agent.turn_state import TurnState
+        st = TurnState()
+        st.last_expedientes = [dict(r) for r in self.REG]
+        return asyncio.run(self._ag()._exec_calcular_plazos(
+            {"expedientes": [dict(x) for x in self.REG],
+             "campo_inicio": "startAgreementDate",
+             "campo_fin": "resolutionDate", "unidad": "dias_habiles"}, None, st))
+
+    def test_la_cifra_coincide(self):
+        a, b = self._por_fechas(), self._por_campos()["expedientes"][0]
+        assert (a["dias_naturales"], a["dias_habiles"]) == (27, 14)
+        assert (b["dias_naturales"], b["dias_habiles"]) == (27, 14)
+
+    def test_las_dos_llevan_la_etiqueta_de_alcance(self):
+        for r in (self._por_fechas(), self._por_campos()):
+            assert "sin ajustar suspensiones" in r["ALCANCE_DE_LA_CIFRA"]["denominacion"]
+            assert r["ALCANCE_DE_LA_CIFRA"]["ajusta_suspensiones"] is False
+
+    def test_las_dos_informan_los_mismos_acuerdos(self):
+        ids = []
+        for r in (self._por_fechas(), self._por_campos()):
+            ac = (r.get("ACUERDOS_DE_SUSPENSION_COINCIDENTES") or {}).get("acuerdos", [])
+            ids.append([a["id"] for a in ac])
+        assert ids[0] == ids[1] == ["S01"]
+
+    def test_ninguna_decide_si_la_suspension_aplica(self):
+        for r in (self._por_fechas(), self._por_campos()):
+            for a in (r.get("ACUERDOS_DE_SUSPENSION_COINCIDENTES") or {}).get("acuerdos", []):
+                assert a["aplicabilidad_al_expediente"] == "no_evaluada"
+
+    def test_las_fechas_sueltas_declaran_su_procedencia(self):
+        """
+        No vienen de un registro. Sin decirlo, una cifra calculada sobre fechas
+        que el modelo escribió se lee igual que una calculada sobre el
+        expediente.
+        """
+        r = self._por_fechas()
+        assert "no leídas de un expediente" in r["PROCEDENCIA_DE_LAS_FECHAS"]
+
+
+class TestElConjuntoCalculadoTieneIdentidad:
+    """
+    `last_expedientes` se sobrescribe con cada búsqueda, así que una operación de
+    cálculo no podía decir sobre QUÉ conjunto se hizo: si el modelo buscaba otra
+    cosa entre el cálculo y la lectura de la auditoría, la referencia apuntaba a
+    un conjunto distinto.
+
+    COFECE lo pidió como `dataset_id`: *"otra búsqueda crea otro conjunto sin
+    sustituirlo"*. Inmutable no significa persistente: significa que una
+    búsqueda posterior no cambia la base de una operación ya hecha.
+    """
+
+    A = [{"caseLink": "A-1", "startAgreementDate": "01-01-2024",
+          "resolutionDate": "11-01-2024"}]
+    B = [{"caseLink": "B-1", "startAgreementDate": "01-02-2024",
+          "resolutionDate": "21-02-2024"}]
+
+    def test_cada_busqueda_deja_su_propio_conjunto(self):
+        from agent.turn_state import TurnState
+        st = TurnState()
+        ds1 = st.nuevo_dataset(self.A)
+        ds2 = st.nuevo_dataset(self.B)
+        assert ds1 != ds2
+        assert [r["caseLink"] for r in st.dataset(ds1)] == ["A-1"]
+        assert [r["caseLink"] for r in st.dataset(ds2)] == ["B-1"]
+
+    def test_una_busqueda_posterior_no_altera_el_conjunto_anterior(self):
+        """Es la propiedad que faltaba."""
+        from agent.turn_state import TurnState
+        st = TurnState()
+        ds1 = st.nuevo_dataset(self.A)
+        st.nuevo_dataset(self.B)
+        assert [r["caseLink"] for r in st.dataset(ds1)] == ["A-1"]
+
+    def test_el_conjunto_guardado_es_una_copia(self):
+        """Mutar el original no puede cambiar la base de una operación hecha."""
+        from agent.turn_state import TurnState
+        st = TurnState()
+        regs = [dict(r) for r in self.A]
+        ds = st.nuevo_dataset(regs)
+        regs[0]["resolutionDate"] = "31-12-2024"
+        assert st.dataset(ds)[0]["resolutionDate"] == "11-01-2024"
+
+    def test_la_auditoria_cita_el_conjunto(self):
+        import asyncio
+        from agent.agent import NormaPlusAgent
+        from agent.turn_state import TurnState
+        from temporal.analyzer import TemporalAnalyzer
+        from temporal.holidays import HolidayCalendar
+        ag = NormaPlusAgent.__new__(NormaPlusAgent)
+        ag.temporal = TemporalAnalyzer(HolidayCalendar("data/dias_inhabiles.xlsx"))
+        ag.avisos = None
+        st = TurnState()
+        st.last_expedientes = [dict(r) for r in self.A]
+        ds = st.nuevo_dataset(self.A)
+        asyncio.run(ag._exec_calcular_plazos(
+            {"expedientes": [dict(x) for x in self.A],
+             "campo_inicio": "startAgreementDate",
+             "campo_fin": "resolutionDate", "unidad": "dias_naturales"}, None, st))
+        assert st.computation_audit[0]["dataset_id"] == ds
+
+    def test_un_conjunto_inexistente_devuelve_vacio_no_revienta(self):
+        from agent.turn_state import TurnState
+        assert TurnState().dataset("ds99") == []

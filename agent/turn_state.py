@@ -27,6 +27,31 @@ class TurnState:
     # sus argumentos contra el límite de tokens.
     last_expedientes: list[dict] = field(default_factory=list)
 
+    # Conjuntos identificados de expedientes, uno por búsqueda.
+    #
+    # `last_expedientes` se sobrescribe con cada búsqueda, así que una
+    # operación de cálculo no podía decir sobre QUÉ conjunto se hizo: si el
+    # modelo buscaba otra cosa entre el cálculo y la auditoría, la referencia
+    # apuntaba a un conjunto distinto. COFECE lo pidió como `dataset_id`:
+    # "otra búsqueda crea otro conjunto sin sustituirlo".
+    #
+    # Aquí cada búsqueda deja su conjunto con un id, y las operaciones citan
+    # ese id. Inmutable no significa persistente: significa que una búsqueda
+    # posterior no cambia la base de una operación ya hecha.
+    datasets: dict[str, list[dict]] = field(default_factory=dict)
+    dataset_actual: str | None = None
+
+    def nuevo_dataset(self, registros: list[dict]) -> str:
+        """Guarda un conjunto recuperado y devuelve su identificador."""
+        ds = f"ds{len(self.datasets) + 1}"
+        self.datasets[ds] = [dict(r) for r in registros if isinstance(r, dict)]
+        self.dataset_actual = ds
+        return ds
+
+    def dataset(self, ds: str | None) -> list[dict]:
+        """El conjunto pedido, o el actual. Vacío si no existe."""
+        return self.datasets.get(ds or self.dataset_actual or "", [])
+
     # Cobertura de la última búsqueda
     universo_completo: bool = False
     universo_tamano: int = 0
