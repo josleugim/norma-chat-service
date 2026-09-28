@@ -3472,19 +3472,35 @@ class TestAmpliarDentroDelPrecedente:
         r = self._correr(ag, st, abierta)
         assert len(r) == 1 + NormaPlusAgent._AMPLIAR_PASAJES
 
-    def test_declara_cobertura_parcial(self):
+    def test_bajo_el_tope_la_cobertura_es_completa(self):
         """
-        Un top-k dentro de un documento no prueba que no tenga más
-        condiciones, y COFECE prohíbe afirmar "no hay más" por eso.
+        Con el filtro exacto del 27-sep, `devueltos < tope` sí acredita que se
+        vio el documento entero: ya no hay resultados ajenos gastando el cupo.
+        Antes no valía, porque el substring mezclaba actos.
         """
         C = self._Crit
         abierta = [C("1", "A")]
-        cli = self._Cli(abierta, {"A": [C("9", "A")]})
+        cli = self._Cli(abierta, {"A": [C("9", "A"), C("8", "A")]})
+        ag, st = self._agente(cli), self._estado()
+        self._correr(ag, st, abierta)
+        amp = st.ampliacion_precedente[0]
+        assert amp["cobertura"] == "completa"
+        assert amp["motivo_limite"] is None
+
+    def test_al_alcanzar_el_tope_no_se_afirma_cobertura(self):
+        """
+        COFECE: no decir "no hay más condiciones" porque volvió un tope.
+        """
+        from agent.agent import NormaPlusAgent
+        C = self._Crit
+        abierta = [C("1", "A")]
+        muchos = [C(str(100 + i), "A") for i in range(NormaPlusAgent._TOPE_AMPLIACION)]
+        cli = self._Cli(abierta, {"A": muchos})
         ag, st = self._agente(cli), self._estado()
         self._correr(ag, st, abierta)
         amp = st.ampliacion_precedente[0]
         assert amp["cobertura"] == "parcial"
-        assert "no acredita" in amp["motivo_limite"]
+        assert "puede tener más criterios" in amp["motivo_limite"]
 
     def test_respeta_el_presupuesto(self):
         C = self._Crit

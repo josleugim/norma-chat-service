@@ -945,6 +945,10 @@ class NormaPlusAgent:
     # que H08 necesitaba sale en posición 2 o 3. Ocho alcanza de sobra, y el
     # tope importa: una primera versión traía 23 por documento y llevó la
     # evidencia de 20 a 66 entradas de ruido.
+    # Tope de la ampliación. Holgado a propósito: con el filtro exacto,
+    # `devueltos < tope` es lo que permite afirmar que se vio el documento
+    # entero, y el documento más grande del universo tiene 62 criterios.
+    _TOPE_AMPLIACION = 100
     _AMPLIAR_DOCUMENTOS = 2
     _AMPLIAR_PASAJES = 8
 
@@ -1004,8 +1008,8 @@ class NormaPlusAgent:
             state.peticiones_http += 1
             try:
                 extra = await self.criterios.search(
-                    query=query, top_k=25, filters={"caseLink": cl},
-                    collector=collector,
+                    query=query, top_k=self._TOPE_AMPLIACION,
+                    filters={"caseLink": cl}, collector=collector,
                 )
             except Exception as e:
                 ampliacion.append({"documento": cl, "recuperados": 0,
@@ -1022,13 +1026,24 @@ class NormaPlusAgent:
                 vistos.add(str(d.get("id")))
                 agregados.append(r)
                 nuevos += 1
+            # Con el filtro exacto, `devueltos < tope` sí acredita que se vio
+            # el documento completo: no hay resultados ajenos gastando el cupo.
+            # Es la misma inferencia que usamos para expedientes desde
+            # septiembre, y antes no valía porque el substring mezclaba actos.
+            #
+            # Medido el 27-sep: los conteos se estabilizan —VCN-001-2017 tiene
+            # 62 criterios, VCN-001-2025 tiene 23, VCN-004-2022 tiene 16— así
+            # que un tope holgado los enumera. Si se alcanza el tope, no se
+            # puede afirmar: se declara parcial.
+            completa = len(extra) < self._TOPE_AMPLIACION
             ampliacion.append({
                 "documento": cl,
                 "recuperados": nuevos,
-                "cobertura": "parcial",
-                "motivo_limite": (
-                    "búsqueda semántica con tope: no acredita que el documento "
-                    "no tenga más reglas o condiciones"
+                "criterios_del_documento": len(extra),
+                "cobertura": "completa" if completa else "parcial",
+                "motivo_limite": None if completa else (
+                    f"se alcanzó el tope de {self._TOPE_AMPLIACION}: el documento "
+                    f"puede tener más criterios que no se vieron"
                 ),
             })
 
@@ -1194,15 +1209,17 @@ class NormaPlusAgent:
                 collector=collector,
             )
 
-            # El filtro de la API es SUBSTRING, no igualdad. Verificado el
-            # 22-sep: `caseLink=VCN-004-2022` devuelve 16 criterios suyos MÁS
-            # los 14 de `VCN-004-2022_2025_10_09`, que es otro acto. Por eso en
-            # H10 la respuesta mezclaba la fórmula de incremento del acto
-            # original con lo preguntado sobre el cumplimiento.
+            # El filtro de la API es EXACTO desde el 27-sep-2026.
             #
-            # Pedir un documento y recibir además sus parientes no es una
-            # ampliación útil: es la mezcla de actos que hay que evitar. Se
-            # comprueba igualdad y lo ajeno se descarta con registro.
+            # Antes hacía substring: `caseLink=VCN-004-2022` devolvía 16
+            # criterios suyos MÁS los 14 de `VCN-004-2022_2025_10_09`, que es
+            # otro acto, y por eso H10 mezclaba la fórmula del acto original
+            # con lo preguntado sobre el cumplimiento. Se lo pedimos a José
+            # Miguel y lo cambió. Verificado: cero ajenos en tres documentos.
+            #
+            # La comprobación local **se queda** como guarda de regresión. Si
+            # vuelve a disparar es que el filtro dejó de ser exacto, y eso hay
+            # que saberlo: el defecto que produce es silencioso.
             ajenos = [r for r in parciales if case_link_de(r.model_dump()
                       if hasattr(r, "model_dump") else r) != exp]
             if ajenos:
@@ -1211,9 +1228,11 @@ class NormaPlusAgent:
                     for r in ajenos
                 })
                 logger.warning(
-                    f"caseLink={exp} devolvió {len(ajenos)} criterios de otros "
-                    f"actos ({', '.join(otros)}). Se descartan: son documentos "
-                    f"distintos."
+                    f"REGRESIÓN DEL FILTRO: caseLink={exp} devolvió "
+                    f"{len(ajenos)} criterios de otros actos "
+                    f"({', '.join(otros)}). El filtro debería ser exacto desde "
+                    f"el 27-sep. Se descartan, pero hay que avisarle a José "
+                    f"Miguel: el defecto que produce es silencioso."
                 )
                 parciales = [r for r in parciales if r not in ajenos]
 
