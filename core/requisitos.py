@@ -89,6 +89,20 @@ _CAMPOS_PEDIDOS = [
      "expediente relacionado",
      ["relatedTccCaseFile"],
      "el expediente relacionado, tomado del registro"),
+    # De qué expediente DERIVA un acto, que es otra relación.
+    #
+    # H01 pide "a qué expediente corresponde" cada resolución de cumplimiento.
+    # Hasta el 27-sep sólo podía inferirse del sufijo del identificador, y
+    # COFECE lo prohibió expresamente: "No eliminar sufijos para fabricar la
+    # relación." Ese día el servicio empezó a entregar `parent` con el
+    # `caseLink` del principal, a petición nuestra.
+    (re.compile(r"\ba\s+qu[ée]\s+expediente\s+(?:corresponde|pertenece)|"
+                r"\bde\s+qu[ée]\s+expediente\s+(?:deriva|proviene)|"
+                r"\bexpediente\s+(?:principal|de\s+origen)\b|"
+                r"\bcu[áa]l\s+es\s+su\s+principal\b", re.IGNORECASE),
+     "expediente principal del que deriva",
+     ["expediente_principal"],
+     "el expediente principal, tomado de la relación del registro"),
     # El órgano EMISOR es un papel distinto del relacionado, y por eso tiene
     # su propio patrón y su propio campo. Confundirlos fue el defecto de H17,
     # donde el Juzgado Tercero apareció como Tribunal Colegiado.
@@ -278,6 +292,20 @@ def construir_requisitos(query: str, identidades: list[dict] | None) -> list[dic
             "obligatorio": True,
         })
 
+    # Dos relaciones distintas que comparten las palabras "qué expediente".
+    #
+    # "¿a qué expediente CORRESPONDE?" pregunta por el principal del que deriva
+    # el acto. "¿qué expediente le dio origen?" pregunta por el relacionado del
+    # TCC. La primera contiene literalmente a la segunda, así que sin esto H01
+    # exigía además una relación judicial que nadie pidió — COFECE lo señaló
+    # como defecto nuestro: "H01 exige por error una relación judicial".
+    #
+    # Cuando se pide el principal, el relacionado no se exige.
+    papeles = {r.get("papel") for r in req if r["tipo"] == "campos_registro"}
+    if "expediente principal del que deriva" in papeles:
+        req = [r for r in req
+               if not (r["tipo"] == "campos_registro"
+                       and r.get("papel") == "expediente relacionado")]
     return req
 
 

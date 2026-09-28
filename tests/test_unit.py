@@ -3642,3 +3642,91 @@ class TestLosIndicadoresSeReportanDesdeLaHerramienta:
         from core.tracing.compare import INDICADORES
         campos = [c for c, _ in INDICADORES]
         assert len(campos) == len(set(campos))
+
+
+class TestLaRelacionConElPrincipalEsUnDatoDelRegistro:
+    """
+    H01 pide "a qué expediente corresponde" cada resolución de cumplimiento.
+    Hasta el 27-sep sólo podía inferirse del sufijo del identificador, y COFECE
+    lo prohibió expresamente: *"No eliminar sufijos para fabricar la relación."*
+
+    Ese día José Miguel empezó a entregar `parent` con el `caseLink` del
+    principal, a petición nuestra. Llega en los cuatro actos de cumplimiento del
+    universo, que son justo los de H01.
+
+    `ExpedienteRecord` no lo declaraba, así que Pydantic lo descartaba en
+    silencio: la sexta aparición de esa familia de falla.
+    """
+
+    CRUDO = {"caseLink": "VCN-004-2022_2025_10_09",
+             "parent": {"id": 25062, "caseLink": "VCN-004-2022"},
+             "authority": "COFECE", "resolutionDate": "09-10-2025"}
+
+    def test_el_registro_declara_el_campo(self):
+        from models.schemas import ExpedienteRecord
+        r = ExpedienteRecord(**self.CRUDO)
+        assert r.parent_case_link == "VCN-004-2022"
+
+    def test_sin_relacion_devuelve_none_y_no_la_inventa(self):
+        from models.schemas import ExpedienteRecord
+        r = ExpedienteRecord(caseLink="VCN-004-2022_2025_10_09")
+        assert r.parent_case_link is None, (
+            "el sufijo no es una relación acreditada")
+
+    def test_al_modelo_llega_el_identificador_no_el_objeto(self):
+        """El `id` interno del servicio es ruido; el caseLink sí se puede usar."""
+        from models.schemas import ExpedienteRecord
+        d = ExpedienteRecord(**self.CRUDO).para_prompt()
+        assert d["expediente_principal"] == "VCN-004-2022"
+        assert "parent" not in d
+
+    def test_h01_exige_el_principal(self):
+        from core.identidades import ResolutorDeIdentidades
+        from core.requisitos import construir_requisitos
+        q = ("¿Qué resoluciones de VCN dictadas en cumplimiento de amparo "
+             "tienes disponibles? Indica la fecha de cada una, a qué "
+             "expediente corresponde y si el cumplimiento fue total o parcial.")
+        req = construir_requisitos(
+            q, ResolutorDeIdentidades(["VCN-004-2022_2025_10_09"]).resolver(q))
+        papeles = {r.get("papel") for r in req if r["tipo"] == "campos_registro"}
+        assert "expediente principal del que deriva" in papeles
+
+    def test_y_NO_exige_ademas_la_relacion_judicial(self):
+        """
+        "a qué expediente corresponde" contiene literalmente "qué expediente",
+        así que sin un desempate H01 exigía además el expediente del TCC.
+        COFECE lo señaló como defecto nuestro.
+        """
+        from core.identidades import ResolutorDeIdentidades
+        from core.requisitos import construir_requisitos
+        q = ("¿Qué resoluciones de VCN dictadas en cumplimiento de amparo "
+             "tienes disponibles? Indica a qué expediente corresponde cada una.")
+        req = construir_requisitos(
+            q, ResolutorDeIdentidades(["VCN-004-2022_2025_10_09"]).resolver(q))
+        papeles = {r.get("papel") for r in req if r["tipo"] == "campos_registro"}
+        assert "expediente relacionado" not in papeles
+
+    def test_h14_sigue_exigiendo_la_relacion_judicial(self):
+        """El desempate no puede romper el caso contrario."""
+        from core.identidades import ResolutorDeIdentidades
+        from core.requisitos import construir_requisitos
+        q = ("En el amparo 677/2024, ¿qué tribunal colegiado y qué expediente "
+             "dieron origen?")
+        req = construir_requisitos(
+            q, ResolutorDeIdentidades(["677_2024_1SCJN"]).resolver(q))
+        papeles = {r.get("papel") for r in req if r["tipo"] == "campos_registro"}
+        assert "expediente relacionado" in papeles
+        assert "tribunal relacionado" in papeles
+
+    def test_el_requisito_se_cumple_con_el_dato_del_registro(self):
+        from core.identidades import ResolutorDeIdentidades
+        from core.requisitos import construir_requisitos, verificar
+        from models.schemas import ExpedienteRecord
+        q = ("¿Qué resoluciones dictadas en cumplimiento de amparo hay? "
+             "Indica a qué expediente corresponde cada una.")
+        req = construir_requisitos(
+            q, ResolutorDeIdentidades(["VCN-004-2022_2025_10_09"]).resolver(q))
+        d = ExpedienteRecord(**self.CRUDO).para_prompt()
+        comp = next(c for c in verificar(req, [d])["componentes"]
+                    if "principal" in (c.get("detalle") or ""))
+        assert comp["cumple"]
