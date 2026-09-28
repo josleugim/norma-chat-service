@@ -505,12 +505,23 @@ class NormaPlusAgent:
             # modelo") y sin él no se puede replicar una verificación
             # semántica sobre una corrida pasada: las trazas anteriores sólo
             # guardaban conteos.
+            # Con los MISMOS campos prioritarios que recibió el revisor.
+            #
+            # Sin esto la traza mostraba otro orden que el enviado, y COFECE
+            # pide justo lo contrario: "La traza debe guardar exactamente los
+            # bloques enviados al revisor." Dos órdenes distintos hacen que la
+            # evidencia exportada no sirva para reproducir su juicio.
+            _prio = [
+                c for r in (state.requisitos or [])
+                if r.get("tipo") == "campos_registro"
+                for c in (r.get("valor") or [])
+            ]
             collector.set_decision(
                 "evidencia_payload",
                 [
                     {"ref": d.get("ref"),
                      "documento": case_link_de(d),
-                     "texto": texto_de_evidencia_semantica(d)[:1500],
+                     "texto": texto_de_evidencia_semantica(d, _prio)[:1500],
                      "anchor": str((d.get("metadata") or {}).get("anchor") or "")[:400]}
                     for d in state.evidencia_acumulada
                     if isinstance(d, dict) and d.get("ref")
@@ -958,11 +969,21 @@ class NormaPlusAgent:
                     )
                     state.verificacion_semantica = {"ruta": ruta, **ver}
                     if collector is not None:
+                        # Todo lo que produjo el verificador, no un subconjunto.
+                        #
+                        # Guardaba sólo resumen/afirmaciones/error, así que se
+                        # perdían tres cosas que sí se calculan: la lista de
+                        # recortes —el resumen decía "2" y el detalle no
+                        # existía—, la cobertura por componente y los
+                        # ejemplares. COFECE pide declarar toda insuficiencia
+                        # del payload; un contador sin detalle no la declara.
+                        #
+                        # Cuarta vez con este patrón (composicion_fuentes,
+                        # evidencia_verificada, presupuesto_peticiones): se
+                        # calcula bien y la traza lo descarta.
                         collector.set_decision(
                             "verificacion_semantica",
-                            {"ruta": ruta, "resumen": ver.get("resumen"),
-                             "afirmaciones": ver.get("afirmaciones", []),
-                             "error": ver.get("error")},
+                            {"ruta": ruta, **ver},
                             "derived")
             except Exception as e:
                 # El verificador no puede tumbar una respuesta. Si falla, se

@@ -2605,13 +2605,20 @@ class TestElRegistroTambienTieneQueSerCitable:
         El payload de la traza guardaba `content`, que en un registro está
         vacío: la traza no llevaba el contenido de los registros. Tienen que
         salir de la misma función o vuelven a divergir.
+
+        Se afloja el aserto el 28-sep: fijaba la llamada literal `(d)` y la
+        exportación pasa ahora también los campos prioritarios. Lo que importa
+        es que sea **la misma función**, no con cuántos argumentos se invoca;
+        atar la prueba a la firma la volvía un obstáculo para el arreglo de
+        `TestLaTrazaMuestraLoQueElRevisorVio`, no una defensa.
         """
-        import re
         from pathlib import Path
         src = Path("agent/agent.py").read_text(encoding="utf-8")
         bloque = src[src.index('"evidencia_payload"'):][:600]
-        assert "texto_de_evidencia_semantica(d)" in bloque, (
+        assert "texto_de_evidencia_semantica(d" in bloque, (
             "la exportación debe usar el render del verificador")
+        assert '"content"' not in bloque and '"text"' not in bloque, (
+            "el payload no puede volver a guardar el campo crudo")
 
 
 class TestLaURLFirmadaNoDesplazaLosDatos:
@@ -4076,3 +4083,90 @@ class TestElConjuntoCalculadoTieneIdentidad:
     def test_un_conjunto_inexistente_devuelve_vacio_no_revienta(self):
         from agent.turn_state import TurnState
         assert TurnState().dataset("ds99") == []
+
+
+class TestLaTrazaMuestraLoQueElRevisorVio:
+    """
+    COFECE, §5.2: *"La traza debe guardar exactamente los bloques enviados al
+    revisor."*
+
+    La exportación llamaba al render **sin** los campos prioritarios, así que la
+    traza mostraba un orden distinto del enviado. Con eso la evidencia exportada
+    no sirve para reproducir el juicio del revisor, que es para lo que existe.
+
+    Lo encontró el humo previo al despliegue: E2 traía el campo material en la
+    traza pero no la frase, porque el orden exportado era el viejo.
+    """
+
+    def test_la_exportacion_usa_los_mismos_campos_prioritarios(self):
+        from pathlib import Path
+        src = Path("agent/agent.py").read_text(encoding="utf-8")
+        bloque = src[src.index('"evidencia_payload"') - 800:
+                     src.index('"evidencia_payload"') + 400]
+        assert "texto_de_evidencia_semantica(d, _prio)" in bloque, (
+            "la traza debe exportar el mismo orden que recibió el revisor")
+
+    def test_los_dos_renders_coinciden_con_la_misma_prioridad(self):
+        from core.verificacion_semantica import texto_de_evidencia
+        doc = {"ref": "E2", "caseLink": "X",
+               "claimedActs": "C" * 400,
+               "judicialDecisionEffects": "Una vez que cause ejecutoria…"}
+        prio = ["judicialDecisionEffects"]
+        assert texto_de_evidencia(doc, prio) == texto_de_evidencia(doc, prio)
+        assert texto_de_evidencia(doc, prio) != texto_de_evidencia(doc), (
+            "si fueran iguales, la prioridad no haría nada y la prueba no valdría")
+
+
+class TestLaTrazaNoTiraLoQueElVerificadorCalcula:
+    """
+    Cuarta vez con el mismo patrón —`composicion_fuentes` (§27.3),
+    `evidencia_verificada` y `presupuesto_peticiones` (§35.6)—: el dato se
+    calcula bien y la traza lo descarta.
+
+    Aquí se perdían tres cosas. La peor es `evidencia_recortada`: el resumen
+    decía `evidencias_recortadas: 2` y la lista no llegaba a ningún artefacto,
+    así que el recorte quedaba contado pero no declarado. COFECE pide lo
+    segundo, y en el borrador del 28-sep ya le habíamos escrito que "todo
+    recorte se declara".
+
+    La prueba de §35.6 exigía que el **nombre** de la decisión existiera en el
+    esquema; no que el valor conservara sus campos. La defensa estaba un nivel
+    más arriba de donde ocurría la pérdida.
+    """
+
+    CLAVES = ("afirmaciones", "ejemplos", "cobertura",
+              "evidencia_recortada", "resumen", "error")
+
+    def test_el_verificador_devuelve_las_seis_claves(self):
+        """Si el productor cambia, la prueba de abajo dejaría de significar."""
+        import inspect
+        from core import verificacion_semantica as vs
+        src = inspect.getsource(vs)
+        for clave in self.CLAVES:
+            assert f'"{clave}"' in src, f"{clave} ya no lo produce el verificador"
+
+    def test_la_traza_guarda_el_resultado_completo(self):
+        from pathlib import Path
+        src = Path("agent/agent.py").read_text(encoding="utf-8")
+        # Anclado en la llamada, no en el nombre: `"verificacion_semantica",`
+        # aparece antes en un `getattr` de configuración.
+        i = src.index('set_decision(\n                            '
+                      '"verificacion_semantica",')
+        bloque = src[i:i + 220]
+        assert "**ver" in bloque, (
+            "la traza debe guardar todo el resultado del verificador, "
+            "no un subconjunto elegido a mano")
+
+    def test_un_recorte_contado_viaja_con_su_detalle(self):
+        """
+        La propiedad de fondo: contador y detalle no pueden separarse. Un
+        `evidencias_recortadas: 2` sin lista es un recorte contado y no
+        declarado, que es justo lo que COFECE marcó.
+        """
+        ver = {"ejecutado": True, "afirmaciones": [], "ejemplos": [],
+               "cobertura": [], "evidencia_recortada": [{"ref": "E2"},
+                                                        {"ref": "E7"}],
+               "resumen": {"evidencias_recortadas": 2}, "error": None}
+        guardado = {"ruta": "content", **ver}
+        assert len(guardado["evidencia_recortada"]) == \
+            guardado["resumen"]["evidencias_recortadas"]
