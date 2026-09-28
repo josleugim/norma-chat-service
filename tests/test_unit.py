@@ -3378,6 +3378,7 @@ class TestAmpliarDentroDelPrecedente:
         """Devuelve por documento, en orden de ranking."""
         def __init__(self, abierta, por_doc):
             self.abierta, self.por_doc, self.llamadas = abierta, por_doc, []
+            self.last_candidatos = 0
 
         async def search(self, query, top_k=15, filters=None, collector=None):
             cl = (filters or {}).get("caseLink")
@@ -3472,11 +3473,18 @@ class TestAmpliarDentroDelPrecedente:
         r = self._correr(ag, st, abierta)
         assert len(r) == 1 + NormaPlusAgent._AMPLIAR_PASAJES
 
-    def test_bajo_el_tope_la_cobertura_es_completa(self):
+    def test_la_cobertura_nunca_se_declara_completa(self):
         """
-        Con el filtro exacto del 27-sep, `devueltos < tope` sí acredita que se
-        vio el documento entero: ya no hay resultados ajenos gastando el cupo.
-        Antes no valía, porque el substring mezclaba actos.
+        El 27-sep declaramos "completa" cuando `devueltos < tope`, razonando
+        que con el filtro exacto el cupo ya no se gasta en documentos ajenos.
+        COFECE lo desmontó con el desglose por etapa y tenía razón dos veces:
+
+            candidatos de la API              26
+            tras el filtro de distancia       15   <- lo que se mide
+            pasajes añadidos al contexto       8   <- lo que se manda
+
+        Un resultado corto puede ser "el documento tiene poco" o "el filtro
+        descartó la mitad". Y aunque no lo fuera, sólo se añaden ocho.
         """
         C = self._Crit
         abierta = [C("1", "A")]
@@ -3484,23 +3492,26 @@ class TestAmpliarDentroDelPrecedente:
         ag, st = self._agente(cli), self._estado()
         self._correr(ag, st, abierta)
         amp = st.ampliacion_precedente[0]
-        assert amp["cobertura"] == "completa"
-        assert amp["motivo_limite"] is None
+        assert amp["cobertura"] == "parcial"
+        assert "no acredita haber leído el documento completo" in amp["motivo_limite"]
 
-    def test_al_alcanzar_el_tope_no_se_afirma_cobertura(self):
+    def test_se_reportan_las_etapas_para_poder_auditarlas(self):
         """
-        COFECE: no decir "no hay más condiciones" porque volvió un tope.
+        Lo que sí se puede afirmar: cuántos llegaron, cuántos pasaron el filtro
+        y cuántos se mandaron. Sin esas tres cifras la cobertura no es
+        auditable, y con ellas no hace falta creerle a una etiqueta.
         """
-        from agent.agent import NormaPlusAgent
         C = self._Crit
         abierta = [C("1", "A")]
-        muchos = [C(str(100 + i), "A") for i in range(NormaPlusAgent._TOPE_AMPLIACION)]
-        cli = self._Cli(abierta, {"A": muchos})
+        cli = self._Cli(abierta, {"A": [C(str(9 + i), "A") for i in range(12)]})
+        cli.last_candidatos = 26
         ag, st = self._agente(cli), self._estado()
         self._correr(ag, st, abierta)
         amp = st.ampliacion_precedente[0]
-        assert amp["cobertura"] == "parcial"
-        assert "puede tener más criterios" in amp["motivo_limite"]
+        assert amp["candidatos_de_la_api"] == 26
+        assert amp["tras_filtro_de_distancia"] == 12
+        assert amp["descartados_por_distancia"] == 14
+        assert amp["pasajes_anadidos"] == 8
 
     def test_respeta_el_presupuesto(self):
         C = self._Crit
@@ -3766,3 +3777,114 @@ class TestLaRelacionConElPrincipalEsUnDatoDelRegistro:
         comp = next(c for c in verificar(req, [d])["componentes"]
                     if "principal" in (c.get("detalle") or ""))
         assert comp["cumple"]
+
+
+class TestElRevisorVeLosCamposQueTieneQueComprobar:
+    """
+    Tres defectos que COFECE reprodujo el 28-sep, todos de mecanismo.
+
+    **El corte amputaba el campo material.** En las tres H18,
+    `judicialDecisionEffects` son 345 caracteres con "una vez que cause
+    ejecutoria", y con el orden de declaración caían en la posición 1,587,
+    fuera del corte de 1,200. El revisor marcaba la orden condicionada como no
+    determinada porque **no la veía**, y esa medición amputada nos llegaba como
+    si fuera un juicio sobre la respuesta.
+
+    Ordenar por longitud no bastaba —el campo que importa es largo—. Lo que
+    sirve es lo que prescribió: seleccionar por las proposiciones que se
+    verifican. Los requisitos del turno ya nombran los campos materiales.
+    """
+
+    E2 = {
+        "ref": "E2", "caseLink": "278_2023_1JD_2025_11_19",
+        "authority": "A" * 200,
+        "decisionOfficials": "B" * 250,
+        "claimedActs": "C" * 300,
+        "challengedNorms": "D" * 110,
+        "judgmentDate": "19-11-2025",
+        "senseOfAmparo": "niega y concede",
+        "judicialDecisionEffects": ("Una vez que cause ejecutoria el fallo, el "
+                                    "Pleno deberá dejar sin efectos la multa. "
+                                    + "E" * 250),
+    }
+
+    def test_sin_prioridad_el_campo_material_va_detras_de_las_descripciones(self):
+        """
+        Fija el defecto sin depender de un umbral: ordenar por longitud no salva
+        al campo material, porque **el campo material es largo**. Queda detrás
+        de las descripciones, que es lo que lo empuja fuera del corte.
+        """
+        from core.verificacion_semantica import texto_de_evidencia
+        t = texto_de_evidencia(self.E2)
+        assert t.find("cause ejecutoria") > t.find("claimedActs")
+
+    def test_con_el_requisito_el_campo_viaja_primero(self):
+        from core.verificacion_semantica import texto_de_evidencia
+        t = texto_de_evidencia(self.E2, ["judicialDecisionEffects"])
+        assert t.find("cause ejecutoria") < t.find("claimedActs")
+        assert t.find("cause ejecutoria") < 300, "y muy al principio"
+
+    def test_los_cortos_van_antes_que_las_descripciones_largas(self):
+        """Una fecha de 24 caracteres no puede ser desplazada por una de 300."""
+        from core.verificacion_semantica import texto_de_evidencia
+        t = texto_de_evidencia(self.E2)
+        assert t.find("judgmentDate") < t.find("claimedActs")
+
+    def test_todo_recorte_se_declara(self):
+        """
+        Una insuficiencia del payload es una limitación de la EVALUACIÓN, no un
+        defecto de la respuesta. Confundirlas fue lo que pasó en H18.
+        """
+        import asyncio
+        from core.verificacion_semantica import verificar
+
+        class _Ad:
+            async def quick_completion(self, messages, model, max_tokens=50):
+                return '{"afirmaciones":[]}'
+
+        ev = {f"C{i}": {"documento": "X", "anchor": "", "texto": "z" * 3000}
+              for i in range(30)}
+        r = asyncio.run(verificar("p", "b", ev, _Ad(), "m"))
+        assert r["resumen"]["evidencias_recortadas"] > 0
+        assert r["evidencia_recortada"][0]["caracteres_totales"] == 3000
+
+
+class TestUnaSolaFormaDelRegistroParaElModelo:
+    """
+    `requisitos_verificados` daba incumplido en las tres H01 aunque la respuesta
+    publicaba bien el expediente principal: la ruta por prefijo serializaba con
+    `model_dump()`, que conserva `parent` anidado, mientras las otras usaban
+    `para_prompt()`, que lo normaliza a `expediente_principal`.
+
+    COFECE lo localizó: *"Normalizar los registros una sola vez y probar la ruta
+    completa."*
+    """
+
+    def test_ninguna_ruta_serializa_expedientes_con_model_dump(self):
+        from pathlib import Path
+        src = Path("agent/agent.py").read_text(encoding="utf-8")
+        for patron in ("[r.model_dump() for r in registros]",
+                       "[r.model_dump() for r in crudos]"):
+            assert patron not in src, (
+                f"{patron} conserva `parent` anidado: usa para_prompt()")
+
+    def test_las_dos_formas_dan_resultados_distintos(self):
+        """Fija por qué importa: no son equivalentes."""
+        from models.schemas import ExpedienteRecord
+        r = ExpedienteRecord(caseLink="VCN-004-2022_2025_10_09",
+                             parent={"id": 1, "caseLink": "VCN-004-2022"})
+        assert "expediente_principal" in r.para_prompt()
+        assert "expediente_principal" not in r.model_dump()
+
+    def test_el_requisito_se_cumple_por_la_ruta_unificada(self):
+        from core.identidades import ResolutorDeIdentidades
+        from core.requisitos import construir_requisitos, verificar
+        from models.schemas import ExpedienteRecord
+        q = ("¿Qué resoluciones en cumplimiento de amparo hay? Indica a qué "
+             "expediente corresponde cada una.")
+        req = construir_requisitos(
+            q, ResolutorDeIdentidades(["VCN-004-2022_2025_10_09"]).resolver(q))
+        r = ExpedienteRecord(caseLink="VCN-004-2022_2025_10_09",
+                             parent={"id": 1, "caseLink": "VCN-004-2022"})
+        assert verificar(req, [r.para_prompt()])["cumple"]
+        assert not verificar(req, [r.model_dump()])["cumple"]

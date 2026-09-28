@@ -912,8 +912,17 @@ class NormaPlusAgent:
         if (getattr(self, "verificacion_semantica", False)
                 and adapter is not None and state is not None):
             try:
+                # Los campos que la pregunta pide comprobar van primero en la
+                # evidencia del revisor. Sin esto, un campo material largo
+                # queda fuera del corte y el revisor juzga sin verlo — es el
+                # caso de H18 y `judicialDecisionEffects`.
+                prioritarios = [
+                    c for r in state.requisitos
+                    if r.get("tipo") == "campos_registro"
+                    for c in (r.get("valor") or [])
+                ]
                 evidencia = construir_evidencia_semantica(
-                    state.registry, state.evidencia_acumulada
+                    state.registry, state.evidencia_acumulada, prioritarios
                 )
                 if evidencia:
                     ver = await verificar_semantica(
@@ -1026,24 +1035,39 @@ class NormaPlusAgent:
                 vistos.add(str(d.get("id")))
                 agregados.append(r)
                 nuevos += 1
-            # Con el filtro exacto, `devueltos < tope` sí acredita que se vio
-            # el documento completo: no hay resultados ajenos gastando el cupo.
-            # Es la misma inferencia que usamos para expedientes desde
-            # septiembre, y antes no valía porque el substring mezclaba actos.
+            # La cobertura es SIEMPRE parcial, y aquí está por qué.
             #
-            # Medido el 27-sep: los conteos se estabilizan —VCN-001-2017 tiene
-            # 62 criterios, VCN-001-2025 tiene 23, VCN-004-2022 tiene 16— así
-            # que un tope holgado los enumera. Si se alcanza el tope, no se
-            # puede afirmar: se declara parcial.
-            completa = len(extra) < self._TOPE_AMPLIACION
+            # El 27-sep declaramos "completa" cuando `len(extra) < tope`,
+            # razonando que con el filtro exacto el cupo ya no se gasta en
+            # documentos ajenos. COFECE lo desmontó con el desglose por etapa,
+            # y tenía razón en dos cosas a la vez:
+            #
+            #   candidatos de la API              26
+            #   tras el filtro de distancia       15   <- `extra` es ESTO
+            #   pasajes añadidos al contexto       8   <- y sólo se manda esto
+            #
+            # `extra` ya viene filtrado por distancia, así que un resultado
+            # corto puede significar "el documento tiene poco" o "el filtro
+            # descartó la mitad". Y aunque no lo estuviera, sólo se añaden
+            # ocho. Ninguna de las dos cosas es leer el documento entero.
+            #
+            # Para afirmar enumeración completa haría falta un contrato de
+            # totalidad del servicio —un total declarado o un listado
+            # íntegro—, que hoy no existe. Mientras tanto se reportan las
+            # etapas y se declara parcial.
+            candidatos = getattr(self.criterios, "last_candidatos", None)
+            descartados = (candidatos - len(extra)) if candidatos is not None else None
             ampliacion.append({
                 "documento": cl,
-                "recuperados": nuevos,
-                "criterios_del_documento": len(extra),
-                "cobertura": "completa" if completa else "parcial",
-                "motivo_limite": None if completa else (
-                    f"se alcanzó el tope de {self._TOPE_AMPLIACION}: el documento "
-                    f"puede tener más criterios que no se vieron"
+                "candidatos_de_la_api": candidatos,
+                "tras_filtro_de_distancia": len(extra),
+                "descartados_por_distancia": descartados,
+                "pasajes_anadidos": nuevos,
+                "cobertura": "parcial",
+                "motivo_limite": (
+                    "búsqueda semántica con filtro de distancia y tope de "
+                    "pasajes: no acredita haber leído el documento completo. "
+                    "Haría falta un contrato de totalidad del servicio."
                 ),
             })
 
@@ -1455,7 +1479,7 @@ class NormaPlusAgent:
         # que el conteo se cierra localmente. El resto de condiciones ya
         # vinieron aplicadas y este paso es idempotente.
         locales = self._filtrar_local(
-            [r.model_dump() for r in registros], args, state
+            [r.para_prompt() for r in registros], args, state
         )
 
         # Sin `meta.total`, "exacto" solo se puede afirmar cuando la API
@@ -1582,7 +1606,15 @@ class NormaPlusAgent:
             filters={"caseLink": f"{prefijo}-"} if prefijo else None,
             collector=collector,
         )
-        registros = [r.model_dump() for r in crudos]
+        # `para_prompt()` y no `model_dump()`: es la forma canónica que ve el
+        # modelo, y la única que normaliza `parent` a `expediente_principal`.
+        #
+        # Que esta ruta usara `model_dump()` dejó H01 en incumplido en las tres
+        # repeticiones del 27-sep: la respuesta publicaba bien el principal y el
+        # control decía que faltaba, porque buscaba el campo normalizado y aquí
+        # viajaba el objeto anidado. COFECE lo localizó: "Normalizar los
+        # registros una sola vez y probar la ruta completa."
+        registros = [r.para_prompt() for r in crudos]
         if prefijo:
             p = prefijo.upper().rstrip("-") + "-"
             registros = [
@@ -1863,7 +1895,7 @@ class NormaPlusAgent:
                 prefijo, filters=filters, collector=collector
             )
             serialized = self._filtrar_local(
-                [r.model_dump() for r in registros], args, state
+                [r.para_prompt() for r in registros], args, state
             )
             # Se recorrió el universo completo del prefijo: no hay que
             # advertir de cobertura parcial aunque los filtros locales

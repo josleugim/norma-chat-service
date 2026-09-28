@@ -25,6 +25,12 @@ class CriteriosSearchClient:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
+        # Candidatos que devolvió la API en la última búsqueda, ANTES del
+        # filtro por distancia. Sin este dato no se puede distinguir "el
+        # documento tiene pocos criterios" de "el filtro descartó la mitad",
+        # y esa confusión nos hizo declarar cobertura completa donde no la
+        # había.
+        self.last_candidatos = 0
 
     async def search(
         self,
@@ -106,6 +112,7 @@ class CriteriosSearchClient:
                 notes=f"limit={top_k} enviado a la API.",
             )
 
+        self.last_candidatos = len(items)
         results = []
         dropped_ids: list[str] = []
         for item in items:

@@ -60,6 +60,14 @@ NOT_DETERMINED = "not_determined"
 # completo, pero el presupuesto de salida se acota para que una respuesta larga
 # no dispare el costo.
 MAX_AFIRMACIONES = 12
+# Presupuesto total de evidencia que se manda al revisor, y mínimo por pieza.
+#
+# Antes era un corte fijo de 1,200 por evidencia, que con pocas piezas
+# desperdiciaba espacio y con campos largos amputaba justo lo que había que
+# comprobar. Se reparte, con un piso para que muchas evidencias no dejen a
+# cada una en un fragmento inútil.
+_PRESUPUESTO_EVIDENCIA = 24000
+_MIN_POR_EVIDENCIA = 1200
 # Tope por campo de un registro. Existe para que un campo largo no
 # desplace a los demás fuera del corte, que es exactamente lo que hacía
 # la URL firmada.
@@ -183,7 +191,7 @@ def _extraer_json(bruto: str) -> dict:
     return {}
 
 
-def texto_de_evidencia(doc: dict) -> str:
+def texto_de_evidencia(doc: dict, campos_prioritarios=None) -> str:
     """
     El contenido citable de un documento, como texto que se pueda citar.
 
@@ -234,10 +242,33 @@ def texto_de_evidencia(doc: dict) -> str:
     if omitidos:
         partes.append(
             "[campos recortados por longitud: " + ", ".join(omitidos) + "]")
-    return "\n".join(partes)
+
+    # Primero los campos que la pregunta pide comprobar; después, los cortos.
+    #
+    # COFECE lo demostró sobre las tres H18: `judicialDecisionEffects` son 345
+    # caracteres que contienen "una vez que cause ejecutoria", y con el orden de
+    # declaración caían en la posición 1,587, fuera del corte. El revisor
+    # marcaba la orden condicionada como no determinada porque **no la veía**, y
+    # esa medición amputada nos llegaba como si fuera un juicio.
+    #
+    # Ordenar sólo por longitud no basta, y vale decir por qué: el campo que
+    # importa **es largo**, así que quedaba igual de tarde. Lo que sí sirve es
+    # lo que COFECE prescribió —"seleccionar evidencia por las proposiciones que
+    # se verifican"— y el dato ya existe: los requisitos del turno nombran los
+    # campos materiales. Para H18 nombran `judicialDecisionEffects`.
+    #
+    # Después de los prioritarios van los cortos: una fecha de 24 caracteres no
+    # puede ser desplazada por una descripción de 309.
+    prioridad = {str(c) for c in (campos_prioritarios or [])}
+
+    def orden(linea: str):
+        campo = linea.split(":", 1)[0]
+        return (0 if campo in prioridad else 1, len(linea))
+
+    return "\n".join(sorted(partes, key=orden))
 
 
-def construir_evidencia(registry, docs) -> dict:
+def construir_evidencia(registry, docs, campos_prioritarios=None) -> dict:
     """
     `{marcador: {documento, texto}}` con lo que se citó en el turno.
 
@@ -254,7 +285,7 @@ def construir_evidencia(registry, docs) -> dict:
         if not ref:
             continue
         meta = d.get("metadata") or {}
-        texto = texto_de_evidencia(d)
+        texto = texto_de_evidencia(d, campos_prioritarios)
         evidencia[ref] = {
             "documento": case_link_de(d) or "?",
             "texto": texto,
@@ -285,10 +316,42 @@ async def verificar(
         return {"ejecutado": False, "afirmaciones": [], "resumen": {},
                 "error": "sin borrador, sin evidencia o sin adaptador"}
 
-    bloques = [
-        f"[{ref}] (documento {e['documento']})\n{e['texto'][:1200]}"
-        for ref, e in evidencia.items()
-    ]
+    # El corte por evidencia, y lo que se hace cuando hay que cortar.
+    #
+    # COFECE lo demostró sobre las tres H18: en el registro E2,
+    # `judicialDecisionEffects` empieza en el carácter 1,283 y "cause
+    # ejecutoria" en el 1,320, y el corte a 1,200 los dejaba fuera. El revisor
+    # marcaba la orden condicionada como no determinada porque **no la veía**,
+    # y esa medición contaminada nos llegaba como si fuera un juicio.
+    #
+    # Quitar la URL firmada corrigió una causa; el corte global seguía siendo
+    # otra. Dos cambios, no uno:
+    #
+    # 1. El presupuesto se reparte entre las evidencias que hay, en vez de
+    #    cortar cada una por una constante. Con pocas evidencias, cada una
+    #    viaja entera.
+    # 2. **Todo recorte se declara.** Una insuficiencia del payload es una
+    #    limitación de la evaluación, no un defecto de la respuesta, y
+    #    confundirlas fue exactamente lo que pasó en H18.
+    bloques, recortes = [], []
+    presupuesto = max(
+        _MIN_POR_EVIDENCIA,
+        _PRESUPUESTO_EVIDENCIA // max(len(evidencia), 1),
+    )
+    for ref, e in evidencia.items():
+        texto = e["texto"]
+        if len(texto) > presupuesto:
+            recortes.append({
+                "ref": ref,
+                "documento": e["documento"],
+                "caracteres_totales": len(texto),
+                "caracteres_enviados": presupuesto,
+            })
+            texto = texto[:presupuesto] + (
+                f" […recortado: faltan {len(e['texto']) - presupuesto} "
+                f"caracteres de esta evidencia]"
+            )
+        bloques.append(f"[{ref}] (documento {e['documento']})\n{texto}")
     contenido = (
         f"PREGUNTA:\n{pregunta}\n\n"
         f"EVIDENCIA CITABLE:\n" + "\n\n".join(bloques) + "\n\n"
@@ -518,6 +581,8 @@ async def verificar(
             and not a["localizador_verificado"]
         ),
     }
+    resumen["evidencias_recortadas"] = len(recortes)
     return {"ejecutado": True, "afirmaciones": afirmaciones,
             "ejemplos": ejemplos, "cobertura": cobertura,
+            "evidencia_recortada": recortes,
             "resumen": resumen, "error": None}
