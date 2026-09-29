@@ -69,7 +69,8 @@ class RunManifestStore:
         return self._manifest.frozen_versions if self._manifest else {}
 
     def record_trace(
-        self, trace_id: str, drift: list[dict], model: str | None = None
+        self, trace_id: str, drift: list[dict], model: str | None = None,
+        question_set_id: str | None = None,
     ) -> None:
         if self._manifest is None:
             return
@@ -77,6 +78,9 @@ class RunManifestStore:
             self._manifest.trace_count += 1
             if model and model not in self._manifest.models_observed:
                 self._manifest.models_observed.append(model)
+            if (question_set_id
+                    and question_set_id not in self._manifest.question_sets_observed):
+                self._manifest.question_sets_observed.append(question_set_id)
             if drift:
                 self._manifest.drift_detected.append({
                     "trace_id": trace_id,

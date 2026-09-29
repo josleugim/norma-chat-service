@@ -408,6 +408,15 @@ class RunManifest(BaseModel):
     # Modelos usados en la corrida. Más de uno significa que la comparación
     # entre preguntas no es limpia, aunque el entorno no haya cambiado.
     models_observed: list[str] = Field(default_factory=list)
+    # Los conjuntos de preguntas que de verdad corrieron.
+    #
+    # `question_set` de arriba sale de la configuración del servicio, así que
+    # dice lo que el .env tenga puesto, no lo que el corredor ejecutó. En las
+    # tres bandas del holdout entregadas a COFECE decía "pruebas_imanol_v1"
+    # —la batería interna— cuando la corrida era el holdout: una contradicción
+    # dentro del mismo archivo, contra el run_id y la etiqueta. Esto se llena
+    # desde las trazas, que sí saben qué se preguntó.
+    question_sets_observed: list[str] = Field(default_factory=list)
     # Foto del universo al arrancar la corrida. El acervo se sigue cargando,
     # así que sin esto dos corridas no son comparables en exhaustividad: no
     # habría cómo distinguir un fix nuestro de documentos nuevos.

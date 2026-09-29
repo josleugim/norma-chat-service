@@ -686,6 +686,8 @@ class NormaPlusAgent:
                     trace.trace_id,
                     getattr(collector, "drift", []) or [],
                     model=trace.versions.model,
+                    question_set_id=getattr(
+                        trace.request, "question_set_id", None),
                 )
         except Exception as e:
             logger.error(f"No se pudo cerrar la traza: {e}")

@@ -4170,3 +4170,59 @@ class TestLaTrazaNoTiraLoQueElVerificadorCalcula:
         guardado = {"ruta": "content", **ver}
         assert len(guardado["evidencia_recortada"]) == \
             guardado["resumen"]["evidencias_recortadas"]
+
+
+class TestElManifiestoDiceQueBateriaCorrio:
+    """
+    Las tres bandas del holdout entregadas a COFECE llevan en su manifiesto
+    `question_set: "pruebas_imanol_v1"` —la batería interna— cuando la corrida
+    fue el holdout. El campo sale de la configuración del servicio, así que
+    dice lo que el .env tenga puesto y no lo que el corredor ejecutó.
+
+    Es una contradicción dentro del mismo archivo: el `run_id` y la etiqueta
+    dicen holdout. Y el manifiesto es justo lo que COFECE lee para saber qué
+    produjo una corrida, así que no es cosmético — es reproducibilidad.
+
+    El arreglo sigue el patrón de `models_observed`: acumular lo observado en
+    vez de declarar lo configurado.
+    """
+
+    def _almacen(self, tmp_path):
+        from core.tracing.manifest import RunManifestStore
+        from core.tracing.schema import Versions
+        store = RunManifestStore(str(tmp_path), "corrida_de_prueba")
+        store.load_or_create(
+            Versions(agent_semver="0.0.0", prompt_sha256="x", tools_sha256="y"),
+            label="prueba", question_set="pruebas_imanol_v1")
+        return store
+
+    def test_acumula_la_bateria_que_de_verdad_corrio(self, tmp_path):
+        store = self._almacen(tmp_path)
+        store.record_trace("tr_1", [], model="gpt-4.1",
+                           question_set_id="V63-H01")
+        store.record_trace("tr_2", [], model="gpt-4.1",
+                           question_set_id="V63-H02")
+        m = store._manifest
+        assert m.question_sets_observed == ["V63-H01", "V63-H02"]
+        assert m.question_set == "pruebas_imanol_v1", (
+            "lo configurado se conserva: la contradicción es el dato, "
+            "no algo que haya que esconder")
+
+    def test_no_repite_el_mismo_identificador(self, tmp_path):
+        store = self._almacen(tmp_path)
+        for i in range(3):
+            store.record_trace(f"tr_{i}", [], question_set_id="V63-H01")
+        assert store._manifest.question_sets_observed == ["V63-H01"]
+
+    def test_una_traza_sin_identificador_no_ensucia_la_lista(self, tmp_path):
+        store = self._almacen(tmp_path)
+        store.record_trace("tr_1", [], question_set_id=None)
+        assert store._manifest.question_sets_observed == []
+
+    def test_el_agente_le_pasa_el_identificador_de_la_traza(self):
+        """Sin esto el acumulador existe y nunca se llena."""
+        from pathlib import Path
+        src = Path("agent/agent.py").read_text(encoding="utf-8")
+        i = src.index("record_trace(")
+        assert "question_set_id=" in src[i:i + 320], (
+            "el agente debe pasar el identificador que trae la traza")
