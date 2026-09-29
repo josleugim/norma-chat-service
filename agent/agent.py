@@ -25,7 +25,13 @@ from agent.tools import TOOLS
 from prompts.system import AGENT_SYSTEM_PROMPT, TITLE_GENERATION_PROMPT
 from core.fuentes import case_link_de, clasificar_fuente, composicion
 from core.identidades import ResolutorDeIdentidades
+from temporal.avisos import ETIQUETA_ALCANCE
 from core.requisitos import construir_requisitos, verificar as verificar_requisitos
+from core.verificacion_semantica import (
+    construir_evidencia as construir_evidencia_semantica,
+    verificar as verificar_semantica,
+    texto_de_evidencia as texto_de_evidencia_semantica,
+)
 from core.validacion_salida import validar_borrador
 from core.voz import clasificar_voz, etiqueta as etiqueta_voz, VOTO_PARTICULAR, NO_IDENTIFICADA
 from models.schemas import (
@@ -58,6 +64,14 @@ COMPLEMENTO_DE_BUSQUEDA = {
 CRITERIO_CONTEXT_CHARS = 700
 
 
+# Campos con los que se calcula un plazo. Si el registro no los trae, no se
+# aceptan del modelo: una fecha transcrita no tiene procedencia.
+_CAMPOS_DE_CALCULO = frozenset({
+    "startAgreementDate", "notificationDate", "admissionDate",
+    "resolutionDate", "basicInfoRequestDate", "additionalInfoRequestDate",
+    "complaintFilingDate", "complaintAdmissionDate", "judgmentDate",
+})
+
 class NormaPlusAgent:
 
     def __init__(
@@ -69,6 +83,9 @@ class NormaPlusAgent:
         citation_builder: CitationBuilder,
         evidence_cache: EvidenceCache,
         max_tool_calls: int = 6,
+        max_http_requests: int = 12,
+        verificacion_semantica: bool = False,
+        avisos=None,
         trace_sink=None,
         manifest_store=None,
         settings=None,
@@ -80,6 +97,17 @@ class NormaPlusAgent:
         self.citations = citation_builder
         self.evidence_cache = evidence_cache
         self.max_tool_calls = max_tool_calls
+        # Peticiones de recuperación, que no es lo mismo: una llamada
+        # sobre N documentos hace N peticiones. Ver config.py.
+        self.max_http_requests = max_http_requests
+        # Verificación semántica (I5). Arranca en EVALUACIÓN: se registra y
+        # no bloquea. Configurable porque agrega una llamada al modelo por
+        # turno, y el presupuesto de LLM se cuenta aparte del de HTTP.
+        self.verificacion_semantica = verificacion_semantica
+        # Catálogo de acuerdos de suspensión. Puede ser None: en ese caso la
+        # cifra sale con la revisión de suspensiones declarada incompleta, no
+        # con una lista vacía que se lea como exhaustiva.
+        self.avisos = avisos
 
         # Resolutor de identidades documentales (C02). Se construye desde el
         # universo consultable, así que sólo puede devolver expedientes que
@@ -298,8 +326,8 @@ class NormaPlusAgent:
                     # resuelve dejaba el marcador y su afirmación en el texto,
                     # con la fuente ausente de la lista. La defensa llegaba
                     # tarde por el orden, no por falta de mecanismo.
-                    final_text = self._emitir_validado(
-                        response.content, state, collector, "content")
+                    final_text = await self._emitir_validado(
+                        response.content, state, collector, "content", adapter, model)
                     for chunk in self._chunk_text(final_text):
                         yield StreamEvent(type="token", data={"text": chunk})
                 else:
@@ -323,8 +351,8 @@ class NormaPlusAgent:
                             total_input_tokens += chunk.input_tokens
                         if chunk.output_tokens:
                             total_output_tokens += chunk.output_tokens
-                    final_text = self._emitir_validado(
-                        "".join(final_parts), state, collector, "stream")
+                    final_text = await self._emitir_validado(
+                        "".join(final_parts), state, collector, "stream", adapter, model)
                     for _c in self._chunk_text(final_text):
                         yield StreamEvent(type="token", data={"text": _c})
                     if collector is not None:
@@ -372,9 +400,9 @@ class NormaPlusAgent:
                 total_output_tokens += fallback_response.output_tokens
 
                 if fallback_response.content:
-                    final_text = self._emitir_validado(
+                    final_text = await self._emitir_validado(
                         fallback_response.content, state, collector,
-                        "forced_synthesis")
+                        "forced_synthesis", adapter, model)
                     for chunk in self._chunk_text(final_text):
                         yield StreamEvent(type="token", data={"text": chunk})
                 else:
@@ -393,9 +421,9 @@ class NormaPlusAgent:
                             total_input_tokens += chunk.input_tokens
                         if chunk.output_tokens:
                             total_output_tokens += chunk.output_tokens
-                    final_text = self._emitir_validado(
+                    final_text = await self._emitir_validado(
                         "".join(final_parts), state, collector,
-                        "forced_synthesis_stream")
+                        "forced_synthesis_stream", adapter, model)
                     for _c in self._chunk_text(final_text):
                         yield StreamEvent(type="token", data={"text": _c})
             except Exception as e:
@@ -455,6 +483,59 @@ class NormaPlusAgent:
                 "requisitos", state.requisitos, "heuristic")
             collector.set_decision(
                 "requisitos_verificados", state.requisitos_verificados, "derived")
+            # Sobre cuánta evidencia se verificó. COFECE pidió poder ver qué
+            # necesidad disparó cada consulta y contra qué se comprobó; sin
+            # esto, un requisito cumplido no dice si lo sostuvo el registro,
+            # los criterios, o los dos.
+            collector.set_decision(
+                "evidencia_verificada",
+                {
+                    "documentos": len(state.evidencia_acumulada),
+                    "expedientes": sorted({
+                        case_link_de(d) for d in state.evidencia_acumulada
+                        if case_link_de(d)
+                    }),
+                },
+                "derived")
+            # El presupuesto real gastado. `tool_calls_count` cuenta lo que
+            # eligió el modelo; esto cuenta lo que costó de verdad.
+            # El payload exacto de evidencia que vio el modelo, con marcador,
+            # documento y texto. COFECE lo pide en su punto 3 de evidencia
+            # ("Exportar el payload exacto de evidencia recibido por el
+            # modelo") y sin él no se puede replicar una verificación
+            # semántica sobre una corrida pasada: las trazas anteriores sólo
+            # guardaban conteos.
+            # Con los MISMOS campos prioritarios que recibió el revisor.
+            #
+            # Sin esto la traza mostraba otro orden que el enviado, y COFECE
+            # pide justo lo contrario: "La traza debe guardar exactamente los
+            # bloques enviados al revisor." Dos órdenes distintos hacen que la
+            # evidencia exportada no sirva para reproducir su juicio.
+            _prio = [
+                c for r in (state.requisitos or [])
+                if r.get("tipo") == "campos_registro"
+                for c in (r.get("valor") or [])
+            ]
+            collector.set_decision(
+                "evidencia_payload",
+                [
+                    {"ref": d.get("ref"),
+                     "documento": case_link_de(d),
+                     "texto": texto_de_evidencia_semantica(d, _prio)[:1500],
+                     "anchor": str((d.get("metadata") or {}).get("anchor") or "")[:400]}
+                    for d in state.evidencia_acumulada
+                    if isinstance(d, dict) and d.get("ref")
+                ],
+                "derived")
+            collector.set_decision(
+                "presupuesto_peticiones",
+                {
+                    "peticiones_http": state.peticiones_http,
+                    "limite": self.max_http_requests,
+                    "agotado": state.peticiones_http >= self.max_http_requests,
+                    "documentos_no_consultados": state.recortes_por_presupuesto,
+                },
+                "derived")
             collector.set_decision(
                 "cobertura_por_documento", state.cobertura_por_documento, "derived")
             collector.set_decision(
@@ -631,6 +712,30 @@ class NormaPlusAgent:
                 session_id, registro
             ) or self.evidence_cache.get_context_summary(session_id)
 
+            # La evidencia de caché entra al MISMO control que la recién
+            # buscada.
+            #
+            # COFECE lo observó en H20-B/C: esas respuestas salen del caché sin
+            # nuevas herramientas, y el verificador no las revisaba —contaban
+            # entre las cinco "sin resultado utilizable"— porque
+            # `evidencia_acumulada` sólo se llenaba desde los resultados de
+            # herramienta. Una respuesta apoyada en evidencia recordada tiene
+            # que poder comprobarse igual que una apoyada en evidencia nueva.
+            #
+            # Se acumula DESPUÉS de `contexto_para_turno`, que es quien asigna
+            # los marcadores de este turno: el marcador tiene que ser el que el
+            # modelo va a leer, no uno nuevo.
+            if state is not None and registro is not None:
+                for pieza, kind in (
+                    [(c, "C") for c in (cached_criterios or [])]
+                    + [(e, "E") for e in (cached_expedientes or [])]
+                ):
+                    if not isinstance(pieza, dict):
+                        continue
+                    ref = registro.assign(pieza, kind)
+                    if ref:
+                        state.acumular_evidencia([{**pieza, "ref": ref}])
+
         # System prompt + cache context
         system_content = AGENT_SYSTEM_PROMPT
         if cache_context:
@@ -651,7 +756,19 @@ class NormaPlusAgent:
         if ident:
             lineas = []
             for i in ident:
-                if i["ambiguo"]:
+                if i.get("conflicto"):
+                    # La pregunta trae una fecha que el acervo no confirma.
+                    # Antes esto se resolvía en silencio y la búsqueda quedaba
+                    # abierta; decirlo es la diferencia entre responder sobre
+                    # otro acto y advertir que el dato no cuadra.
+                    lineas.append(
+                        f"- «{i['mencion']}» NO se pudo resolver: "
+                        f"{i['conflicto']}. No elijas el acto más parecido ni "
+                        f"supongas que la fecha es un error: dilo en la "
+                        f"respuesta y pide la precisión que falta. Si "
+                        f"contestas sobre otro acto, adviértelo expresamente."
+                    )
+                elif i["ambiguo"]:
                     lineas.append(
                         f"- «{i['mencion']}» corresponde a MÁS DE UN asunto: "
                         + ", ".join(i["candidatos"])
@@ -781,7 +898,8 @@ class NormaPlusAgent:
 
     # ── Ejecutores de herramientas ──────────────────────────
 
-    def _emitir_validado(self, texto: str, state, collector, ruta: str):
+    async def _emitir_validado(self, texto: str, state, collector, ruta: str,
+                               adapter=None, model: str = ""):
         """
         Salida única para TODAS las rutas: valida y después emite.
 
@@ -813,7 +931,266 @@ class NormaPlusAgent:
                     f"[{ruta}] marcadores fuera del registro: "
                     + ", ".join(revision["marcadores_invalidos"]),
                 )
+
+        # Verificación semántica (I5), en EVALUACIÓN.
+        #
+        # Lee el borrador ya reparado contra la evidencia del turno y dice, por
+        # afirmación, si el pasaje la sostiene. Es lo único que mira el
+        # significado: H16-C recibió sus dos criterios completos y los usó para
+        # sostener lo contrario de lo que dicen.
+        #
+        # **No bloquea.** COFECE fue explícito: "no aprueba requisitos ni
+        # bloquea automáticamente la publicación" hasta que su propia medición
+        # lo justifique. Una segunda lectura del modelo es tan falible como la
+        # primera, y encadenar la publicación a ella cambia un modo de falla
+        # por otro. Aquí se registra para poder medirla.
+        if (getattr(self, "verificacion_semantica", False)
+                and adapter is not None and state is not None):
+            try:
+                # Los campos que la pregunta pide comprobar van primero en la
+                # evidencia del revisor. Sin esto, un campo material largo
+                # queda fuera del corte y el revisor juzga sin verlo — es el
+                # caso de H18 y `judicialDecisionEffects`.
+                prioritarios = [
+                    c for r in state.requisitos
+                    if r.get("tipo") == "campos_registro"
+                    for c in (r.get("valor") or [])
+                ]
+                evidencia = construir_evidencia_semantica(
+                    state.registry, state.evidencia_acumulada, prioritarios
+                )
+                if evidencia:
+                    ver = await verificar_semantica(
+                        pregunta=getattr(state, "query", "") or "",
+                        borrador=revision["texto"],
+                        evidencia=evidencia,
+                        adapter=adapter,
+                        model=model or "gpt-4.1",
+                    )
+                    state.verificacion_semantica = {"ruta": ruta, **ver}
+                    if collector is not None:
+                        # Todo lo que produjo el verificador, no un subconjunto.
+                        #
+                        # Guardaba sólo resumen/afirmaciones/error, así que se
+                        # perdían tres cosas que sí se calculan: la lista de
+                        # recortes —el resumen decía "2" y el detalle no
+                        # existía—, la cobertura por componente y los
+                        # ejemplares. COFECE pide declarar toda insuficiencia
+                        # del payload; un contador sin detalle no la declara.
+                        #
+                        # Cuarta vez con este patrón (composicion_fuentes,
+                        # evidencia_verificada, presupuesto_peticiones): se
+                        # calcula bien y la traza lo descarta.
+                        collector.set_decision(
+                            "verificacion_semantica",
+                            {"ruta": ruta, **ver},
+                            "derived")
+            except Exception as e:
+                # El verificador no puede tumbar una respuesta. Si falla, se
+                # anota y la respuesta sale igual: está en evaluación.
+                logger.warning(
+                    f"Verificación semántica omitida: {type(e).__name__}: {e}")
+
         return revision["texto"]
+
+    # Cuántos documentos se amplían y cuántos pasajes se toman de cada uno.
+    #
+    # Medido contra staging el 26-sep: filtrando por el documento, el criterio
+    # que H08 necesitaba sale en posición 2 o 3. Ocho alcanza de sobra, y el
+    # tope importa: una primera versión traía 23 por documento y llevó la
+    # evidencia de 20 a 66 entradas de ruido.
+    # Tope de la ampliación. Holgado a propósito: con el filtro exacto,
+    # `devueltos < tope` es lo que permite afirmar que se vio el documento
+    # entero, y el documento más grande del universo tiene 62 criterios.
+    _TOPE_AMPLIACION = 100
+    _AMPLIAR_DOCUMENTOS = 2
+    _AMPLIAR_PASAJES = 8
+
+    async def _ampliar_precedente(self, query: str, results: list,
+                                  collector, state) -> list:
+        """
+        Una búsqueda dirigida dentro del precedente mejor rankeado.
+
+        §4.4 de la revisión del 25-sep. H08 pide "una resolución VCN que lo
+        explique" y las tres corridas hicieron dos búsquedas ABIERTAS, omitiendo
+        la evaluación conjunta de actos. El criterio que la sostiene —4212 de
+        VCN-001-2025, 221 caracteres— nunca llegó al contexto.
+
+        Verificado contra staging: no estaba fuera de alcance, estaba fuera del
+        top-k de una consulta que no acotaba documento. Filtrando por
+        VCN-001-2025 sale en posición 2 o 3.
+
+        **El selector es el ranking, no el conteo.** La primera versión de esto
+        eligió "el documento que más aportó" y amplió sobre dos documentos
+        irrelevantes: el conteo amplifica lo que la búsqueda abierta devolvió
+        más, que no es lo mismo que pertinencia. Medido, el mejor rankeado sí es
+        el precedente correcto —VCN-005-2024 en H16, VCN-001-2025 en la segunda
+        consulta de H08—.
+
+        Lo que NO se puede afirmar es cobertura completa: una búsqueda semántica
+        con tope dentro de un documento no prueba que no tenga más condiciones.
+        """
+        if state is None or not getattr(state, "requisitos", None):
+            return results
+        if not [r for r in state.requisitos if r["tipo"] == "ejemplo"]:
+            return results
+        if getattr(state, "amplio_precedente", False):
+            return results          # una sola vez por turno
+
+        def doc_de(r):
+            return case_link_de(r.model_dump() if hasattr(r, "model_dump") else r)
+
+        # Por orden de aparición, que es el orden del ranking del servicio.
+        candidatos: list[str] = []
+        for r in results:
+            cl = doc_de(r)
+            if cl and cl not in candidatos:
+                candidatos.append(cl)
+            if len(candidatos) >= self._AMPLIAR_DOCUMENTOS:
+                break
+        if not candidatos:
+            return results
+
+        vistos = {str((r.model_dump() if hasattr(r, "model_dump") else r).get("id"))
+                  for r in results}
+        agregados, ampliacion = [], []
+        for cl in candidatos:
+            if getattr(state, "peticiones_http", 0) >= self.max_http_requests:
+                ampliacion.append({"documento": cl, "recuperados": 0,
+                                   "motivo_limite": "presupuesto agotado"})
+                continue
+            state.peticiones_http += 1
+            try:
+                extra = await self.criterios.search(
+                    query=query, top_k=self._TOPE_AMPLIACION,
+                    filters={"caseLink": cl}, collector=collector,
+                )
+            except Exception as e:
+                ampliacion.append({"documento": cl, "recuperados": 0,
+                                   "motivo_limite": type(e).__name__})
+                continue
+            nuevos = 0
+            for r in extra:
+                if nuevos >= self._AMPLIAR_PASAJES:
+                    break
+                d = r.model_dump() if hasattr(r, "model_dump") else r
+                # El filtro de la API es substring, no igualdad.
+                if case_link_de(d) != cl or str(d.get("id")) in vistos:
+                    continue
+                vistos.add(str(d.get("id")))
+                agregados.append(r)
+                nuevos += 1
+            # La cobertura es SIEMPRE parcial, y aquí está por qué.
+            #
+            # El 27-sep declaramos "completa" cuando `len(extra) < tope`,
+            # razonando que con el filtro exacto el cupo ya no se gasta en
+            # documentos ajenos. COFECE lo desmontó con el desglose por etapa,
+            # y tenía razón en dos cosas a la vez:
+            #
+            #   candidatos de la API              26
+            #   tras el filtro de distancia       15   <- `extra` es ESTO
+            #   pasajes añadidos al contexto       8   <- y sólo se manda esto
+            #
+            # `extra` ya viene filtrado por distancia, así que un resultado
+            # corto puede significar "el documento tiene poco" o "el filtro
+            # descartó la mitad". Y aunque no lo estuviera, sólo se añaden
+            # ocho. Ninguna de las dos cosas es leer el documento entero.
+            #
+            # Para afirmar enumeración completa haría falta un contrato de
+            # totalidad del servicio —un total declarado o un listado
+            # íntegro—, que hoy no existe. Mientras tanto se reportan las
+            # etapas y se declara parcial.
+            candidatos = getattr(self.criterios, "last_candidatos", None)
+            descartados = (candidatos - len(extra)) if candidatos is not None else None
+            ampliacion.append({
+                "documento": cl,
+                "candidatos_de_la_api": candidatos,
+                "tras_filtro_de_distancia": len(extra),
+                "descartados_por_distancia": descartados,
+                "pasajes_anadidos": nuevos,
+                "cobertura": "parcial",
+                "motivo_limite": (
+                    "búsqueda semántica con filtro de distancia y tope de "
+                    "pasajes: no acredita haber leído el documento completo. "
+                    "Haría falta un contrato de totalidad del servicio."
+                ),
+            })
+
+        state.amplio_precedente = True
+        state.ampliacion_precedente = ampliacion
+        if collector is not None:
+            collector.set_decision("ampliacion_precedente", ampliacion, "derived")
+        return list(results) + agregados
+
+    def _avisos_de_plazos(self, calculos: list[dict]) -> tuple[list, dict]:
+        """
+        Acuerdos coincidentes y estado de cobertura para los plazos calculados.
+
+        Devuelve `([], {})` si no hay catálogo: la ausencia de avisos por falta
+        de datos no puede leerse como ausencia de acuerdos, así que en ese caso
+        se declara la limitación en la cobertura y no se presenta una lista
+        vacía como si fuera exhaustiva.
+        """
+        cat = getattr(self, "avisos", None)
+        if cat is None:
+            return [], {}
+
+        from datetime import date as _date, datetime as _dt
+
+        def fecha(v):
+            if isinstance(v, _date):
+                return v
+            t = str(v or "").strip()[:10]
+            for f in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y"):
+                try:
+                    return _dt.strptime(t, f).date()
+                except ValueError:
+                    pass
+            return None
+
+        ventanas = [
+            (fecha(c.get("fecha_inicio")), fecha(c.get("fecha_fin")),
+             c.get("authority"))
+            for c in calculos if c.get("calculable")
+        ]
+        ventanas = [(i, f, a) for i, f, a in ventanas if i and f]
+        if not ventanas:
+            return [], {}
+
+        avisos, vistos = [], set()
+        sin_confirmar, limitaciones = [], []
+        for ini, fin, aut in ventanas:
+            for a in (cat.avisos_para(ini, fin, aut) or cat.avisos_para(ini, fin)):
+                if a["id"] in vistos:
+                    continue
+                vistos.add(a["id"])
+                avisos.append(a)
+            cg = cat.cobertura_calendario_general(ini, fin)
+            for p in cg["periodos_sin_confirmar"]:
+                if p["id"] not in [x["id"] for x in sin_confirmar]:
+                    sin_confirmar.append(p)
+            ca = cat.cobertura_avisos(ini, fin)
+            for p in ca["limitaciones"] + ca.get("acuerdos_sin_periodo", []):
+                if p["id"] not in [x["id"] for x in limitaciones]:
+                    limitaciones.append(p)
+
+        cobertura = {}
+        if sin_confirmar:
+            cobertura["calendario_general_sin_confirmar"] = sin_confirmar
+            cobertura["regla_calendario"] = (
+                "El calendario ordinario no está confirmado para parte del "
+                "periodo. NO presentes la cifra de días hábiles como "
+                "comprobada: di qué periodo falta. Los días naturales siguen "
+                "siendo válidos si sus fechas lo son."
+            )
+        if limitaciones or not cat.cargado:
+            cobertura["revision_de_suspensiones_incompleta"] = limitaciones
+            cobertura["regla_avisos"] = (
+                "La revisión de acuerdos quedó incompleta. Dilo; no afirmes "
+                "que no existen acuerdos coincidentes. Esto NO altera la cifra "
+                "de días hábiles."
+            )
+        return avisos, cobertura
 
     async def _buscar_criterios_por_documento(
         self, query: str, expedientes: list[str], top_k: int, collector, state
@@ -873,6 +1250,27 @@ class NormaPlusAgent:
                 cobertura.append({"expediente": exp, "recuperados": 0,
                                   "motivo": "fuera del universo consultable"})
                 continue
+            # Presupuesto de peticiones, no de llamadas (§1.7 de COFECE). Cada
+            # documento es una petición porque el endpoint acepta un solo
+            # `caseLink`; sin este control, comparar diez documentos gasta diez
+            # peticiones bajo una sola llamada del modelo.
+            #
+            # Y si se agota NO se calla: el documento no consultado se declara
+            # en la cobertura. Una comparación a la que le falta un lado tiene
+            # que poder saberse incompleta — es el defecto de H15.
+            if state is not None and state.peticiones_http >= self.max_http_requests:
+                cobertura.append({
+                    "expediente": exp, "recuperados": 0,
+                    "motivo": "no se consultó: presupuesto de peticiones agotado",
+                })
+                state.recortes_por_presupuesto.append({
+                    "expediente": exp,
+                    "peticiones_gastadas": state.peticiones_http,
+                    "limite": self.max_http_requests,
+                })
+                continue
+            if state is not None:
+                state.peticiones_http += 1
             parciales = await self.criterios.search(
                 query=query,
                 top_k=top_k,
@@ -880,15 +1278,17 @@ class NormaPlusAgent:
                 collector=collector,
             )
 
-            # El filtro de la API es SUBSTRING, no igualdad. Verificado el
-            # 22-sep: `caseLink=VCN-004-2022` devuelve 16 criterios suyos MÁS
-            # los 14 de `VCN-004-2022_2025_10_09`, que es otro acto. Por eso en
-            # H10 la respuesta mezclaba la fórmula de incremento del acto
-            # original con lo preguntado sobre el cumplimiento.
+            # El filtro de la API es EXACTO desde el 27-sep-2026.
             #
-            # Pedir un documento y recibir además sus parientes no es una
-            # ampliación útil: es la mezcla de actos que hay que evitar. Se
-            # comprueba igualdad y lo ajeno se descarta con registro.
+            # Antes hacía substring: `caseLink=VCN-004-2022` devolvía 16
+            # criterios suyos MÁS los 14 de `VCN-004-2022_2025_10_09`, que es
+            # otro acto, y por eso H10 mezclaba la fórmula del acto original
+            # con lo preguntado sobre el cumplimiento. Se lo pedimos a José
+            # Miguel y lo cambió. Verificado: cero ajenos en tres documentos.
+            #
+            # La comprobación local **se queda** como guarda de regresión. Si
+            # vuelve a disparar es que el filtro dejó de ser exacto, y eso hay
+            # que saberlo: el defecto que produce es silencioso.
             ajenos = [r for r in parciales if case_link_de(r.model_dump()
                       if hasattr(r, "model_dump") else r) != exp]
             if ajenos:
@@ -897,9 +1297,11 @@ class NormaPlusAgent:
                     for r in ajenos
                 })
                 logger.warning(
-                    f"caseLink={exp} devolvió {len(ajenos)} criterios de otros "
-                    f"actos ({', '.join(otros)}). Se descartan: son documentos "
-                    f"distintos."
+                    f"REGRESIÓN DEL FILTRO: caseLink={exp} devolvió "
+                    f"{len(ajenos)} criterios de otros actos "
+                    f"({', '.join(otros)}). El filtro debería ser exacto desde "
+                    f"el 27-sep. Se descartan, pero hay que avisarle a José "
+                    f"Miguel: el defecto que produce es silencioso."
                 )
                 parciales = [r for r in parciales if r not in ajenos]
 
@@ -949,6 +1351,9 @@ class NormaPlusAgent:
                 query=args["query"],
                 top_k=args.get("top_k", 15),
                 collector=collector,
+            )
+            results = await self._ampliar_precedente(
+                args["query"], results, collector, state
             )
         # Voz del criterio (C05). Un voto particular dice lo contrario de la
         # sentencia: atribuirlo al tribunal cambia el sentido de lo resuelto.
@@ -1119,7 +1524,7 @@ class NormaPlusAgent:
         # que el conteo se cierra localmente. El resto de condiciones ya
         # vinieron aplicadas y este paso es idempotente.
         locales = self._filtrar_local(
-            [r.model_dump() for r in registros], args, state
+            [r.para_prompt() for r in registros], args, state
         )
 
         # Sin `meta.total`, "exacto" solo se puede afirmar cuando la API
@@ -1246,7 +1651,15 @@ class NormaPlusAgent:
             filters={"caseLink": f"{prefijo}-"} if prefijo else None,
             collector=collector,
         )
-        registros = [r.model_dump() for r in crudos]
+        # `para_prompt()` y no `model_dump()`: es la forma canónica que ve el
+        # modelo, y la única que normaliza `parent` a `expediente_principal`.
+        #
+        # Que esta ruta usara `model_dump()` dejó H01 en incumplido en las tres
+        # repeticiones del 27-sep: la respuesta publicaba bien el principal y el
+        # control decía que faltaba, porque buscaba el campo normalizado y aquí
+        # viajaba el objeto anidado. COFECE lo localizó: "Normalizar los
+        # registros una sola vez y probar la ruta completa."
+        registros = [r.para_prompt() for r in crudos]
         if prefijo:
             p = prefijo.upper().rstrip("-") + "-"
             registros = [
@@ -1527,7 +1940,7 @@ class NormaPlusAgent:
                 prefijo, filters=filters, collector=collector
             )
             serialized = self._filtrar_local(
-                [r.model_dump() for r in registros], args, state
+                [r.para_prompt() for r in registros], args, state
             )
             # Se recorrió el universo completo del prefijo: no hay que
             # advertir de cobertura parcial aunque los filtros locales
@@ -1602,6 +2015,15 @@ class NormaPlusAgent:
         # Guardado para usar_ultima_busqueda, que evita que el modelo tenga
         # que devolver el arreglo completo y truncar sus propios argumentos.
         state.last_expedientes = serialized
+        # Y como conjunto identificado, para que un cálculo posterior pueda
+        # decir sobre cuál se hizo aunque el modelo vuelva a buscar.
+        ds = state.nuevo_dataset(serialized)
+        if collector is not None:
+            collector.set_decision(
+                "dataset_actual",
+                {"dataset_id": ds, "registros": len(serialized),
+                 "universo_completo": state.universo_completo},
+                "derived")
 
         if collector is not None:
             collector.record_stage(
@@ -1690,6 +2112,69 @@ class NormaPlusAgent:
                         if isinstance(e, dict) and case_link_de(e)}
             excluidos = sorted(recuperados - enviados)
 
+        # Las fechas salen del registro recuperado, no de lo que reenvía el
+        # modelo (I7).
+        #
+        # COFECE lo reprodujo: "Mantener los cinco IDs y alterar una fecha
+        # entregada por el modelo produce 63.6 sin detectar que el valor
+        # difiere del registro original." Confirmado aquí — alterar una fecha
+        # movía el promedio de 15.0 a 20.0 sin que nada lo notara.
+        #
+        # El modelo elige QUÉ se calcula; los valores con los que se calcula
+        # los pone el código. Una cifra cuyo insumo puede reescribirse en el
+        # camino no es auditable, por correcta que salga.
+        discrepancias: list[dict] = []
+        if state and state.last_expedientes:
+            por_id = {case_link_de(e): e for e in state.last_expedientes
+                      if isinstance(e, dict) and case_link_de(e)}
+            restaurados = []
+            for e in expedientes:
+                if not isinstance(e, dict):
+                    restaurados.append(e)
+                    continue
+                origen = por_id.get(case_link_de(e))
+                if not origen:
+                    restaurados.append(e)
+                    continue
+                # Se parte del REGISTRO, no de lo que reenvió el modelo.
+                #
+                # Antes se hacía `e = dict(e)` y se superponían los campos del
+                # origen. Si el origen no traía la clave, el valor del modelo
+                # sobrevivía. COFECE lo reprodujo y lo confirmamos: origen sin
+                # `resolutionDate`, el modelo agrega 11-01-2024, y sale un
+                # promedio de 10.0 sin que nada lo advierta. El arreglo
+                # anterior sólo cubría el campo presente con valor distinto —
+                # la mitad fácil del problema.
+                #
+                # Un campo que el registro no tiene no se puede completar con
+                # una transcripción: queda no disponible.
+                nuevo = dict(origen)
+                for campo, valor in e.items():
+                    if campo in origen:
+                        if origen[campo] != valor:
+                            discrepancias.append({
+                                "expediente": case_link_de(e),
+                                "campo": campo,
+                                "enviado_por_el_modelo": valor,
+                                "valor_del_registro": origen[campo],
+                            })
+                        continue
+                    # Campo que el registro NO tiene. Los de cálculo se
+                    # descartan; los demás (ref, marcadores) pueden pasar.
+                    if campo in _CAMPOS_DE_CALCULO:
+                        discrepancias.append({
+                            "expediente": case_link_de(e),
+                            "campo": campo,
+                            "enviado_por_el_modelo": valor,
+                            "valor_del_registro": None,
+                            "motivo": "el registro no tiene este campo: no se "
+                                      "puede calcular con un valor transcrito",
+                        })
+                        continue
+                    nuevo[campo] = valor
+                restaurados.append(nuevo)
+            expedientes = restaurados
+
         # Calculadora general entre cualquier par de campos de fecha. Antes
         # estaba cableada a notificación → resolución, que NO EXISTE en VCN.
         calculos = self.temporal.compute_between_fields(
@@ -1718,6 +2203,44 @@ class NormaPlusAgent:
             plazo_field = "dias_habiles"
 
         result = {"total_expedientes": len(enriched)}
+
+        # Alcance de la métrica y acuerdos coincidentes (§8, alcance aprobado
+        # por Imanol el 25-sep).
+        #
+        # La cifra de días hábiles describe tiempo transcurrido según el
+        # calendario ordinario. NO es tiempo procesal efectivo, y sin decirlo se
+        # lee como si lo fuera. Por eso la etiqueta viaja con la cifra y con sus
+        # agregaciones, no como nota al pie.
+        #
+        # Los acuerdos de suspensión que coinciden con el periodo se informan
+        # con su enlace y `aplicabilidad_al_expediente = no_evaluada`: la
+        # coincidencia es un cruce de fechas, no un juicio jurídico. No se
+        # descuenta ni un día por ellos.
+        if plazo_field == "dias_habiles":
+            result["ALCANCE_DE_LA_CIFRA"] = {
+                "denominacion": ETIQUETA_ALCANCE,
+                "ajusta_suspensiones": False,
+                "convencion": "excluye el día inicial, incluye el final",
+                "regla": (
+                    "Conserva esta denominación al citar la cifra y también en "
+                    "promedios, mínimos y tablas. Si la pregunta es por un "
+                    "vencimiento legal o por si se cumplió un plazo, esta "
+                    "cuenta NO lo resuelve: dilo en vez de sustituirla."
+                ),
+            }
+            avisos, cobertura = self._avisos_de_plazos(calculos)
+            if avisos:
+                result["ACUERDOS_DE_SUSPENSION_COINCIDENTES"] = {
+                    "acuerdos": avisos,
+                    "regla": (
+                        "Coinciden en fechas con los periodos calculados. NO "
+                        "afirmes que aplican, que no aplican ni que el "
+                        "procedimiento estuvo suspendido: preséntalos y pide "
+                        "al usuario revisar su aplicación."
+                    ),
+                }
+            if cobertura:
+                result["COBERTURA_DEL_CALENDARIO"] = cobertura
 
         # Filtrar por plazo si se pidió
         max_dh = args.get("max_dias_habiles")
@@ -1773,11 +2296,27 @@ class NormaPlusAgent:
                 data_for_stats, plazo_field=plazo_field
             )
             result["stats"]["unidad"] = plazo_field
-            result["stats"]["universo_calculado"] = len(elegibles)
+            # Sólo los que REALMENTE entraron al promedio.
+            #
+            # Un no calculable no aportaba valor pero sí aparecía aquí, así
+            # que `ids_incluidos` listaba tres expedientes para un promedio
+            # de dos. Es la lista con la que se reconstruye la cifra: si no
+            # reconcilia con `count`, la auditoría no sirve.
+            contados = [
+                e for e in elegibles
+                if isinstance(e, dict) and e.get(plazo_field) is not None
+            ]
+            result["stats"]["universo_calculado"] = len(contados)
             result["stats"]["ids_incluidos"] = sorted(
+                case_link_de(e) for e in contados if case_link_de(e)
+            )
+            omitidos = sorted(
                 case_link_de(e) for e in elegibles
                 if isinstance(e, dict) and case_link_de(e)
+                and e.get(plazo_field) is None
             )
+            if omitidos:
+                result["stats"]["ids_sin_valor"] = omitidos
             result["stats"]["alcance"] = (
                 "subconjunto filtrado" if (max_dh is not None or min_dh is not None)
                 else "universo completo"
@@ -1801,6 +2340,16 @@ class NormaPlusAgent:
             }
         if sin_id:
             result["REGISTROS_SIN_IDENTIDAD_DESCARTADOS"] = len(sin_id)
+        if discrepancias:
+            result["FECHAS_CORREGIDAS_DESDE_EL_REGISTRO"] = {
+                "casos": discrepancias[:10],
+                "regla": (
+                    "Los valores que enviaste no coincidían con el registro "
+                    "recuperado. Se calculó con los del registro. No "
+                    "transcribas fechas: manda los identificadores y deja que "
+                    "la herramienta las lea de la fuente."
+                ),
+            }
 
         no_calculables = [c for c in calculos if not c["calculable"]]
         if no_calculables:
@@ -1821,10 +2370,46 @@ class NormaPlusAgent:
         # `state`, que esta herramienta nunca llenaba. Por eso COFECE reportó
         # que "`computation_audit` está vacío" pese a que el cálculo sí se
         # registraba: se registraba en el otro lado.
+        # La operación agregada se registra SIEMPRE, se haya pedido o no.
+        #
+        # En H04 el modelo llamó la herramienta sin `compute_stats`, así que el
+        # código nunca calculó el promedio: el 63.4 lo enunció leyendo el
+        # desglose. La cifra era correcta y **no reconstruible**, y nada habría
+        # detectado un error de aritmética del modelo.
+        #
+        # COFECE: "Pedir promedio genera una operación de promedio; no basta una
+        # lista de diferencias con stats=null." Registrarla siempre cuesta nada
+        # y deja la cuenta auditable aunque la pregunta no la pidiera
+        # explícitamente.
+        elegibles_auditoria = [
+            c for c in calculos
+            if c.get("calculable") and c.get(plazo_field) is not None
+        ]
+        valores = [c[plazo_field] for c in elegibles_auditoria]
+        operacion = None
+        if valores:
+            operacion = {
+                "operacion": "promedio",
+                "unidad": plazo_field,
+                "n": len(valores),
+                "suma": sum(valores),
+                "promedio": round(sum(valores) / len(valores), 1),
+                "ids": sorted(
+                    case_link_de(e) for e, c in zip(expedientes, calculos)
+                    if isinstance(e, dict) and case_link_de(e)
+                    and c.get("calculable") and c.get(plazo_field) is not None
+                ),
+                "solicitada_por_el_modelo": bool(args.get("compute_stats")),
+            }
+
         auditoria = {
             "tool_called": True,
             "modo": "entre_campos",
+            # Sobre qué conjunto se calculó. Sin esto, una búsqueda posterior
+            # dejaba la auditoría apuntando a otra cosa.
+            "dataset_id": getattr(state, "dataset_actual", None) if state else None,
             "unidad": plazo_field,
+            "operacion_agregada": operacion,
             "ids_incluidos": sorted(
                 case_link_de(e) for e in expedientes
                 if isinstance(e, dict) and case_link_de(e)
@@ -1856,6 +2441,7 @@ class NormaPlusAgent:
                 ),
                 "ids_excluidos_de_la_busqueda": excluidos,
                 "unidad": plazo_field,
+                "operacion_agregada": operacion,
                 "per_case": [
                     {**c, "date_start": c["fecha_inicio"], "date_end": c["fecha_fin"],
                      "business_days": c["dias_habiles"],
@@ -1899,6 +2485,49 @@ class NormaPlusAgent:
                 f"({cal.coverage_ranges().get(institucion.upper())}). "
                 f"El conteo puede ser incorrecto: avísale al usuario."
             )
+
+        # La misma envoltura de alcance y avisos que la ruta por expedientes.
+        #
+        # COFECE lo señaló: esta rama retornaba antes, así que un conteo de días
+        # hábiles pedido con fechas sueltas salía **sin la etiqueta de alcance y
+        # sin los acuerdos coincidentes**, mientras el mismo intervalo pedido
+        # desde los campos de un expediente sí los llevaba. Dos entradas, dos
+        # respuestas distintas para la misma cuenta.
+        #
+        # Su prueba mínima: mismo intervalo y autoridad por las dos vías deben
+        # coincidir en cifra, convención, cobertura, etiqueta y avisos.
+        resultado["ALCANCE_DE_LA_CIFRA"] = {
+            "denominacion": ETIQUETA_ALCANCE,
+            "ajusta_suspensiones": False,
+            "convencion": "excluye el día inicial, incluye el final",
+            "regla": (
+                "Conserva esta denominación al citar la cifra. Si la pregunta "
+                "es por un vencimiento legal o por si se cumplió un plazo, esta "
+                "cuenta NO lo resuelve: dilo en vez de sustituirla."
+            ),
+        }
+        # Las fechas sueltas no vienen de un registro, así que se declara de
+        # dónde salieron: sin procedencia, una cifra no es auditable.
+        resultado["PROCEDENCIA_DE_LAS_FECHAS"] = (
+            "fechas aportadas en la consulta, no leídas de un expediente. Si "
+            "provienen de un documento, pídelas por documento y campo para que "
+            "queden auditables."
+        )
+        avisos, cobertura = self._avisos_de_plazos([{
+            "calculable": True, "fecha_inicio": d_ini, "fecha_fin": d_fin,
+            "authority": institucion,
+        }])
+        if avisos:
+            resultado["ACUERDOS_DE_SUSPENSION_COINCIDENTES"] = {
+                "acuerdos": avisos,
+                "regla": (
+                    "Coinciden en fechas con el periodo calculado. NO afirmes "
+                    "que aplican, que no aplican ni que el procedimiento estuvo "
+                    "suspendido: preséntalos y pide al usuario revisarlos."
+                ),
+            }
+        if cobertura:
+            resultado["COBERTURA_DEL_CALENDARIO"] = cobertura
 
         if collector is not None:
             collector.record_computation({
@@ -2038,6 +2667,9 @@ class NormaPlusAgent:
                 )
                 payload["composicion_fuentes"] = comp
                 state.composicion_fuentes = comp
+                # Toda la evidencia del turno queda junta, venga de la
+                # herramienta que venga. Ver `TurnState.acumular_evidencia`.
+                state.acumular_evidencia(result)
 
             # Requisitos por componente (C03). Se comprueban contra la
             # evidencia identificada —documento, voz, los dos lados de una
@@ -2046,9 +2678,58 @@ class NormaPlusAgent:
             # vocabulario de cualquier otro del mismo tema.
             if (state is not None and state.requisitos
                     and tool_name in ("buscar_criterios", "buscar_expedientes")):
-                v = verificar_requisitos(state.requisitos, result)
+                # Contra TODA la evidencia del turno, no contra la de esta
+                # llamada: un requisito que ya se cumplió no deja de cumplirse
+                # porque la siguiente búsqueda trajera otra cosa.
+                v = verificar_requisitos(
+                    state.requisitos, state.evidencia_acumulada
+                )
                 state.requisitos_verificados = v
                 payload["REQUISITOS"] = v["componentes"]
+
+                # Candidatos de ejemplo, con su pasaje ya emparejado.
+                #
+                # H16-A tuvo que reconstruir esa pareja y la reconstruyó mal:
+                # presentó VCN-005-2018 apoyándose en el criterio 4035, que es
+                # de VCN-005-2024. El pasaje era auténtico y el documento
+                # existía; lo que no existía era la relación entre los dos.
+                #
+                # Entregar el agrupamiento hecho no decide la pertinencia —eso
+                # lo juzga el modelo leyendo el pasaje— pero elimina el paso
+                # donde se perdía la atribución.
+                ejemplos = [r for r in state.requisitos if r["tipo"] == "ejemplo"]
+                if ejemplos:
+                    por_doc: dict[str, list] = {}
+                    for d in state.evidencia_acumulada:
+                        if not isinstance(d, dict):
+                            continue
+                        cl = case_link_de(d)
+                        texto = (d.get("content") or d.get("text") or "").strip()
+                        if not cl or not texto:
+                            continue
+                        por_doc.setdefault(cl, []).append({
+                            "ref": d.get("ref"),
+                            "tipo_fuente": clasificar_fuente(cl),
+                            "pasaje": texto[:400],
+                        })
+                    if por_doc:
+                        payload["CANDIDATOS_DE_EJEMPLO"] = {
+                            "propiedad_pedida": ejemplos[0].get("propiedad"),
+                            "cuantos_se_piden": ejemplos[0]["valor"],
+                            "tipo_pedido": ejemplos[0].get("tipo_documento"),
+                            "por_documento": por_doc,
+                            "regla": (
+                                "Elige el ejemplo SÓLO de un documento cuyos "
+                                "propios pasajes demuestren la propiedad "
+                                "pedida. Un pasaje de otro documento puede "
+                                "citarse como antecedente, diciéndolo, pero no "
+                                "acredita lo que resolvió el documento que "
+                                "presentas como ejemplo. Si ninguno la "
+                                "demuestra, contesta la parte general y di que "
+                                "no encontraste un precedente verificado; no "
+                                "afirmes que no existe en el acervo."
+                            ),
+                        }
                 if not v["cumple"]:
                     payload["REQUISITOS_INCUMPLIDOS"] = {
                         "faltan": v["faltantes"],

@@ -55,38 +55,149 @@ _COMPARA = re.compile(
 
 # Preguntas que exigen campos concretos del registro, no criterios. Van con
 # los nombres reales del modelo para que el requisito sea comprobable.
+#
+# Cada entrada declara **un dato pedido**, con la lista de campos que pueden
+# probarlo. La distinción la fijó COFECE en I2 de su revisión del 23-sep:
+#
+#   "`AND` se aplica a los datos distintos efectivamente pedidos. `OR` se
+#    reserva a fuentes alternativas que prueben EL MISMO dato."
+#
+# Antes esto era una sola lista plana por patrón, y `verificar` la aprobaba con
+# cualquiera de sus campos. El efecto medido: en H14 bastaba `judicialBody`
+# —el órgano que DICTA la resolución— para dar por satisfecha una pregunta
+# sobre el tribunal relacionado y su expediente, que son otro papel y otros dos
+# campos. H14 salía PASS en las tres repeticiones porque el modelo acertaba,
+# no porque el control lo sostuviera.
+#
+# Por eso los patrones van separados por dato: una pregunta que sólo pide el
+# tribunal no debe exigir además el expediente. Exigir de más devuelve al
+# agente a abstenerse sobre datos que nadie pidió.
 _CAMPOS_PEDIDOS = [
     # Sólo en forma INTERROGATIVA. "del Segundo Tribunal Colegiado" nombra el
     # órgano; "¿qué tribunal colegiado?" lo pregunta. La primera versión
     # disparaba con cualquier mención y exigía campos del registro a una
     # comparación que sólo estaba identificando su documento.
-    (re.compile(r"\bqu[ée]\s+tribunal\b|\bcu[áa]l\s+(?:tribunal|[óo]rgano)\b|"
-                r"\bqu[ée]\s+expediente\b|\bde\s+qu[ée]\s+(?:tribunal|[óo]rgano)\b|"
-                r"\bqu[ée]\s+[óo]rgano\b", re.IGNORECASE),
-     ["relatedCollegiateCourt", "relatedTccCaseFile", "judicialBody"],
-     "el tribunal y su expediente, tomados del registro"),
+    (re.compile(r"\bqu[ée]\s+tribunal\b|\bcu[áa]l\s+tribunal\b|"
+                r"\bde\s+qu[ée]\s+tribunal\b", re.IGNORECASE),
+     "tribunal relacionado",
+     ["relatedCollegiateCourt"],
+     "el tribunal relacionado, tomado del registro"),
+    # Va aparte del tribunal: "¿qué expediente?" y "¿qué tribunal?" son dos
+    # datos. H14 pide los dos; una pregunta que pida uno no exige el otro.
+    (re.compile(r"\bqu[ée]\s+expediente\b|\bcu[áa]l\s+expediente\b|"
+                r"\bn[úu]mero\s+de\s+expediente\b", re.IGNORECASE),
+     "expediente relacionado",
+     ["relatedTccCaseFile"],
+     "el expediente relacionado, tomado del registro"),
+    # De qué expediente DERIVA un acto, que es otra relación.
+    #
+    # H01 pide "a qué expediente corresponde" cada resolución de cumplimiento.
+    # Hasta el 27-sep sólo podía inferirse del sufijo del identificador, y
+    # COFECE lo prohibió expresamente: "No eliminar sufijos para fabricar la
+    # relación." Ese día el servicio empezó a entregar `parent` con el
+    # `caseLink` del principal, a petición nuestra.
+    (re.compile(r"\ba\s+qu[ée]\s+expediente\s+(?:corresponde|pertenece)|"
+                r"\bde\s+qu[ée]\s+expediente\s+(?:deriva|proviene)|"
+                r"\bexpediente\s+(?:principal|de\s+origen)\b|"
+                r"\bcu[áa]l\s+es\s+su\s+principal\b", re.IGNORECASE),
+     "expediente principal del que deriva",
+     ["expediente_principal"],
+     "el expediente principal, tomado de la relación del registro"),
+    # El órgano EMISOR es un papel distinto del relacionado, y por eso tiene
+    # su propio patrón y su propio campo. Confundirlos fue el defecto de H17,
+    # donde el Juzgado Tercero apareció como Tribunal Colegiado.
+    (re.compile(r"\bqu[ée]\s+[óo]rgano\b|\bcu[áa]l\s+[óo]rgano\b|"
+                r"\bde\s+qu[ée]\s+[óo]rgano\b|\bqui[ée]n\s+(?:dict[óo]|emiti[óo])\b",
+                re.IGNORECASE),
+     "órgano emisor",
+     ["judicialBody", "authority"],
+     "el órgano que dictó el documento, tomado del registro"),
     (re.compile(r"\bqui[ée]n(?:es)?\s+(?:vot[óo]|resolvi[óo]|firm)|"
                 r"\bcomisionad[oa]s?\b|\bintegrantes\b", re.IGNORECASE),
-     ["decisionOfficials", "dissentingOpinions",
-      "dissentingAndConcurringOpinions"],
+     "quiénes decidieron",
+     ["decisionOfficials"],
      "quiénes decidieron, tomados del registro"),
+    # Los dos campos de disidencia SÍ son alternativas del mismo dato: el
+    # servicio lo expone en uno u otro según el documento.
+    (re.compile(r"\bvot[oó]\s+(?:particular|concurrente|en\s+contra|disidente)|"
+                r"\bdiscrep\w+|\ben\s+contra\b", re.IGNORECASE),
+     "votos disidentes",
+     ["dissentingOpinions", "dissentingAndConcurringOpinions"],
+     "los votos disidentes, tomados del registro"),
     (re.compile(r"\bmulta\w*\b.{0,40}\b(?:a\s+qui[ée]n|agente|impuso)|"
                 r"\ba\s+qui[ée]n\s+se\s+(?:le\s+)?multó", re.IGNORECASE),
+     "agentes multados",
      ["agentFines"],
      "los agentes multados y sus montos, tomados del registro"),
-    # Qué resolvió una sentencia y a quién obliga. H18: los datos estaban en
+    # Qué resolvió una sentencia. H18: los datos estaban en
     # `judicialDecisionEffects` —"el Pleno de la Comisión Nacional
-    # Antimonopolio deberá…"— y en `originAdministrativeAuthority` —COFECE,
-    # que dictó el acto reclamado—, no en los criterios. El agente usó sólo
+    # Antimonopolio deberá…"—, no en los criterios. El agente usó sólo
     # `buscar_criterios` y acabó confundiendo emisor con destinatario.
+    #
+    # Estos cuatro campos sí son alternativas: cada documento expresa el
+    # sentido de lo resuelto en el que tenga poblado.
     (re.compile(r"\bqu[ée]\s+se\s+resolvi[óo]\b|\bqu[ée]\s+efectos?\b|"
                 r"\bpuntos?\s+resolutivos?\b|\bqu[ée]\s+orden[óa]\b|"
                 r"\bsentido\s+del?\s+(?:amparo|fallo|sentencia)\b",
                 re.IGNORECASE),
+     "qué se resolvió",
      ["judicialDecisionEffects", "senseOfAmparo", "scopeOfCompliance",
-      "judgmentImplementation", "originAdministrativeAuthority"],
-     "qué se resolvió y a quién obliga, tomados del registro"),
+      "judgmentImplementation"],
+     "qué se resolvió, tomado del registro"),
+    # La autoridad que dictó el acto reclamado es OTRO dato, y confundirlo con
+    # la obligada al cumplimiento fue exactamente el error de H18-B: COFECE
+    # dictó la multa, la CNA quedó obligada a reindividualizarla.
+    (re.compile(r"\bqu[ée]\s+autoridad\b|\bcu[áa]l\s+autoridad\b|"
+                r"\bautoridad\s+(?:responsable|emisora)\b|"
+                r"\bacto\s+reclamado\b", re.IGNORECASE),
+     "autoridad del acto reclamado",
+     ["originAdministrativeAuthority"],
+     "la autoridad que dictó el acto reclamado, tomada del registro"),
 ]
+
+
+
+# Pedir uno o más documentos que DEMUESTREN algo.
+#
+# H16-A, el FAIL crítico del 25-sep: la pregunta pide "una resolución VCN en la
+# que dos aumentos de capital se hayan tratado como operaciones
+# independientes", y la respuesta presentó VCN-005-2018 apoyándose en un
+# criterio de VCN-005-2024. El documento existía y el pasaje era auténtico; la
+# atribución no.
+#
+# La traza tenía `requisitos=[]`: no había ninguna defensa que exigiera
+# acreditar la propiedad del ejemplo.
+#
+# El patrón es estructural y cubre los tres frentes abiertos a la vez, que es
+# la señal de que es el mecanismo y no un parche por pregunta:
+#
+#   H16  "Busca una resolución VCN en la que…"        1 resolución
+#   H08  "Busca una resolución VCN que lo explique"   1 resolución
+#   H17  "Muéstrame dos sentencias… que lo expliquen" 2 sentencias
+#
+# COFECE es explícito en que esto no puede activarse por una palabra del
+# dominio —"no una regla que se active por la palabra «independiente»"— ni
+# codificarse por número de pregunta. Lo que se detecta es la petición de
+# ejemplares, su cantidad y su tipo documental; **qué demuestra el pasaje lo
+# juzga el modelo**, y el código sólo comprueba que el documento traiga
+# evidencia propia.
+_PIDE_EJEMPLARES = re.compile(
+    r"\b(?:busca|búscame|buscame|mu[ée]strame|ens[ée]ñame|encuentra|"
+    r"identifica|dame|cita|se[ñn]ala)\b[^.?!]{0,40}?"
+    r"\b(?P<cantidad>un|una|dos|tres|cuatro|cinco)\b\s+"
+    r"(?P<tipo>resoluci[óo]n(?:es)?|sentencias?|criterios?|precedentes?|"
+    r"expedientes?|casos?|asuntos?)\b",
+    re.IGNORECASE,
+)
+_CARDINALES = {"un": 1, "una": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5}
+
+# Qué clase de documento satisface la petición. Una sentencia no es una
+# resolución de la autoridad de competencia: fue el defecto de q10 en
+# septiembre y aquí decide si H17 se cumple.
+_TIPO_ESPERADO = {
+    "resolucion": "resolucion", "resoluciones": "resolucion",
+    "sentencia": "sentencia", "sentencias": "sentencia",
+}
 
 
 def construir_requisitos(query: str, identidades: list[dict] | None) -> list[dict]:
@@ -108,6 +219,29 @@ def construir_requisitos(query: str, identidades: list[dict] | None) -> list[dic
             "tipo": "documento",
             "valor": d,
             "descripcion": f"evidencia del documento {d}",
+            "obligatorio": True,
+        })
+
+    m = _PIDE_EJEMPLARES.search(query or "")
+    if m:
+        import unicodedata as _ud
+        crudo = m.group("tipo").lower()
+        base = "".join(c for c in _ud.normalize("NFD", crudo)
+                       if _ud.category(c) != "Mn")
+        cantidad = _CARDINALES.get(m.group("cantidad").lower(), 1)
+        # La propiedad que deben demostrar es lo que sigue a la mención, en
+        # las palabras del usuario. No se interpreta aquí: viaja al modelo y
+        # al verificador para que la juzguen contra el pasaje.
+        propiedad = (query[m.end():].strip(" ,;:")[:220] or "").strip()
+        req.append({
+            "tipo": "ejemplo",
+            "valor": cantidad,
+            "tipo_documento": _TIPO_ESPERADO.get(base),
+            "propiedad": propiedad,
+            "descripcion": (
+                f"{cantidad} {crudo} con evidencia propia que demuestre: "
+                f"{propiedad[:90]}"
+            ),
             "obligatorio": True,
         })
 
@@ -134,10 +268,14 @@ def construir_requisitos(query: str, identidades: list[dict] | None) -> list[dic
     # `relatedTccCaseFile: 565/2023`, `relatedCollegiateCourt: Primer Tribunal
     # Colegiado…`— y nadie los fue a buscar. Un identificador canónico correcto
     # no equivale a haber recuperado todos los campos pedidos.
-    for patron, campos, desc in _CAMPOS_PEDIDOS:
+    # Un requisito por DATO pedido, no uno por patrón con todos sus campos
+    # dentro. Dos datos distintos se comprueban por separado; sólo las fuentes
+    # alternativas del mismo dato comparten requisito.
+    for patron, papel, campos, desc in _CAMPOS_PEDIDOS:
         if patron.search(query or ""):
             req.append({
                 "tipo": "campos_registro",
+                "papel": papel,
                 "valor": campos,
                 "descripcion": desc,
                 "obligatorio": True,
@@ -154,6 +292,20 @@ def construir_requisitos(query: str, identidades: list[dict] | None) -> list[dic
             "obligatorio": True,
         })
 
+    # Dos relaciones distintas que comparten las palabras "qué expediente".
+    #
+    # "¿a qué expediente CORRESPONDE?" pregunta por el principal del que deriva
+    # el acto. "¿qué expediente le dio origen?" pregunta por el relacionado del
+    # TCC. La primera contiene literalmente a la segunda, así que sin esto H01
+    # exigía además una relación judicial que nadie pidió — COFECE lo señaló
+    # como defecto nuestro: "H01 exige por error una relación judicial".
+    #
+    # Cuando se pide el principal, el relacionado no se exige.
+    papeles = {r.get("papel") for r in req if r["tipo"] == "campos_registro"}
+    if "expediente principal del que deriva" in papeles:
+        req = [r for r in req
+               if not (r["tipo"] == "campos_registro"
+                       and r.get("papel") == "expediente relacionado")]
     return req
 
 
@@ -204,18 +356,67 @@ def verificar(requisitos: list[dict], docs: list[dict]) -> dict:
                     "voto identificado" if ok
                     else "no se recuperó ningún voto particular identificado"
                 )
+        elif r["tipo"] == "ejemplo":
+            # Cuántos documentos DISTINTOS traen evidencia propia del tipo
+            # pedido. Lo que el código puede afirmar es la procedencia; que el
+            # pasaje demuestre la propiedad lo juzgan el modelo y la revisión
+            # semántica, y por eso el detalle lo dice expresamente.
+            from core.fuentes import clasificar_fuente
+            docs_con_evidencia = {}
+            for d in (docs or []):
+                cl = case_link_de(d)
+                if not cl:
+                    continue
+                texto = (d.get("content") or d.get("text") or "").strip()
+                if not texto:
+                    continue          # un registro no demuestra una propiedad
+                docs_con_evidencia.setdefault(cl, clasificar_fuente(cl))
+            esperado = r.get("tipo_documento")
+            if esperado:
+                aptos = [c for c, t in docs_con_evidencia.items() if t == esperado]
+            else:
+                aptos = list(docs_con_evidencia)
+            ok = len(aptos) >= r["valor"]
+            # La razón concreta, porque es el texto que lee el modelo y una
+            # razón equivocada lo manda a buscar lo que no falta.
+            if ok:
+                motivo = ("El código comprueba la procedencia, no que el "
+                          "pasaje demuestre la propiedad pedida: eso lo tienes "
+                          "que sostener tú con el texto.")
+            elif not docs_con_evidencia:
+                motivo = ("No hay ningún documento con criterio propio "
+                          "recuperado. Un registro de expediente no demuestra "
+                          "una propiedad: hace falta el texto.")
+            elif esperado and not aptos:
+                otros = sorted(set(docs_con_evidencia.values()))
+                motivo = (f"Los documentos con evidencia son de tipo "
+                          f"{', '.join(otros)}, y se pidió {esperado}. "
+                          f"Una sentencia no es una resolución de la autoridad "
+                          f"de competencia.")
+            else:
+                motivo = (f"Sólo {len(aptos)} documento(s) distinto(s) tienen "
+                          f"evidencia propia. Dos fragmentos del mismo "
+                          f"documento cuentan como uno.")
+            detalle = (
+                f"{len(aptos)} de {r['valor']} con evidencia propia"
+                + (f" ({esperado})" if esperado else "") + ". " + motivo
+            )
+
         elif r["tipo"] == "campos_registro":
-            # Se cumple si ALGUNO de los campos pedidos llegó con valor en
-            # algún documento recuperado. No basta tener el expediente
-            # correcto: hay que haber traído el campo.
+            # Cada requisito es UN dato; sus campos son fuentes alternativas
+            # que prueban ese mismo dato, así que basta uno de ellos. Lo que
+            # ya no ocurre es aprobar un dato con el campo de otro: eso vive
+            # ahora en requisitos separados y se exigen todos.
             traidos = [
                 c for c in r["valor"]
                 if any(d.get(c) not in (None, "", [], {}) for d in (docs or []))
             ]
             ok = bool(traidos)
+            papel = r.get("papel", "el dato pedido")
             detalle = (
-                "presentes: " + ", ".join(traidos) if ok
-                else "ninguno de estos campos llegó: " + ", ".join(r["valor"])
+                f"{papel}: presente en " + ", ".join(traidos) if ok
+                else f"falta {papel}. Ninguno de estos campos llegó con valor: "
+                     + ", ".join(r["valor"])
                      + ". Están en el registro del expediente, no en los "
                        "criterios: hay que consultarlo con buscar_expedientes"
             )

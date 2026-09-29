@@ -27,6 +27,31 @@ class TurnState:
     # sus argumentos contra el límite de tokens.
     last_expedientes: list[dict] = field(default_factory=list)
 
+    # Conjuntos identificados de expedientes, uno por búsqueda.
+    #
+    # `last_expedientes` se sobrescribe con cada búsqueda, así que una
+    # operación de cálculo no podía decir sobre QUÉ conjunto se hizo: si el
+    # modelo buscaba otra cosa entre el cálculo y la auditoría, la referencia
+    # apuntaba a un conjunto distinto. COFECE lo pidió como `dataset_id`:
+    # "otra búsqueda crea otro conjunto sin sustituirlo".
+    #
+    # Aquí cada búsqueda deja su conjunto con un id, y las operaciones citan
+    # ese id. Inmutable no significa persistente: significa que una búsqueda
+    # posterior no cambia la base de una operación ya hecha.
+    datasets: dict[str, list[dict]] = field(default_factory=dict)
+    dataset_actual: str | None = None
+
+    def nuevo_dataset(self, registros: list[dict]) -> str:
+        """Guarda un conjunto recuperado y devuelve su identificador."""
+        ds = f"ds{len(self.datasets) + 1}"
+        self.datasets[ds] = [dict(r) for r in registros if isinstance(r, dict)]
+        self.dataset_actual = ds
+        return ds
+
+    def dataset(self, ds: str | None) -> list[dict]:
+        """El conjunto pedido, o el actual. Vacío si no existe."""
+        return self.datasets.get(ds or self.dataset_actual or "", [])
+
     # Cobertura de la última búsqueda
     universo_completo: bool = False
     universo_tamano: int = 0
@@ -103,3 +128,61 @@ class TurnState:
     # exacto con vocabulario de cualquier otro del mismo tema.
     requisitos: list[dict] = field(default_factory=list)
     requisitos_verificados: dict | None = None
+
+    # Toda la evidencia recuperada en el turno, no sólo la de la última
+    # herramienta.
+    #
+    # Lo encontró COFECE leyendo el código: `requisitos_verificados` se
+    # calculaba contra el `result` de la llamada en curso y se sobrescribía.
+    # Como H14 llama `buscar_expedientes` **y** `buscar_criterios`, la que
+    # corriera al final decidía el veredicto: si los criterios iban después,
+    # el requisito de `campos_registro` —que se cumple porque el registro trajo
+    # `relatedTccCaseFile`— volvía a leerse como incumplido, y el agente
+    # recibía la orden de buscar algo que ya tenía.
+    #
+    # Un requisito satisfecho no puede dejar de estarlo porque después se
+    # buscara otra cosa. La verificación se hace sobre esta acumulación.
+    evidencia_acumulada: list[dict] = field(default_factory=list)
+
+    # Peticiones HTTP de recuperación gastadas en el turno.
+    #
+    # No es `tool_calls_count`. Una llamada a `buscar_criterios` sobre dos
+    # documentos hace dos peticiones, porque el endpoint acepta un solo
+    # `caseLink`. COFECE lo señaló en §1.7 y el punto ciego lo introdujimos
+    # nosotros al hacer la búsqueda por documento.
+    peticiones_http: int = 0
+    # Ampliación dentro del precedente mejor rankeado: una vez por turno.
+    amplio_precedente: bool = False
+    ampliacion_precedente: list[dict] = field(default_factory=list)
+    # Resultado del verificador semántico (I5). En evaluación: se guarda
+    # para medirlo, no condiciona la publicación.
+    verificacion_semantica: dict | None = None
+    # Documentos que quedaron sin consultar por presupuesto. Van aparte para
+    # que una comparación incompleta no se lea como una comparación.
+    recortes_por_presupuesto: list[dict] = field(default_factory=list)
+
+    def acumular_evidencia(self, docs) -> int:
+        """
+        Agrega documentos recuperados, sin repetir. Devuelve cuántos son nuevos.
+
+        Deduplica por expediente + identificador del fragmento: el mismo
+        criterio puede volver en dos búsquedas distintas, y contarlo dos veces
+        no agrega evidencia pero sí ensucia el conteo de cobertura.
+        """
+        from core.fuentes import case_link_de
+
+        vistos = {
+            (case_link_de(d), str(d.get("id") or d.get("caseLink") or ""))
+            for d in self.evidencia_acumulada
+        }
+        nuevos = 0
+        for d in docs or []:
+            if not isinstance(d, dict):
+                continue
+            clave = (case_link_de(d), str(d.get("id") or d.get("caseLink") or ""))
+            if clave in vistos:
+                continue
+            vistos.add(clave)
+            self.evidencia_acumulada.append(d)
+            nuevos += 1
+        return nuevos

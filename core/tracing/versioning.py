@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Any, Optional
 
 from core.tracing.schema import Versions
@@ -39,6 +40,41 @@ def prompt_hash() -> str:
 def tools_hash() -> str:
     from agent.tools import TOOLS
     return sha256_short(json.dumps(TOOLS, sort_keys=True, ensure_ascii=False))
+
+
+
+def _git_sha() -> str:
+    """
+    Qué commit corrió, de verdad.
+
+    Las 60 trazas de la banda del 23-sep dicen `agent_git_sha: unknown`, porque
+    esto sólo leía la variable `GIT_SHA` que pone el despliegue y en local nadie
+    la define. COFECE lo señaló: congelamos una candidata y sus trazas no
+    identifican qué código se cargó, así que la congelación no era verificable.
+
+    Se añade el estado del árbol: una corrida desde un árbol con cambios sin
+    commitear no es reproducible, y decirlo vale más que un SHA que sugiere que
+    sí lo es.
+    """
+    sha = os.getenv("GIT_SHA")
+    if sha:
+        return sha
+    try:
+        import subprocess
+        raiz = Path(__file__).resolve().parents[2]
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=raiz, capture_output=True,
+            text=True, timeout=5,
+        ).stdout.strip()
+        if not sha:
+            return "unknown"
+        sucio = subprocess.run(
+            ["git", "status", "--porcelain"], cwd=raiz, capture_output=True,
+            text=True, timeout=5,
+        ).stdout.strip()
+        return f"{sha[:12]}-sucio" if sucio else sha[:12]
+    except Exception:
+        return "unknown"
 
 
 def build_versions(
@@ -81,7 +117,7 @@ def build_versions(
             unknown.append(name)
 
     return Versions(
-        agent_git_sha=os.getenv("GIT_SHA", "unknown"),
+        agent_git_sha=_git_sha(),
         agent_semver=AGENT_SEMVER,
         prompt_id=PROMPT_ID,
         prompt_semver=PROMPT_SEMVER,

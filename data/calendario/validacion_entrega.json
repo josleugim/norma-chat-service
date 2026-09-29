@@ -1,0 +1,18 @@
+{
+  "version": "norma_calendario_2026-09-22.1",
+  "corte": "2026-09-22",
+  "entrada_sha256": "fee758a0ac16e1a78e42123986abb3fa09e0b829863a8d3ec33a8ca894a59403",
+  "fechas_entrada": 1819,
+  "fechas_salida": 1824,
+  "adiciones_generales": 5,
+  "fechas_civiles": 4861,
+  "sabados_domingos": 1388,
+  "extraordinarios_generales": 11,
+  "habiles_sin_terminos_generales": 4,
+  "reglas_suspension": 16,
+  "reglas_con_rango_pendiente": 2,
+  "pruebas_logica_pass": 20,
+  "errores_formula_xlsx": 0,
+  "exhaustividad_certificada": false,
+  "estado": "REVISION_JURIDICA_PENDIENTE"
+}

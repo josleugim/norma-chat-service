@@ -71,18 +71,99 @@ def _sin_acentos(t: str) -> str:
     )
 
 
+# El contexto viene paginado por el extractor. Es la frontera que separa el
+# pasaje de lo que sólo comparte documento con él.
+_PAGINA = re.compile(r"<<<PAGINA:(\d+)>>>")
+
+
+def _pagina_del_pasaje(contexto: str, anchor: str) -> str | None:
+    """
+    El tramo del contexto que contiene al pasaje, o None si no se ubica.
+
+    H16-A de la revisión del 23-sep. El criterio 4035 de VCN-005-2024 es
+    razonamiento de la MAYORÍA, en la página 13. El clasificador barría los
+    14,911 caracteres del contexto completo, encontraba en la página 14 la
+    fórmula de firmas —"Con voto concurrente del Comisionado José Eduardo
+    Mendoza Contreras"— y se la atribuía al criterio. El gold lo identifica
+    como `pleno_mayoria`: falsedad material.
+
+    Esa fórmula pertenece al DOCUMENTO, no al pasaje. Medido sobre los tres
+    casos testigo, la frontera de página los separa limpiamente:
+
+        doc 4035 (mayoría)          anchor p.13  →  marca en p.14   OTRA
+        doc 8422 (voto particular)  anchor p.152 →  marca en p.152  MISMA
+        doc 8423 (voto particular)  anchor p.153 →  marca en p.153  MISMA
+
+    Se usa la estructura del documento y no una distancia en caracteres a
+    propósito: un umbral ajustado a tres observaciones es un número inventado.
+    """
+    if not contexto:
+        return None
+
+    cortes = [m.start() for m in _PAGINA.finditer(contexto)]
+    pos = contexto.find(anchor[:60]) if anchor else -1
+
+    if pos < 0:
+        # No se pudo ubicar el pasaje. Si el documento no está paginado, el
+        # contexto ES una sola sección y sigue siendo del pasaje. Si SÍ lo
+        # está, no hay forma de saber en qué tramo vive: no se atribuye.
+        return None if cortes else contexto
+
+    if not cortes:
+        return contexto
+
+    ini = max([c for c in cortes if c <= pos], default=0)
+    fin = min([c for c in cortes if c > pos], default=len(contexto))
+    return contexto[ini:fin]
+
+
 def _texto_de(doc) -> str:
+    """
+    El texto donde se puede leer la voz DE ESTE pasaje.
+
+    Incluye el criterio y su anchor —que son el pasaje— y sólo el tramo del
+    contexto que lo contiene. Lo que quede en otras páginas pertenece al
+    documento y se reporta aparte, sin atribuirse.
+
+    Si el pasaje no se puede ubicar dentro del contexto, el contexto no entra:
+    sin poder situarlo no hay forma de afirmar que la marca sea suya, y este
+    módulo prefiere `NO_IDENTIFICADA` sobre una atribución que no se sostiene.
+    """
     if not isinstance(doc, dict):
         return ""
     meta = doc.get("metadata") or {}
     if not isinstance(meta, dict):
         meta = {}
+    anchor = str(meta.get("anchor") or "")
     partes = [
         str(doc.get("content") or doc.get("text") or ""),
-        str(meta.get("context") or ""),
-        str(meta.get("anchor") or ""),
+        _pagina_del_pasaje(str(meta.get("context") or ""), anchor) or "",
+        anchor,
     ]
     return "\n".join(p for p in partes if p)
+
+
+def _marca_en_otra_parte(doc) -> str | None:
+    """
+    Marca de voto que existe en el documento pero FUERA del pasaje.
+
+    No clasifica: informa. Que la resolución lleve un voto concurrente en sus
+    firmas es un hecho del documento, y ocultarlo sería el error opuesto al de
+    H16-A. Lo que no puede hacerse es atribuírselo a este criterio.
+    """
+    if not isinstance(doc, dict):
+        return None
+    meta = doc.get("metadata") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    contexto = str(meta.get("context") or "")
+    propio = _texto_de(doc)
+    for pat in (_DISIDENTE, _CONCURRENTE):
+        for m in pat.finditer(contexto):
+            frag = contexto[max(0, m.start() - 45):m.start() + 90]
+            if frag.strip() and frag not in propio:
+                return " ".join(frag.split())
+    return None
 
 
 def autor_de(texto: str) -> str | None:
@@ -136,7 +217,17 @@ def clasificar_voz(doc) -> dict:
 
     # Sin marca de disidencia NO se concluye mayoría. Que el documento sea una
     # sentencia no dice quién habla en este fragmento.
-    return {"voz": NO_IDENTIFICADA, "autor": None, "evidencia": None}
+    #
+    # Si el documento SÍ lleva una marca de voto en otra parte —típicamente la
+    # fórmula de firmas— se reporta sin atribuirla. Es un hecho del documento y
+    # callarlo sería el error opuesto al de H16-A; presentarlo como la voz de
+    # este pasaje fue exactamente el de H16-A.
+    return {
+        "voz": NO_IDENTIFICADA,
+        "autor": None,
+        "evidencia": None,
+        "marca_en_documento": _marca_en_otra_parte(doc),
+    }
 
 
 def _fragmento(texto: str, pos: int, ancho: int = 90) -> str:

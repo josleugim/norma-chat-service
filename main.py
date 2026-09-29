@@ -61,6 +61,16 @@ async def lifespan(app: FastAPI):
 
     # ── Temporal ────────────────────────────────────────────
     calendar = HolidayCalendar(holidays_path=settings.holidays_path)
+    # Catálogo de acuerdos de suspensión. Se informan junto a la cifra de días
+    # hábiles, sin decidir su aplicación al expediente (§8, 25-sep).
+    from temporal.avisos import CatalogoAvisos
+    avisos = CatalogoAvisos.desde_directorio(settings.avisos_path)
+    if not avisos.cargado:
+        logger.warning(
+            f"Catálogo de acuerdos de suspensión no disponible en "
+            f"{settings.avisos_path}: las cifras de días hábiles saldrán con la "
+            f"revisión de suspensiones marcada como incompleta."
+        )
     temporal_analyzer = TemporalAnalyzer(calendar=calendar)
 
     # ── Citation Builder ────────────────────────────────────
@@ -181,6 +191,9 @@ async def lifespan(app: FastAPI):
         citation_builder=citation_builder,
         evidence_cache=evidence_cache,
         max_tool_calls=settings.agent_max_tool_calls,
+        max_http_requests=settings.agent_max_http_requests,
+        verificacion_semantica=settings.agent_verificacion_semantica,
+        avisos=avisos,
         trace_sink=trace_sink,
         manifest_store=manifest_store,
         settings=settings,

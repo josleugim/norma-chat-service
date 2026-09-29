@@ -25,6 +25,64 @@ REF_PREV_RE = re.compile(
 )
 ID_EXP_RE = re.compile(r"\b[A-Z]{2,5}-\d{3}-\d{4}\b")
 
+# Material que cambia el sentido de un fragmento y que un recorte a la mitad
+# puede borrar sin dejar rastro.
+#
+# COFECE lo señaló en §7 de su revisión del 22-sep: *"El límite de 400
+# caracteres del cache no debe eliminar autor, negación, condición o
+# atribución"*. Es la misma falla que ya habíamos medido con el texto del
+# criterio truncado a 700 mientras el envoltorio viajaba entero: recortábamos
+# lo que responde la pregunta.
+#
+# Lo peligroso no es que el fragmento salga corto. Es que salga corto **y se
+# lea completo**: en H18 la conclusión pierde "una vez que cause ejecutoria" y
+# se convierte en una multa firme. Un efecto condicionado leído sin su
+# condición es un hecho distinto.
+MATERIAL_SENSIBLE_RE = re.compile(
+    r"\b(no|ni|sin|salvo|excepto|siempre que|una vez que|hasta que|mientras"
+    r"|cause ejecutoria|condicionad\w+|improcedente|niega|nieg\w+|sobresee"
+    r"|voto particular|voto concurrente|disidente|en contra"
+    r"|ministr\w+|magistrad\w+|comisionad\w+)\b",
+    re.IGNORECASE,
+)
+
+
+def recortar_sin_borrar_en_silencio(texto: str, limite: int = 700) -> str:
+    """
+    Recorta un fragmento largo **declarando** lo que quedó fuera.
+
+    Dos reglas, y las dos salen de errores medidos:
+
+    1. **Cortar en frontera de oración**, no a media palabra. Un corte en seco
+       produce texto que parece completo.
+    2. **Decir que hay más, y de qué tipo.** Si lo que queda fuera contiene
+       negaciones, condiciones o atribuciones, se dice expresamente. El modelo
+       puede entonces recuperar el criterio en vez de concluir sobre un
+       fragmento mutilado; callarlo lo invita a tratar la ausencia como dato.
+    """
+    texto = (texto or "").strip()
+    if len(texto) <= limite:
+        return texto
+
+    cabeza, cola = texto[:limite], texto[limite:]
+    # Hacia atrás hasta el final de oración más cercano, sin perder más de un
+    # tercio: si no hay puntuación cerca, vale más cortar por palabra.
+    corte = max(cabeza.rfind(". "), cabeza.rfind(".\n"), cabeza.rfind("; "))
+    if corte < limite * 2 // 3:
+        corte = cabeza.rfind(" ")
+    if corte > 0:
+        cola = texto[corte + 1:]
+        cabeza = cabeza[:corte + 1]
+
+    aviso = f"[…fragmento recortado, faltan {len(cola)} caracteres"
+    if MATERIAL_SENSIBLE_RE.search(cola):
+        aviso += (
+            "; la parte omitida contiene negaciones, condiciones o "
+            "atribuciones. NO concluyas sobre el alcance de este criterio sin "
+            "recuperarlo completo con buscar_criterios"
+        )
+    return cabeza.rstrip() + " " + aviso + "]"
+
 
 class EvidenceCache:
     """
@@ -233,7 +291,9 @@ class EvidenceCache:
                         linea += f" de {v['autor']}"
                 lineas.append(linea)
                 if texto:
-                    lineas.append(f"      {texto[:400]}")
+                    lineas.append(
+                        "      " + recortar_sin_borrar_en_silencio(texto)
+                    )
 
         if not lineas:
             return ""

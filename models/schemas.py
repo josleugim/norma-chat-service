@@ -105,6 +105,16 @@ class CriterioResult(BaseModel):
     metadata: dict = Field(default_factory=dict)
 
 
+# Campos que NO se mandan a un modelo: no puede usarlos y desplazan a los que
+# sí importan. `resolutionFileUrl` son ~1,500 caracteres de URL firmada.
+#
+# Vive a nivel de módulo, y no sólo dentro de la clase, porque el
+# verificador semántico necesita la misma exclusión. Tenerla sólo como
+# atributo privado fue el defecto: al escribir una segunda ruta de render
+# no se reusó, y el revisor acabó recibiendo la URL en vez de las fechas.
+NO_AL_PROMPT = frozenset({"resolutionFileUrl", "id", "hasDigitalResolution"})
+
+
 class ExpedienteRecord(BaseModel):
     """
     Modelo que refleja la respuesta real de la API de casos de José Miguel.
@@ -113,6 +123,16 @@ class ExpedienteRecord(BaseModel):
     id: Optional[int] = None
     name: Optional[str] = None                          # Nombre del caso (e.g. "Cemex")
     caseLink: str = ""                                   # ID expediente (e.g. "VCN-001-2022")
+    # Expediente principal del que deriva este acto, entregado por el servicio
+    # desde el 27-sep-2026 a petición nuestra: `{"id": 25066, "caseLink":
+    # "VCN-001-2017"}`.
+    #
+    # Lo trae exactamente en los cuatro actos de cumplimiento del universo, que
+    # son los que H01 pide relacionar con su principal. Hasta ahora esa relación
+    # sólo podía inferirse del sufijo del identificador, que no es una relación
+    # acreditada — COFECE fue explícito: "No eliminar sufijos para fabricar la
+    # relación."
+    parent: Optional[dict] = None
     resolutionFileUrl: Optional[str] = None              # URL directa al PDF
     hasDigitalResolution: Optional[bool] = None
     authority: Optional[str] = None                      # "CFC" | "COFECE"
@@ -204,7 +224,13 @@ class ExpedienteRecord(BaseModel):
     # lugar de la evidencia. `resolutionFileUrl` es una URL firmada de ~1,500
     # caracteres —un tercio del registro— que el agente no puede abrir; el
     # citation builder la reconstruye por su cuenta para la interfaz.
-    _NO_AL_PROMPT = frozenset({"resolutionFileUrl", "id", "hasDigitalResolution"})
+    _NO_AL_PROMPT = NO_AL_PROMPT
+
+    @property
+    def parent_case_link(self) -> str | None:
+        """El expediente principal, o None. Relación documentada, no inferida."""
+        p = self.parent or {}
+        return (p.get("caseLink") or "").strip() or None if isinstance(p, dict) else None
 
     def para_prompt(self) -> dict:
         """
@@ -217,10 +243,18 @@ class ExpedienteRecord(BaseModel):
         la mitad no aportaba nada. Es el mismo problema que sepultó el criterio
         7888 en H10, a mayor escala.
         """
-        return {
+        d = {
             k: v for k, v in self.model_dump().items()
             if k not in self._NO_AL_PROMPT and v not in (None, "", [], {})
         }
+        # El principal, como identificador y no como objeto anidado: el `id`
+        # interno del servicio es ruido para el modelo, y el `caseLink` es lo
+        # que sí puede usar en `en_expedientes`.
+        principal = self.parent_case_link
+        d.pop("parent", None)
+        if principal:
+            d["expediente_principal"] = principal
+        return d
 
     @field_validator("senseOfResolution", mode="before")
     @classmethod
