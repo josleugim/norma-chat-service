@@ -11,6 +11,7 @@ y resuelve con fallback a la lista aplanada.
 import re
 import logging
 from core.fuentes import case_link_de, clasificar_fuente
+from core.enlaces_fuentes import ruta_expediente
 from models.schemas import ReferenceItem, sentido_texto
 
 logger = logging.getLogger(__name__)
@@ -264,9 +265,9 @@ class CitationBuilder:
         )
 
     def _build_url(self, id_expediente: str) -> str:
-        if not id_expediente:
-            return ""
-        return f"/title?caseLink={id_expediente}"
+        # La misma ruta que el enlace de FUENTES: el evento `references` y el
+        # texto no pueden mandar al mismo expediente por caminos distintos.
+        return ruta_expediente(id_expediente)
 
     def _flatten(self, nested: list[list]) -> list:
         flat = []

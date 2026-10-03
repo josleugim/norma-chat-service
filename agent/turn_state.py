@@ -121,6 +121,10 @@ class TurnState:
     # no resolvían y cuántas afirmaciones colgaban sólo de ellos.
     reparacion_salida: dict | None = None
 
+    # Enlaces de FUENTES a la ficha del expediente: cuántos se pusieron y
+    # cuáles no, con el motivo.
+    enlaces_fuentes: dict | None = None
+
     # Requisitos verificables de la pregunta (C03): qué documento, qué voz y
     # si exige comparar dos fuentes. Se comprueban contra la evidencia
     # identificada, no contra una bolsa de palabras — el check léxico descarta
