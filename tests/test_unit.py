@@ -4178,8 +4178,9 @@ class TestLaTrazaNoTiraLoQueElVerificadorCalcula:
 
 class TestEnlacesFuentes:
     """
-    José Miguel pidió que cada expediente de FUENTES abra su ficha. El enlace
-    se arma desde el registro de citas, no desde lo que escribió el modelo.
+    José Miguel pidió que cada expediente de FUENTES abra su ficha y cada
+    criterio su párrafo. El enlace se arma desde el registro de citas, no desde
+    lo que escribió el modelo.
 
     Se usa el `CitationRegistry` real: un doble que no respeta el contrato del
     original no prueba nada.
@@ -4257,12 +4258,73 @@ class TestEnlacesFuentes:
                 == "/case-search?caseLink=CNT-002-2020%20%28Proplastic%29&details=true")
         assert ruta_expediente("184_2018 1JD") == "/case-search?caseLink=184_2018%201JD&details=true"
 
-    def test_criterios_quedan_sin_enlace_por_ahora(self):
-        """El formato del enlace a párrafos lo está definiendo José Miguel."""
-        reg = self._reg("VCN-001-2017")
-        texto = "x [C1]\n\nFUENTES\n[C1] [RESOLUCIÓN] VCN-001-2017 | pp. 3 | art. 86"
-        nuevo, _ = self._enlazar(texto, reg)
+    ANCHOR = ("En cumplimiento a lo dispuesto en el artículo 74, fracción I, "
+              "de la Ley de Amparo, se precisan los actos reclamados")
+
+    def _reg_criterio(self, metadata=None):
+        """Como lo registra `_exec_buscar_criterios`: sin `anchor` en metadata."""
+        from core.citations import CitationRegistry
+        reg = CitationRegistry()
+        reg.assign({"id": "8471", "caseLink": "1251_2017_1JD",
+                    "metadata": metadata or {"id_expediente": "1251_2017_1JD",
+                                             "title": "Actos reclamados"}}, "C")
+        return reg
+
+    def test_criterio_enlaza_al_parrafo(self):
+        """El formato que definió José Miguel el 5-oct, con la URL entre `<>`."""
+        from core.enlaces_fuentes import enlazar_fuentes
+        reg = self._reg_criterio()
+        texto = ("x [C1]\n\nFUENTES\n"
+                 "[C1] [SENTENCIA] 1251_2017_1JD | p. 3 | \"Actos reclamados\"")
+        nuevo, resumen = enlazar_fuentes(texto, reg, ancla_de={"8471": self.ANCHOR}.get)
+        assert resumen == {"enlazados": 1, "sin_enlazar": []}
+        assert ("[C1] [SENTENCIA] [1251_2017_1JD](</digital-resolution?caseLink=1251_2017_1JD"
+                "&anchor=En%20cumplimiento%20a%20lo%20dispuesto%20en%20el%20art%C3%ADculo%2074"
+                "%2C%20fracci%C3%B3n%20I%2C%20de%20la%20Ley%20de%20Amparo%2C%20se%20precisan"
+                "%20los%20actos%20reclamados&paragraphId=8471>) | p. 3") in nuevo
+
+    def test_criterio_toma_el_anchor_de_su_metadata_si_lo_trae(self):
+        """Los documentos de la caché pueden traerlo; no hace falta el mapa."""
+        from core.enlaces_fuentes import enlazar_fuentes
+        reg = self._reg_criterio({"id_expediente": "1251_2017_1JD", "anchor": self.ANCHOR})
+        nuevo, resumen = enlazar_fuentes(
+            "x\n\nFUENTES\n[C1] 1251_2017_1JD | p. 3", reg)
+        assert resumen["enlazados"] == 1
+        assert "&paragraphId=8471>)" in nuevo
+
+    def test_criterio_sin_anchor_no_se_enlaza_a_otra_cosa(self):
+        """
+        Sin `anchor` no hay párrafo que subrayar. Enlazarlo a la ficha del
+        expediente sería un enlace que no lleva a lo citado.
+        """
+        from core.enlaces_fuentes import enlazar_fuentes
+        reg = self._reg_criterio()
+        texto = "x\n\nFUENTES\n[C1] 1251_2017_1JD | p. 3"
+        nuevo, resumen = enlazar_fuentes(texto, reg, ancla_de={}.get)
         assert nuevo == texto
+        assert resumen["sin_enlazar"] == [{
+            "marker": "C1", "case_link": "1251_2017_1JD",
+            "motivo": "criterio_sin_anchor"}]
+
+    def test_codifica_como_encodeURIComponent(self):
+        """
+        Como el frontend: deja `-_.!~*'()` y codifica todo lo demás, `/` y
+        `,` incluidos. `quote` por defecto deja `/`; con `safe=""` codifica
+        los paréntesis.
+        """
+        from core.enlaces_fuentes import ruta_parrafo
+        r = ruta_parrafo("CNT-002-2020 (Proplastic)", "a/b, c (d)!", "1")
+        assert r == ("/digital-resolution?caseLink=CNT-002-2020%20(Proplastic)"
+                     "&anchor=a%2Fb%2C%20c%20(d)!&paragraphId=1")
+
+    def test_la_cache_conserva_las_anclas_de_la_sesion(self):
+        """Un turno que responde desde caché cita criterios de turnos anteriores."""
+        from core.evidence_cache import EvidenceCache
+        c = EvidenceCache()
+        c.recordar_anclas("s1", {"8471": self.ANCHOR})
+        c.recordar_anclas("s1", {})
+        assert c.anclas("s1") == {"8471": self.ANCHOR}
+        assert c.anclas("otra") == {}
 
     def test_sin_seccion_fuentes_no_hace_nada(self):
         reg = self._reg("VCN-001-2017")

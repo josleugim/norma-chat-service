@@ -106,6 +106,18 @@ class EvidenceCache:
         # {session_id: {"turns": [...], "index": {id_exp: {...}}}}
         self._sessions: dict[str, dict] = {}
 
+        # {session_id: {paragraph_id: anchor}}. Un turno que responde desde
+        # caché cita criterios de turnos anteriores, y su enlace al párrafo
+        # necesita el `anchor`, que no viaja en el documento cacheado.
+        self._anclas: dict[str, dict[str, str]] = {}
+
+    def recordar_anclas(self, session_id: str, anclas: dict[str, str]) -> None:
+        if anclas:
+            self._anclas.setdefault(session_id, {}).update(anclas)
+
+    def anclas(self, session_id: str) -> dict[str, str]:
+        return dict(self._anclas.get(session_id, {}))
+
     def _ensure_session(self, session_id: str) -> dict:
         if session_id not in self._sessions:
             self._sessions[session_id] = {

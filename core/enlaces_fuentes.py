@@ -1,10 +1,15 @@
 """
 Enlaces en la sección FUENTES.
 
-El frontend convierte en link el markdown que recibe. José Miguel pidió el
-2-oct-2026 que cada expediente de FUENTES abra su ficha:
+El frontend convierte en link el markdown que recibe. José Miguel definió las
+dos rutas (2 y 5-oct-2026):
 
     [E1] [VCN-001-2017](/case-search?caseLink=VCN-001-2017&details=true) | COFECE | ...
+    [C1] [1251_2017_1JD](</digital-resolution?caseLink=…&anchor=…&paragraphId=8471>) | pp. 3 | ...
+
+La de expediente abre su ficha; la de criterio abre la resolución digital con
+el párrafo subrayado. El `anchor` es texto largo, así que la URL va entre
+`<>` y codificada como `encodeURIComponent`, como la arma el frontend.
 
 Se hace aquí y no en el prompt. Pedirle al modelo que escriba el markdown
 funciona unas veces sí y otras no —las conductas narrativas varían entre
@@ -17,13 +22,18 @@ sabemos que corresponde a `[E1]` es lo que dice el registro. Si el renglón no
 contiene ese identificador, no se enlaza: enlazar otra cadena sería afirmar
 que el modelo escribió lo que no escribió.
 
-Por ahora sólo expedientes (`[E#]`). El formato del enlace a párrafos (`[C#]`)
-lo está definiendo José Miguel.
+El `anchor` no viaja en el documento que ve el modelo —se le quita para no
+sepultar el texto del criterio—, así que llega aparte, por `ancla_de`.
 """
 import re
 from urllib.parse import quote
 
-MARCADOR_EXPEDIENTE = re.compile(r"\[(E\d+)\]")
+MARCADOR_FUENTE = re.compile(r"\[([CE]\d+)\]")
+
+# Lo que `encodeURIComponent` deja sin codificar. `quote` por defecto deja
+# también `/`, y con `safe=""` codifica `!*'()`: ninguno es lo que hace el
+# frontend.
+_SEGURO_JS = "-_.!~*'()"
 
 # El encabezado de la sección, con o sin negritas, almohadillas o dos puntos.
 # Se toma el último: un "FUENTES" en el cuerpo no abre la sección.
@@ -41,6 +51,38 @@ def ruta_expediente(case_link: str) -> str:
     # (`184_2018 1JD`, `CNT-002-2020 (Proplastic)`). Un paréntesis sin
     # codificar cierra el link de markdown antes de tiempo.
     return f"/case-search?caseLink={quote(case_link, safe='')}&details=true"
+
+
+def ruta_parrafo(case_link: str, anchor: str, paragraph_id: str) -> str:
+    """Ruta del frontend que abre la resolución con el párrafo subrayado."""
+    if not (case_link and anchor and paragraph_id):
+        return ""
+    return (
+        f"/digital-resolution?caseLink={quote(case_link, safe=_SEGURO_JS)}"
+        f"&anchor={quote(anchor, safe=_SEGURO_JS)}"
+        f"&paragraphId={quote(str(paragraph_id), safe=_SEGURO_JS)}"
+    )
+
+
+def _destino(marcador: str, case_link: str, registry, ancla_de) -> tuple[str, str]:
+    """
+    El destino del enlace en markdown, o el motivo por el que no lo hay.
+
+    Un criterio sin `anchor` o sin `id` no se enlaza a la ficha del expediente
+    como premio de consolación: el renglón dice "este párrafo", y mandar a
+    otra cosa sería un enlace que no lleva a lo citado.
+    """
+    if marcador.startswith("E"):
+        return f"({ruta_expediente(case_link)})", ""
+    doc = registry.resolve(marcador) or {}
+    paragraph_id = str(doc.get("id") or "")
+    if not paragraph_id:
+        return "", "criterio_sin_id"
+    meta = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+    anchor = (meta.get("anchor") or "") or (ancla_de(paragraph_id) if ancla_de else "")
+    if not anchor:
+        return "", "criterio_sin_anchor"
+    return f"(<{ruta_parrafo(case_link, anchor, paragraph_id)}>)", ""
 
 
 def _buscar_identificador(renglon: str, case_link: str, desde: int) -> int:
@@ -67,9 +109,12 @@ def _buscar_identificador(renglon: str, case_link: str, desde: int) -> int:
     return -1
 
 
-def enlazar_fuentes(texto: str, registry) -> tuple[str, dict]:
+def enlazar_fuentes(texto: str, registry, ancla_de=None) -> tuple[str, dict]:
     """
-    Enlaza el identificador de cada renglón `[E#]` de FUENTES a su ficha.
+    Enlaza el identificador de cada renglón de FUENTES: `[E#]` a la ficha del
+    expediente, `[C#]` al párrafo citado.
+
+    `ancla_de(paragraph_id)` devuelve el `anchor` de un criterio.
 
     Devuelve el texto y un resumen para la traza: cuántos renglones se
     enlazaron y cuáles no, con el motivo. Un renglón sin enlazar no es error
@@ -90,7 +135,7 @@ def enlazar_fuentes(texto: str, registry) -> tuple[str, dict]:
         # Puede haber varios marcadores en un renglón: el modelo a veces
         # agrupa (`[E1]–[E36] VCN-002-2024 a VCN-004-2022_2025_10_09`).
         # Cada uno enlaza su propio expediente, si el renglón lo nombra.
-        marcas = list(MARCADOR_EXPEDIENTE.finditer(renglon))
+        marcas = list(MARCADOR_FUENTE.finditer(renglon))
         if not marcas:
             continue
         # Las posiciones de `finditer` son del renglón original; los enlaces
@@ -105,14 +150,19 @@ def enlazar_fuentes(texto: str, registry) -> tuple[str, dict]:
                 continue
             if f"[{case_link}](" in renglon:
                 continue  # ya enlazado
-            # Después del primer marcador, para no tocar los `[E#]`.
+            # Después del primer marcador, para no tocar los `[E#]`/`[C#]`.
             pos = _buscar_identificador(renglon, case_link, inicio)
             if pos < 0:
                 resumen["sin_enlazar"].append(
                     {"marker": marcador, "case_link": case_link,
                      "motivo": "identificador_no_aparece_en_renglon"})
                 continue
-            enlace = f"[{case_link}]({ruta_expediente(case_link)})"
+            destino, motivo = _destino(marcador, case_link, registry, ancla_de)
+            if not destino:
+                resumen["sin_enlazar"].append(
+                    {"marker": marcador, "case_link": case_link, "motivo": motivo})
+                continue
+            enlace = f"[{case_link}]{destino}"
             renglon = renglon[:pos] + enlace + renglon[pos + len(case_link):]
             resumen["enlazados"] += 1
         renglones[i] = renglon
