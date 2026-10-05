@@ -33,6 +33,7 @@ from core.verificacion_semantica import (
     texto_de_evidencia as texto_de_evidencia_semantica,
 )
 from core.validacion_salida import validar_borrador
+from core.enlaces_fuentes import enlazar_fuentes
 from core.voz import clasificar_voz, etiqueta as etiqueta_voz, VOTO_PARTICULAR, NO_IDENTIFICADA
 from models.schemas import (
     StreamEvent, LLMMessage,
@@ -189,6 +190,7 @@ class NormaPlusAgent:
         # nada de esto puede vivir en self: dos peticiones simultáneas se
         # pisarían.
         state = TurnState()
+        state.anclas_criterio = self.evidence_cache.anclas(session_id)
 
         # Routing: clasificar la consulta antes de buscar, para poder exigir
         # después que la estrategia haya correspondido al tipo de pregunta.
@@ -440,6 +442,7 @@ class NormaPlusAgent:
         # ── Actualizar cache de evidencia ───────────────────
         flat_criterios = [item for sublist in all_criterios_results for item in sublist]
         flat_expedientes = [item for sublist in all_expedientes_results for item in sublist]
+        self.evidence_cache.recordar_anclas(session_id, state.anclas_criterio)
         if flat_criterios or flat_expedientes:
             self.evidence_cache.update(
                 session_id=session_id,
@@ -540,6 +543,8 @@ class NormaPlusAgent:
                 "cobertura_por_documento", state.cobertura_por_documento, "derived")
             collector.set_decision(
                 "reparacion_salida", state.reparacion_salida, "derived")
+            collector.set_decision(
+                "enlaces_fuentes", state.enlaces_fuentes, "derived")
             # ¿Alguna ruta vino vacía y su complementaria nunca se ejerció?
             # Es objetivo y no depende de leer el texto: si la respuesta afirma
             # ausencia con esto encendido, es falsa exhaustividad.
@@ -993,7 +998,15 @@ class NormaPlusAgent:
                 logger.warning(
                     f"Verificación semántica omitida: {type(e).__name__}: {e}")
 
-        return revision["texto"]
+        # Los enlaces van al final, sobre el texto ya reparado y verificado:
+        # el revisor juzga lo que dice la respuesta, no sus URLs, y un
+        # marcador retirado por la reparación ya no tiene renglón que enlazar.
+        texto_final, enlaces = enlazar_fuentes(
+            revision["texto"], state.registry if state else None,
+            ancla_de=(getattr(state, "anclas_criterio", None) or {}).get)
+        if state is not None:
+            state.enlaces_fuentes = enlaces
+        return texto_final
 
     # Cuántos documentos se amplían y cuántos pasajes se toman de cada uno.
     #
@@ -1364,6 +1377,8 @@ class NormaPlusAgent:
         # firman estos documentos.
         serialized = []
         for r in results:
+            if state is not None and r.id and (r.metadata or {}).get("anchor"):
+                state.anclas_criterio[str(r.id)] = r.metadata["anchor"]
             v = clasificar_voz({"content": r.text, "metadata": r.metadata})
             d = {
                 "id": r.id,

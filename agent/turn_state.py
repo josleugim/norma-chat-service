@@ -121,6 +121,14 @@ class TurnState:
     # no resolvían y cuántas afirmaciones colgaban sólo de ellos.
     reparacion_salida: dict | None = None
 
+    # Enlaces de FUENTES a la ficha del expediente: cuántos se pusieron y
+    # cuáles no, con el motivo.
+    enlaces_fuentes: dict | None = None
+
+    # `anchor` de cada criterio recuperado, por id de párrafo. Hace falta para
+    # el enlace al párrafo y no viaja en el documento que ve el modelo.
+    anclas_criterio: dict[str, str] = field(default_factory=dict)
+
     # Requisitos verificables de la pregunta (C03): qué documento, qué voz y
     # si exige comparar dos fuentes. Se comprueban contra la evidencia
     # identificada, no contra una bolsa de palabras — el check léxico descarta
