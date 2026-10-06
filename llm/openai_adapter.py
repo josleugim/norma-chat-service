@@ -12,11 +12,30 @@ from models.schemas import (
     ToolCallRequest, ModelInfo,
 )
 
+# Que OpenAI no guarde una copia de cada conversación en la cuenta.
+#
+# `store=True` deja la petición y la respuesta en el panel de la cuenta, para
+# sus productos de evals y destilación, hasta que alguien la borre: una copia
+# más, aparte de los 30 días de monitoreo de abuso. Se fija explícito en vez de
+# depender del valor por defecto, que no controlamos y que en la API de
+# Responses es el contrario. Lo que se le dijo a COFECE el 6-oct sobre dónde se
+# almacenan los datos depende de esto.
+STORE = False
+
+TIEMPO_LIMITE_S = 120.0
+
 
 class OpenAIAdapter(BaseLLMAdapter):
 
     def __init__(self, api_key: str):
-        self.client = AsyncOpenAI(api_key=api_key)
+        # Tiempo límite explícito. Sin él rige el del SDK (10 minutos por
+        # intento, con reintentos): la noche del 6-oct, en la banda del
+        # holdout, varias llamadas se quedaron colgadas ~15 minutos cada una
+        # antes de reintentar, y una banda de 30 minutos tardó casi 6 horas.
+        # Para el usuario eso es un chat que no contesta. Una respuesta
+        # completa tarda menos de un minuto (la más larga medida: 54 s); hasta
+        # 4,096 tokens sin streaming caben con margen. El reintento sigue.
+        self.client = AsyncOpenAI(api_key=api_key, timeout=TIEMPO_LIMITE_S)
 
     # ── Streaming (respuesta final) ─────────────────────────
 
@@ -36,6 +55,7 @@ class OpenAIAdapter(BaseLLMAdapter):
             max_tokens=max_tokens,
             stream=True,
             stream_options={"include_usage": True},
+            store=STORE,
         )
 
         input_tokens = 0
@@ -82,6 +102,7 @@ class OpenAIAdapter(BaseLLMAdapter):
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
+            store=STORE,
         )
         # Solo incluir tools si hay alguna; OpenAI rechaza tools=[] con tool_choice
         if oai_tools:
@@ -122,6 +143,7 @@ class OpenAIAdapter(BaseLLMAdapter):
             messages=oai_msgs,
             max_tokens=max_tokens,
             temperature=0.5,
+            store=STORE,
         )
         return response.choices[0].message.content or ""
 
