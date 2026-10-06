@@ -14,6 +14,7 @@ from retrieval.estadistica_client import EstadisticaSearchClient
 from temporal.analyzer import TemporalAnalyzer
 from core.citation_builder import CitationBuilder
 from core.citations import CitationRegistry
+from core.costos import costo_estimado
 from core.evidence_cache import EvidenceCache
 from agent.turn_state import TurnState
 from core.tracing import (
@@ -152,6 +153,8 @@ class NormaPlusAgent:
         turn_index: int = 0,
         question_set_id: Optional[str] = None,
         client: str = "frontend",
+        usuario_ref: Optional[str] = None,
+        plan: Optional[str] = None,
     ) -> AsyncIterator[StreamEvent]:
         """
         Ejecuta el agente. Yields StreamEvents para el frontend.
@@ -168,6 +171,8 @@ class NormaPlusAgent:
             turn_index=turn_index,
             question_set_id=question_set_id,
             client=client,
+            usuario_ref=usuario_ref,
+            plan=plan,
         )
 
         try:
@@ -649,6 +654,12 @@ class NormaPlusAgent:
                 "session_title": session_title,
                 "exhausted_tools": exhausted_tools,
                 "trace_id": collector.trace_id if collector else None,
+                # Para que el proxy cuente uso por licencia: el modelo que
+                # contestó y el costo estimado (cota superior, ver core/costos).
+                "provider": provider,
+                "model": model,
+                "costo_estimado_usd": costo_estimado(
+                    model, total_input_tokens, total_output_tokens),
             },
         )
 
@@ -658,6 +669,8 @@ class NormaPlusAgent:
                 "exhausted_tools": exhausted_tools,
                 "tokens_input": total_input_tokens,
                 "tokens_output": total_output_tokens,
+                "cost_usd": costo_estimado(
+                    model, total_input_tokens, total_output_tokens) or 0.0,
             }
 
     # ── Trazabilidad ────────────────────────────────────────
@@ -666,6 +679,7 @@ class NormaPlusAgent:
         self, session_id: str, user_query: str, provider: str, model: str,
         chat_history: list[dict], is_first_message: bool, turn_index: int,
         question_set_id: Optional[str], client: str,
+        usuario_ref: Optional[str] = None, plan: Optional[str] = None,
     ):
         """Crea el recolector. Si algo falla, se devuelve None y el agente
         corre exactamente igual, sin traza."""
@@ -688,6 +702,8 @@ class NormaPlusAgent:
                     is_first_message=is_first_message,
                     client=client,
                     question_set_id=question_set_id,
+                    usuario_ref=usuario_ref,
+                    plan=plan,
                 ),
                 turn_index=turn_index,
                 run_id=getattr(self.settings, "run_id", None),
@@ -725,6 +741,7 @@ class NormaPlusAgent:
                 exhausted_tools=pending.get("exhausted_tools", False),
                 tokens_input=pending.get("tokens_input", 0),
                 tokens_output=pending.get("tokens_output", 0),
+                cost_usd=pending.get("cost_usd", 0.0),
             )
             self.trace_sink.write(trace)
             if self.manifest_store is not None:

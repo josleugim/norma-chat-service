@@ -58,6 +58,8 @@ async def chat_completions(
                 turn_index=turn_index,
                 question_set_id=request.question_set_id,
                 client=request.client,
+                usuario_ref=request.usuario_ref,
+                plan=request.plan,
             ):
                 yield {
                     "event": event.type,

@@ -89,6 +89,13 @@ class ChatRequest(BaseModel):
     question_set_id: Optional[str] = None  # id de la pregunta en la batería
     client: str = "frontend"               # "frontend" | "test_harness" | "curl"
 
+    # --- Uso por usuario (opcionales; los manda el proxy) ---
+    # Identificador opaco del usuario —un hash, no su correo— y su plan. Sirven
+    # para contar uso por licencia y para encontrar la traza de quien reporta
+    # un error. El servicio no los usa para decidir nada.
+    usuario_ref: Optional[str] = None
+    plan: Optional[str] = None
+
 
 class ModelInfo(BaseModel):
     provider: str
