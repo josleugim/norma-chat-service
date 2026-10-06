@@ -36,6 +36,7 @@ from core.validacion_salida import validar_borrador
 from core.enlaces_fuentes import enlazar_fuentes, retirar_centinelas
 from core.estructura_interna import expuestos as estructura_expuesta
 from core.relaciones import resumen_historia_procesal
+from core.aggregation import autoridad_de_la_pregunta
 from core.voz import clasificar_voz, etiqueta as etiqueta_voz, VOTO_PARTICULAR, NO_IDENTIFICADA
 from models.schemas import (
     StreamEvent, LLMMessage,
@@ -1712,6 +1713,46 @@ class NormaPlusAgent:
                 break
         return salida
 
+    @staticmethod
+    def _plazo_hasta_cumplimiento(registros: list[dict], actos: list[dict],
+                                  campo_fin: str) -> tuple[list[dict], list[dict]]:
+        """
+        Copias de los registros cuyo `campo_fin` pasa a ser la fecha del
+        cumplimiento más reciente, y la lista de lo que se cambió.
+
+        La fecha sale de `amparoComplianceResolutionDate` del acto, que se liga
+        a su asunto por `parent` (`expediente_principal`), no por el nombre.
+        """
+        from datetime import datetime
+
+        def _f(s):
+            try:
+                return datetime.strptime(str(s), "%d-%m-%Y")
+            except (TypeError, ValueError):
+                return None
+
+        ultimo: dict[str, dict] = {}
+        for a in actos:
+            principal = a.get("expediente_principal")
+            fecha = a.get("amparoComplianceResolutionDate")
+            if not principal or not _f(fecha):
+                continue
+            if principal not in ultimo or _f(fecha) > _f(ultimo[principal]["fecha"]):
+                ultimo[principal] = {"cumplimiento": a.get("caseLink"), "fecha": fecha}
+
+        salida, cambios = [], []
+        for r in registros:
+            u = ultimo.get(r.get("caseLink"))
+            if u is None:
+                salida.append(r)
+                continue
+            salida.append({**r, campo_fin: u["fecha"]})
+            cambios.append({"asunto": r.get("caseLink"),
+                            "cumplimiento": u["cumplimiento"],
+                            "fecha_inicial": r.get(campo_fin),
+                            "fecha_final_usada": u["fecha"]})
+        return salida, cambios
+
     async def _exec_agregar_expedientes(
         self, args: dict, collector=None, state=None
     ) -> dict:
@@ -1756,6 +1797,19 @@ class NormaPlusAgent:
                 if (r.get("caseLink") or "").upper().startswith(p)
             ]
         universo_total = len(registros)
+
+        # La pregunta nombra una sola autoridad y la llamada no filtra: se
+        # filtra por ella y se declara. El 6-oct, a "¿cuánto tarda la COFECE
+        # …?", el modelo omitió el filtro en 2 de 3 corridas y promedió 34
+        # asuntos, 2 de ellos de la CNA. Si la pregunta nombra varias o
+        # ninguna, no se toca.
+        autoridad_inferida = None
+        if not args.get("autoridad"):
+            autoridad_inferida = autoridad_de_la_pregunta(
+                getattr(state, "query", "") if state is not None else "")
+            if autoridad_inferida:
+                args = {**args, "autoridad": autoridad_inferida}
+
         registros = self._filtrar_local(registros, args, state)
 
         # Un asunto, una vez. Un acto de cumplimiento de amparo es una
@@ -1788,6 +1842,18 @@ class NormaPlusAgent:
                     }
                     for r in actos_cumplimiento
                 ])
+
+        # Hasta la resolución final, sólo si se pide (Imanol, 6-oct): "se cuenta
+        # del inicio a la resolución inicial y solo sumaría el plazo del
+        # cumplimiento si el usuario lo pide". El asunto se sigue contando una
+        # vez; lo que cambia es su fecha final, que pasa a ser la del
+        # cumplimiento más reciente enlazado por `parent`.
+        hasta_final: list[dict] = []
+        if (args.get("hasta_resolucion_final") and metrica != "multa"
+                and actos_cumplimiento):
+            registros, hasta_final = self._plazo_hasta_cumplimiento(
+                registros, actos_cumplimiento,
+                args.get("campo_fin", "resolutionDate"))
 
         # Casos con problemas de fecha; se llena solo en métricas temporales.
         anomalias_calculo: list[dict] = []
@@ -1928,6 +1994,22 @@ class NormaPlusAgent:
                 "expediente no tiene `ref`, menciónalo sin cita."
             )
 
+        if autoridad_inferida:
+            resultado["AUTORIDAD_TOMADA_DE_LA_PREGUNTA"] = (
+                f"La pregunta nombra a {autoridad_inferida} y la llamada no "
+                f"filtraba autoridad: el cálculo es sólo de {autoridad_inferida}.")
+        if hasta_final:
+            resultado["PLAZO_HASTA_RESOLUCION_FINAL"] = {
+                "asuntos": hasta_final,
+                "nota": (
+                    "Se pidió incluir el cumplimiento: en estos asuntos el plazo "
+                    "corre hasta la resolución en cumplimiento de amparo, no "
+                    "hasta la inicial. Dilo, y di que incluye el tiempo del "
+                    "litigio de amparo."
+                ),
+            }
+            # No se describen como excluidos: su fecha sí se usó.
+            actos_cumplimiento = []
         if actos_cumplimiento:
             resultado["ACTOS_DE_CUMPLIMIENTO_EXCLUIDOS"] = {
                 "count": len(actos_cumplimiento),
@@ -1979,6 +2061,22 @@ class NormaPlusAgent:
                     f"inhábiles, así que su plazo en días hábiles es "
                     f"aproximado y puede estar sobreestimado."
                 )
+            # Si el cálculo mezcla autoridades, se dice cuántos de cada una.
+            # El 6-oct el modelo pidió el promedio VCN sin filtrar autoridad
+            # —la pregunta decía "la COFECE"— y presentó 34 asuntos (32 de
+            # COFECE y 2 de CNA) como de la COFECE.
+            from collections import Counter as _Counter
+            _por_autoridad = _Counter(
+                (r.get("authority") or "sin autoridad") for r in registros)
+            autoridades_mezcladas = ""
+            if len(_por_autoridad) > 1:
+                desglose = ", ".join(
+                    f"{n} de {a}" for a, n in _por_autoridad.most_common())
+                autoridades_mezcladas = (
+                    f" OJO: el cálculo mezcla autoridades ({desglose}). No lo "
+                    f"atribuyas a una sola; si la pregunta es sobre una, "
+                    f"vuelve a calcular filtrando `autoridad`.")
+                resultado["AUTORIDADES_EN_EL_CALCULO"] = dict(_por_autoridad)
             resultado["COMO_DEBES_DESCRIBIR_LA_COBERTURA"] = (
                 f"Se analizaron {procesados} expedientes; {con_valor} tenían la "
                 f"información necesaria y el {operacion} se obtuvo sobre esos "
@@ -1989,6 +2087,11 @@ class NormaPlusAgent:
                    f"cumplimiento de amparo: sus asuntos ya cuentan, una vez, "
                    f"por su resolución original."
                    if actos_cumplimiento else "")
+                + (f" En {len(hasta_final)} asuntos el plazo corre hasta su "
+                   f"resolución en cumplimiento de amparo, como se pidió; "
+                   f"incluye el tiempo del litigio."
+                   if hasta_final else "")
+                + autoridades_mezcladas
                 + aviso_cobertura
                 + " USA EXACTAMENTE ESTAS CIFRAS: no digas que el cálculo se "
                   "hizo sobre los expedientes procesados si el denominador real "

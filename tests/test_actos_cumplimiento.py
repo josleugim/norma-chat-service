@@ -117,3 +117,125 @@ class TestActosDeCumplimiento:
         r, _ = _agregar(PLAZO, registros=UNIVERSO[:2])
         assert "ACTOS_DE_CUMPLIMIENTO_EXCLUIDOS" not in r
         assert "cumplimiento" not in r["COMO_DEBES_DESCRIBIR_LA_COBERTURA"]
+
+
+# ── Hasta la resolución final, sólo si se pide (Imanol, 6-oct) ─────────────
+
+def _rec_acto(case_link, parent, fecha_cumplimiento):
+    from models.schemas import ExpedienteRecord
+    return ExpedienteRecord(**{
+        "caseLink": case_link, "authority": "COFECE",
+        "typeOfProcedure": "Concentración no notificada",
+        "natureOfResolution": "En cumplimiento de amparo",
+        "amparoComplianceResolutionDate": fecha_cumplimiento,
+        "parent": {"id": 1, "caseLink": parent},
+    })
+
+
+UNIVERSO_FINAL = [
+    _rec("VCN-001-2017", "10-02-2017", "15-05-2017"),
+    _rec("VCN-002-2017", "08-03-2017", "26-04-2017"),
+    _rec_acto("VCN-001-2017_2018_01_01", "VCN-001-2017", "01-01-2018"),
+    _rec_acto("VCN-001-2017_2019_03_14", "VCN-001-2017", "14-03-2019"),
+]
+
+
+class TestHastaResolucionFinal:
+
+    def test_por_defecto_hasta_la_resolucion_inicial(self):
+        """La definición de Imanol: sin cumplimientos, salvo que se pida."""
+        r, _ = _agregar(PLAZO, registros=UNIVERSO_FINAL)
+        assert "PLAZO_HASTA_RESOLUCION_FINAL" not in r
+        assert r["ACTOS_DE_CUMPLIMIENTO_EXCLUIDOS"]["count"] == 2
+
+    def test_si_se_pide_corre_hasta_el_cumplimiento_mas_reciente(self):
+        r, st = _agregar({**PLAZO, "hasta_resolucion_final": True},
+                         registros=UNIVERSO_FINAL)
+        assert r["procesados"] == 2  # el asunto se sigue contando una vez
+        cambios = r["PLAZO_HASTA_RESOLUCION_FINAL"]["asuntos"]
+        assert cambios == [{"asunto": "VCN-001-2017",
+                            "cumplimiento": "VCN-001-2017_2019_03_14",
+                            "fecha_inicial": "15-05-2017",
+                            "fecha_final_usada": "14-03-2019"}]
+        audit = {a["case_link"]: a for a in st.computation_audit if a.get("end_date")}
+        # El cálculo y su audit usan la fecha del cumplimiento; el otro asunto,
+        # sin cumplimiento, conserva la suya.
+        assert audit["VCN-001-2017"]["end_date"] == "2019-03-14"
+        assert audit["VCN-002-2017"]["end_date"] == "2017-04-26"
+
+    def test_lo_dice_en_la_descripcion_y_no_los_llama_excluidos(self):
+        r, _ = _agregar({**PLAZO, "hasta_resolucion_final": True},
+                        registros=UNIVERSO_FINAL)
+        texto = r["COMO_DEBES_DESCRIBIR_LA_COBERTURA"]
+        assert "hasta su resolución en cumplimiento" in texto
+        assert "No se incluyen" not in texto
+        assert "ACTOS_DE_CUMPLIMIENTO_EXCLUIDOS" not in r
+
+    def test_no_aplica_a_multas(self):
+        r, _ = _agregar({"operacion": "suma", "metrica": "multa", "prefijo_expediente": "VCN",
+                         "hasta_resolucion_final": True}, registros=UNIVERSO_FINAL)
+        assert "PLAZO_HASTA_RESOLUCION_FINAL" not in r
+
+
+class TestAutoridadesMezcladas:
+    """6-oct: 34 asuntos (32 COFECE + 2 CNA) presentados como 'la COFECE'."""
+
+    def _con(self, *autoridades):
+        from models.schemas import ExpedienteRecord
+        return [ExpedienteRecord(**{
+            "caseLink": f"VCN-00{i}-2020", "authority": a,
+            "startAgreementDate": "01-02-2020", "resolutionDate": "01-04-2020"})
+            for i, a in enumerate(autoridades, 1)]
+
+    def test_se_declara_el_desglose(self):
+        r, _ = _agregar(PLAZO, registros=self._con("COFECE", "COFECE", "CNA"))
+        assert r["AUTORIDADES_EN_EL_CALCULO"] == {"COFECE": 2, "CNA": 1}
+        assert "mezcla autoridades (2 de COFECE, 1 de CNA)" in \
+            r["COMO_DEBES_DESCRIBIR_LA_COBERTURA"]
+
+    def test_una_sola_autoridad_no_agrega_aviso(self):
+        r, _ = _agregar(PLAZO, registros=self._con("COFECE", "COFECE"))
+        assert "AUTORIDADES_EN_EL_CALCULO" not in r
+        assert "mezcla" not in r["COMO_DEBES_DESCRIBIR_LA_COBERTURA"]
+
+
+class TestAutoridadDeLaPregunta:
+
+    def test_reconoce_una_sola_autoridad(self):
+        from core.aggregation import autoridad_de_la_pregunta as f
+        assert f("¿cuánto tarda la COFECE en resolver un VCN?") == "COFECE"
+        assert f("la Comisión Federal de Competencia Económica") == "COFECE"
+        assert f("resoluciones de la Comisión Federal de Competencia en 2010") == "CFC"
+        assert f("¿qué ha resuelto la CNA?") == "CNA"
+
+    def test_varias_o_ninguna_no_decide(self):
+        from core.aggregation import autoridad_de_la_pregunta as f
+        assert f("¿cuántas resoluciones emitió la CFC frente a la COFECE?") is None
+        assert f("¿cuánto tarda en resolverse un VCN?") is None
+
+    def test_la_agregacion_filtra_y_lo_declara(self):
+        from agent.turn_state import TurnState
+        from models.schemas import ExpedienteRecord
+        regs = [ExpedienteRecord(**{
+            "caseLink": f"VCN-00{i}-2020", "authority": a,
+            "startAgreementDate": "01-02-2020", "resolutionDate": "01-04-2020"})
+            for i, a in enumerate(("COFECE", "COFECE", "CNA"), 1)]
+        st = TurnState()
+        st.query = "¿cuánto tarda la COFECE en resolver un VCN?"
+        r = asyncio.run(_agente(regs)._exec_agregar_expedientes(PLAZO, None, st))
+        assert r["procesados"] == 2
+        assert "COFECE" in r["AUTORIDAD_TOMADA_DE_LA_PREGUNTA"]
+        assert "AUTORIDADES_EN_EL_CALCULO" not in r
+
+    def test_si_la_llamada_ya_filtra_no_se_toca(self):
+        from agent.turn_state import TurnState
+        from models.schemas import ExpedienteRecord
+        regs = [ExpedienteRecord(**{
+            "caseLink": "VCN-001-2025", "authority": "CNA",
+            "startAgreementDate": "01-02-2025", "resolutionDate": "01-04-2025"})]
+        st = TurnState()
+        st.query = "¿cuánto tarda la COFECE?"
+        r = asyncio.run(_agente(regs)._exec_agregar_expedientes(
+            {**PLAZO, "autoridad": "CNA"}, None, st))
+        assert "AUTORIDAD_TOMADA_DE_LA_PREGUNTA" not in r
+        assert r["procesados"] == 1

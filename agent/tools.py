@@ -223,6 +223,17 @@ TOOLS = [
                     "type": "string",
                     "description": "Solo para métricas de días: campo de fecha final",
                 },
+                "hasta_resolucion_final": {
+                    "type": "boolean",
+                    "description": (
+                        "Sólo para métricas de días. Por defecto false: el plazo "
+                        "va del inicio a la resolución inicial. Ponlo en true "
+                        "SÓLO si el usuario pide expresamente incluir el "
+                        "cumplimiento de amparo: entonces, en los asuntos que lo "
+                        "tienen, el plazo corre hasta la resolución en "
+                        "cumplimiento."
+                    ),
+                },
                 "incluir_actos_de_cumplimiento": {
                     "type": "boolean",
                     "description": (

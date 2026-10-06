@@ -252,3 +252,20 @@ def separar_actos_de_cumplimiento(registros: list[dict]) -> tuple[list[dict], li
     actos = [r for r in registros if es_acto_de_cumplimiento(r)]
     asuntos = [r for r in registros if not es_acto_de_cumplimiento(r)]
     return actos, asuntos
+
+
+_AUTORIDADES = {
+    # "Comisión Federal de Competencia Económica" es la COFECE; sin
+    # "Económica", la CFC anterior. Por eso la CFC excluye esa continuación.
+    "COFECE": re.compile(
+        r"\bCOFECE\b|Comisi[oó]n Federal de Competencia Econ[oó]mica", re.I),
+    "CFC": re.compile(
+        r"\bCFC\b|Comisi[oó]n Federal de Competencia(?!\s+Econ[oó]mica)", re.I),
+    "CNA": re.compile(r"\bCNA\b|Comisi[oó]n Nacional Antimonopolio", re.I),
+}
+
+
+def autoridad_de_la_pregunta(texto: str) -> str | None:
+    """La autoridad que nombra la pregunta, si nombra exactamente una."""
+    nombradas = [a for a, rx in _AUTORIDADES.items() if rx.search(texto or "")]
+    return nombradas[0] if len(nombradas) == 1 else None
