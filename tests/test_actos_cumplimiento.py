@@ -175,3 +175,67 @@ class TestHastaResolucionFinal:
         r, _ = _agregar({"operacion": "suma", "metrica": "multa", "prefijo_expediente": "VCN",
                          "hasta_resolucion_final": True}, registros=UNIVERSO_FINAL)
         assert "PLAZO_HASTA_RESOLUCION_FINAL" not in r
+
+
+class TestAutoridadesMezcladas:
+    """6-oct: 34 asuntos (32 COFECE + 2 CNA) presentados como 'la COFECE'."""
+
+    def _con(self, *autoridades):
+        from models.schemas import ExpedienteRecord
+        return [ExpedienteRecord(**{
+            "caseLink": f"VCN-00{i}-2020", "authority": a,
+            "startAgreementDate": "01-02-2020", "resolutionDate": "01-04-2020"})
+            for i, a in enumerate(autoridades, 1)]
+
+    def test_se_declara_el_desglose(self):
+        r, _ = _agregar(PLAZO, registros=self._con("COFECE", "COFECE", "CNA"))
+        assert r["AUTORIDADES_EN_EL_CALCULO"] == {"COFECE": 2, "CNA": 1}
+        assert "mezcla autoridades (2 de COFECE, 1 de CNA)" in \
+            r["COMO_DEBES_DESCRIBIR_LA_COBERTURA"]
+
+    def test_una_sola_autoridad_no_agrega_aviso(self):
+        r, _ = _agregar(PLAZO, registros=self._con("COFECE", "COFECE"))
+        assert "AUTORIDADES_EN_EL_CALCULO" not in r
+        assert "mezcla" not in r["COMO_DEBES_DESCRIBIR_LA_COBERTURA"]
+
+
+class TestAutoridadDeLaPregunta:
+
+    def test_reconoce_una_sola_autoridad(self):
+        from core.aggregation import autoridad_de_la_pregunta as f
+        assert f("¿cuánto tarda la COFECE en resolver un VCN?") == "COFECE"
+        assert f("la Comisión Federal de Competencia Económica") == "COFECE"
+        assert f("resoluciones de la Comisión Federal de Competencia en 2010") == "CFC"
+        assert f("¿qué ha resuelto la CNA?") == "CNA"
+
+    def test_varias_o_ninguna_no_decide(self):
+        from core.aggregation import autoridad_de_la_pregunta as f
+        assert f("¿cuántas resoluciones emitió la CFC frente a la COFECE?") is None
+        assert f("¿cuánto tarda en resolverse un VCN?") is None
+
+    def test_la_agregacion_filtra_y_lo_declara(self):
+        from agent.turn_state import TurnState
+        from models.schemas import ExpedienteRecord
+        regs = [ExpedienteRecord(**{
+            "caseLink": f"VCN-00{i}-2020", "authority": a,
+            "startAgreementDate": "01-02-2020", "resolutionDate": "01-04-2020"})
+            for i, a in enumerate(("COFECE", "COFECE", "CNA"), 1)]
+        st = TurnState()
+        st.query = "¿cuánto tarda la COFECE en resolver un VCN?"
+        r = asyncio.run(_agente(regs)._exec_agregar_expedientes(PLAZO, None, st))
+        assert r["procesados"] == 2
+        assert "COFECE" in r["AUTORIDAD_TOMADA_DE_LA_PREGUNTA"]
+        assert "AUTORIDADES_EN_EL_CALCULO" not in r
+
+    def test_si_la_llamada_ya_filtra_no_se_toca(self):
+        from agent.turn_state import TurnState
+        from models.schemas import ExpedienteRecord
+        regs = [ExpedienteRecord(**{
+            "caseLink": "VCN-001-2025", "authority": "CNA",
+            "startAgreementDate": "01-02-2025", "resolutionDate": "01-04-2025"})]
+        st = TurnState()
+        st.query = "¿cuánto tarda la COFECE?"
+        r = asyncio.run(_agente(regs)._exec_agregar_expedientes(
+            {**PLAZO, "autoridad": "CNA"}, None, st))
+        assert "AUTORIDAD_TOMADA_DE_LA_PREGUNTA" not in r
+        assert r["procesados"] == 1

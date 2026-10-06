@@ -36,6 +36,7 @@ from core.validacion_salida import validar_borrador
 from core.enlaces_fuentes import enlazar_fuentes, retirar_centinelas
 from core.estructura_interna import expuestos as estructura_expuesta
 from core.relaciones import resumen_historia_procesal
+from core.aggregation import autoridad_de_la_pregunta
 from core.voz import clasificar_voz, etiqueta as etiqueta_voz, VOTO_PARTICULAR, NO_IDENTIFICADA
 from models.schemas import (
     StreamEvent, LLMMessage,
@@ -1755,6 +1756,19 @@ class NormaPlusAgent:
                 if (r.get("caseLink") or "").upper().startswith(p)
             ]
         universo_total = len(registros)
+
+        # La pregunta nombra una sola autoridad y la llamada no filtra: se
+        # filtra por ella y se declara. El 6-oct, a "¿cuánto tarda la COFECE
+        # …?", el modelo omitió el filtro en 2 de 3 corridas y promedió 34
+        # asuntos, 2 de ellos de la CNA. Si la pregunta nombra varias o
+        # ninguna, no se toca.
+        autoridad_inferida = None
+        if not args.get("autoridad"):
+            autoridad_inferida = autoridad_de_la_pregunta(
+                getattr(state, "query", "") if state is not None else "")
+            if autoridad_inferida:
+                args = {**args, "autoridad": autoridad_inferida}
+
         registros = self._filtrar_local(registros, args, state)
 
         # Un asunto, una vez. Un acto de cumplimiento de amparo es una
@@ -1939,6 +1953,10 @@ class NormaPlusAgent:
                 "expediente no tiene `ref`, menciónalo sin cita."
             )
 
+        if autoridad_inferida:
+            resultado["AUTORIDAD_TOMADA_DE_LA_PREGUNTA"] = (
+                f"La pregunta nombra a {autoridad_inferida} y la llamada no "
+                f"filtraba autoridad: el cálculo es sólo de {autoridad_inferida}.")
         if hasta_final:
             resultado["PLAZO_HASTA_RESOLUCION_FINAL"] = {
                 "asuntos": hasta_final,
@@ -2002,6 +2020,22 @@ class NormaPlusAgent:
                     f"inhábiles, así que su plazo en días hábiles es "
                     f"aproximado y puede estar sobreestimado."
                 )
+            # Si el cálculo mezcla autoridades, se dice cuántos de cada una.
+            # El 6-oct el modelo pidió el promedio VCN sin filtrar autoridad
+            # —la pregunta decía "la COFECE"— y presentó 34 asuntos (32 de
+            # COFECE y 2 de CNA) como de la COFECE.
+            from collections import Counter as _Counter
+            _por_autoridad = _Counter(
+                (r.get("authority") or "sin autoridad") for r in registros)
+            autoridades_mezcladas = ""
+            if len(_por_autoridad) > 1:
+                desglose = ", ".join(
+                    f"{n} de {a}" for a, n in _por_autoridad.most_common())
+                autoridades_mezcladas = (
+                    f" OJO: el cálculo mezcla autoridades ({desglose}). No lo "
+                    f"atribuyas a una sola; si la pregunta es sobre una, "
+                    f"vuelve a calcular filtrando `autoridad`.")
+                resultado["AUTORIDADES_EN_EL_CALCULO"] = dict(_por_autoridad)
             resultado["COMO_DEBES_DESCRIBIR_LA_COBERTURA"] = (
                 f"Se analizaron {procesados} expedientes; {con_valor} tenían la "
                 f"información necesaria y el {operacion} se obtuvo sobre esos "
@@ -2016,6 +2050,7 @@ class NormaPlusAgent:
                    f"resolución en cumplimiento de amparo, como se pidió; "
                    f"incluye el tiempo del litigio."
                    if hasta_final else "")
+                + autoridades_mezcladas
                 + aviso_cobertura
                 + " USA EXACTAMENTE ESTAS CIFRAS: no digas que el cálculo se "
                   "hizo sobre los expedientes procesados si el denominador real "
