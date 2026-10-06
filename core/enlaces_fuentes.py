@@ -34,6 +34,11 @@ diría un expediente y llevaría a otro.
 
 El `anchor` no viaja en el documento que ve el modelo —se le quita para no
 sepultar el texto del criterio—, así que llega aparte, por `ancla_de`.
+
+Y un renglón de FUENTES con etiqueta de tipo pero sin marcador
+(`- [RESOLUCIÓN] Cálculo agregado sobre 32 expedientes`) se presenta como
+fuente sin serlo: no hay documento detrás. Se le quita la etiqueta y queda
+como nota. Pasaba en q01 y en q20 (`[RESOLUCIÓN] CFC | Total: 2,792`).
 """
 import re
 from urllib.parse import quote
@@ -51,6 +56,9 @@ ENCABEZADO_FUENTES = re.compile(
     r"^[ \t]*(?:#+[ \t]*)?(?:\*\*)?[ \t]*FUENTES[ \t]*(?:\*\*)?[ \t]*:?[ \t]*(?:\*\*)?[ \t]*$",
     re.IGNORECASE | re.MULTILINE,
 )
+
+# Etiqueta de tipo de fuente que pone el modelo (`[RESOLUCIÓN]`, `[SENTENCIA]`).
+ETIQUETA_TIPO = re.compile(r"\[(?:RESOLUCI[ÓO]N|SENTENCIA)\][ \t]*", re.IGNORECASE)
 
 # Viñeta o numeración al inicio del renglón: queda fuera del enlace.
 _PREFIJO_RENGLON = re.compile(r"^([ \t]*(?:[-*•][ \t]+|\d+[.)][ \t]+)?)")
@@ -148,6 +156,9 @@ def _enlazar_cuerpo(cuerpo: str, registry, ancla_de, resumen: dict) -> str:
 def _enlazar_renglon(renglon: str, registry, ancla_de, resumen: dict) -> str:
     marcas = list(MARCADOR_FUENTE.finditer(renglon))
     if not marcas:
+        if ETIQUETA_TIPO.search(renglon):
+            resumen["etiquetas_sin_cita_retiradas"].append(renglon.strip()[:160])
+            return ETIQUETA_TIPO.sub("", renglon)
         return renglon
     if "](" in renglon:
         return renglon  # ya enlazado
@@ -206,7 +217,8 @@ def enlazar_fuentes(texto: str, registry, ancla_de=None) -> tuple[str, dict]:
     en cada lugar y cuáles no, con el motivo. Una cita sin enlace no es error
     —la respuesta sale igual—, pero tiene que quedar a la vista.
     """
-    resumen = {"en_texto": 0, "en_fuentes": 0, "sin_enlazar": []}
+    resumen = {"en_texto": 0, "en_fuentes": 0, "sin_enlazar": [],
+               "etiquetas_sin_cita_retiradas": []}
     if not texto or registry is None:
         return texto, resumen
 

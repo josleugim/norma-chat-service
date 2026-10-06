@@ -46,7 +46,8 @@ class TestEnlacesFuentes:
         assert nuevo.endswith(
             "\n[[E1] [RESOLUCIÓN] VCN-001-2017 | COFECE | SANCIÓN/ACREDITACIÓN "
             f"DEL INCUMPLIMIENTO | 18-05-2017]({self.URL_E})")
-        assert resumen == {"en_texto": 0, "en_fuentes": 1, "sin_enlazar": []}
+        assert resumen == {"en_texto": 0, "en_fuentes": 1, "sin_enlazar": [],
+                           "etiquetas_sin_cita_retiradas": []}
 
     def test_la_vinieta_queda_fuera_del_enlace(self):
         reg = self._reg("VCN-001-2017")
@@ -58,7 +59,8 @@ class TestEnlacesFuentes:
         reg = self._reg_criterio()
         texto = "x\n\nFUENTES\n[C1] [SENTENCIA] 1251_2017_1JD | p. 3 | \"Actos reclamados\""
         nuevo, resumen = self._enlazar(texto, reg, {"8471": self.ANCHOR}.get)
-        assert resumen == {"en_texto": 0, "en_fuentes": 1, "sin_enlazar": []}
+        assert resumen == {"en_texto": 0, "en_fuentes": 1, "sin_enlazar": [],
+                           "etiquetas_sin_cita_retiradas": []}
         assert nuevo.endswith(
             "\n[[C1] [SENTENCIA] 1251_2017_1JD | p. 3 | \"Actos reclamados\"]"
             "(</digital-resolution?caseLink=1251_2017_1JD"
@@ -97,7 +99,8 @@ class TestEnlacesFuentes:
         texto = ("x\n\nFUENTES\n- [E1]–[E2] [RESOLUCIÓN] VCN-002-2024 "
                  "a VCN-004-2022_2025_10_09 | COFECE")
         nuevo, resumen = self._enlazar(texto, reg)
-        assert resumen == {"en_texto": 0, "en_fuentes": 2, "sin_enlazar": []}
+        assert resumen == {"en_texto": 0, "en_fuentes": 2, "sin_enlazar": [],
+                           "etiquetas_sin_cita_retiradas": []}
         assert "[VCN-002-2024](/case-search?caseLink=VCN-002-2024&details=true)" in nuevo
         assert ("[VCN-004-2022_2025_10_09](/case-search?caseLink="
                 "VCN-004-2022_2025_10_09&details=true)") in nuevo
@@ -179,7 +182,8 @@ class TestEnlacesFuentes:
         una, _ = self._enlazar(texto, reg)
         dos, resumen = self._enlazar(una, reg)
         assert una == dos
-        assert resumen == {"en_texto": 0, "en_fuentes": 0, "sin_enlazar": []}
+        assert resumen == {"en_texto": 0, "en_fuentes": 0, "sin_enlazar": [],
+                           "etiquetas_sin_cita_retiradas": []}
 
     def test_criterio_sin_anchor_no_se_enlaza_a_otra_cosa(self):
         """
@@ -235,3 +239,43 @@ class TestEnlacesFuentes:
         assert c.anclas("s1") == {"8471": self.ANCHOR}
         assert c.anclas("otra") == {}
 
+    # ── Renglones que parecen fuente sin serlo ───────────────
+
+    def test_etiqueta_de_tipo_sin_marcador_queda_como_nota(self):
+        """
+        q01, 5-oct: "- [RESOLUCIÓN] Cálculo agregado sobre 32 expedientes".
+        Un cálculo no es una resolución; sin marcador no hay documento detrás.
+        """
+        reg = self._reg("VCN-001-2017")
+        texto = "x\n\nFUENTES\n- [RESOLUCIÓN] Cálculo agregado sobre 32 expedientes VCN"
+        nuevo, resumen = self._enlazar(texto, reg)
+        assert nuevo.endswith("\n- Cálculo agregado sobre 32 expedientes VCN")
+        assert resumen["etiquetas_sin_cita_retiradas"] == [
+            "- [RESOLUCIÓN] Cálculo agregado sobre 32 expedientes VCN"]
+
+    def test_el_caso_de_q20(self):
+        reg = self._reg()
+        nuevo, _ = self._enlazar(
+            "x\n\nFUENTES\n- [RESOLUCIÓN] CFC | Total de resoluciones emitidas: 2,792", reg)
+        assert nuevo.endswith("\n- CFC | Total de resoluciones emitidas: 2,792")
+
+    def test_la_etiqueta_con_marcador_se_conserva(self):
+        reg = self._reg("VCN-001-2017")
+        nuevo, resumen = self._enlazar("x\n\nFUENTES\n[E1] [RESOLUCIÓN] VCN-001-2017", reg)
+        assert "[RESOLUCIÓN]" in nuevo
+        assert resumen["etiquetas_sin_cita_retiradas"] == []
+
+    def test_la_nota_sin_etiqueta_no_se_toca(self):
+        reg = self._reg()
+        texto = "x\n\nFUENTES\nNo se citan expedientes individuales: es un agregado."
+        assert self._enlazar(texto, reg)[0] == texto
+
+    def test_fuera_de_fuentes_la_etiqueta_no_se_toca(self):
+        """En el cuerpo puede ser legítimo hablar de una [SENTENCIA]."""
+        reg = self._reg()
+        texto = "Una [SENTENCIA] del juzgado lo sostuvo."
+        assert self._enlazar(texto, reg)[0] == texto
+
+    def test_el_prompt_dice_que_un_calculo_no_es_fuente(self):
+        from prompts.system import AGENT_SYSTEM_PROMPT
+        assert "Un cálculo agregado o un conteo no es una fuente" in AGENT_SYSTEM_PROMPT

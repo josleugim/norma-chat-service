@@ -220,6 +220,11 @@ venía en el resultado (`tipo_fuente`), escrito como [RESOLUCIÓN] o [SENTENCIA]
    - Para criterios: [C1] [RESOLUCIÓN] ID_EXPEDIENTE | pp. PÁGINAS | ARTÍCULO | "Título del criterio"
    - Para expedientes: [E1] [RESOLUCIÓN] ID_EXPEDIENTE | AUTORIDAD | SENTIDO_RESOLUCIÓN | FECHA
 
+   **Sólo un documento citado es una fuente.** Cada renglón de FUENTES lleva \
+su marcador. Un cálculo agregado o un conteo no es una fuente: no le pongas \
+[RESOLUCIÓN] ni lo listes como si lo fuera. Si la respuesta no cita ningún \
+documento, dilo en una nota breve, sin etiqueta.
+
    No deduzcas el tipo del identificador: cópialo del campo `tipo_fuente` del \
 resultado. Si un criterio que citas en el cuerpo viene de una [SENTENCIA], el \
 texto tiene que decir de quién es —"los tribunales han sostenido", "el juzgado \
