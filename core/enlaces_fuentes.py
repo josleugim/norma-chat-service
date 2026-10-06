@@ -207,6 +207,28 @@ def _enlazar_renglon(renglon: str, registry, ancla_de, resumen: dict) -> str:
     return renglon
 
 
+# Centinela que la herramienta pone en `ficha_fuente` para decir "este dato no
+# vino en esta búsqueda". Es para el modelo; el 6-oct apareció copiado en
+# FUENTES ("| pp. NO_DISPONIBLE_EN_ESTA_BUSQUEDA") en 2 de 60 respuestas.
+_CENTINELA = re.compile(
+    r"[ \t]*(?:\|[ \t]*)?(?:pp?\.[ \t]*)?NO_DISPONIBLE_EN_ESTA_BUSQUEDA")
+
+
+def retirar_centinelas(texto: str) -> tuple[str, int]:
+    """
+    Quita de FUENTES los campos que sólo dicen "no disponible" con el nombre
+    interno. Un dato que no hay se omite; no se escribe su ausencia en jerga.
+    """
+    if not texto:
+        return texto, 0
+    encabezados = list(ENCABEZADO_FUENTES.finditer(texto))
+    if not encabezados:
+        return texto, 0
+    corte = encabezados[-1].end()
+    fuentes, n = _CENTINELA.subn("", texto[corte:])
+    return texto[:corte] + fuentes, n
+
+
 def enlazar_fuentes(texto: str, registry, ancla_de=None) -> tuple[str, dict]:
     """
     Enlaza las citas del texto y los renglones de FUENTES.

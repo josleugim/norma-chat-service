@@ -279,3 +279,24 @@ class TestEnlacesFuentes:
     def test_el_prompt_dice_que_un_calculo_no_es_fuente(self):
         from prompts.system import AGENT_SYSTEM_PROMPT
         assert "Un cálculo agregado o un conteo no es una fuente" in AGENT_SYSTEM_PROMPT
+
+
+class TestCentinelas:
+    """6-oct: 'NO_DISPONIBLE_EN_ESTA_BUSQUEDA' copiado en FUENTES, 2 de 60."""
+
+    def test_se_retira_de_fuentes(self):
+        from core.enlaces_fuentes import retirar_centinelas
+        texto = ("x [C1]\n\nFUENTES\n[C1] [RESOLUCIÓN] VCN-001-2017 | pp. "
+                 "NO_DISPONIBLE_EN_ESTA_BUSQUEDA | \"Título\"\n"
+                 "[E1] [RESOLUCIÓN] VCN-004-2022 | NO_DISPONIBLE_EN_ESTA_BUSQUEDA")
+        nuevo, n = retirar_centinelas(texto)
+        assert n == 2
+        assert "NO_DISPONIBLE" not in nuevo
+        assert "[C1] [RESOLUCIÓN] VCN-001-2017 | \"Título\"" in nuevo
+        assert nuevo.endswith("[E1] [RESOLUCIÓN] VCN-004-2022")
+
+    def test_fuera_de_fuentes_no_se_toca(self):
+        """En el cuerpo no se reescribe: ahí lo mide el indicador."""
+        from core.enlaces_fuentes import retirar_centinelas
+        texto = "El dato NO_DISPONIBLE_EN_ESTA_BUSQUEDA aparece aquí."
+        assert retirar_centinelas(texto) == (texto, 0)

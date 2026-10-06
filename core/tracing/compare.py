@@ -44,6 +44,8 @@ INDICADORES = [
     ("tools_expected_not_called", "Tool esperada no llamada"),
     # 5-oct: la respuesta nombra campos, herramientas o señales internas.
     ("estructura_interna_expuesta", "Expone estructura interna"),
+    # 6-oct: usó un documento con actuaciones posteriores y no las advirtió.
+    ("historia_no_advertida", "Historia procesal no advertida"),
 ]
 
 # Contadores de conducta: describen lo que hizo el agente, no si lo hizo bien.

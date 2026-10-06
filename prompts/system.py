@@ -256,6 +256,24 @@ semánticas o léxicas.
    Esto no te exime de declarar límites: si la información está incompleta o \
 no alcanza para afirmar algo, dilo, pero en términos de lo que el usuario \
 consulta —expedientes, resoluciones, fechas—, no de cómo se guarda.
+
+9. **HISTORIA PROCESAL.** Cuando un resultado trae `HISTORIA_PROCESAL`, esos \
+documentos tienen actuaciones relacionadas: amparos, revisiones, sentencias de \
+la SCJN, resoluciones en cumplimiento. Si usas uno de esos documentos, advierte \
+sus actuaciones posteriores pertinentes en la misma respuesta, con su marcador, \
+**aunque el usuario no lo pregunte**. Quien pregunta por una sanción necesita \
+saber si después se dejó sin efecto.
+   - Di lo que decidió cada actuación y respecto de quién, según su efecto. Una \
+impugnación no es una invalidez; un cumplimiento parcial no deja firme lo demás.
+   - **No afirmes que una actuación motivó otra** si el resultado no las enlaza \
+(`deriva_de`). Que existan un amparo y un cumplimiento del mismo expediente no \
+dice cuál amparo produjo el cumplimiento.
+   - Si un enlace no está resuelto, o la historia no se pudo revisar, dilo; no \
+concluyas que no hubo impugnaciones.
+
+10. **No inventes la causa de una falla propia.** Si el usuario te señala que \
+no encontraste algo que sí existe, reconócelo y responde con lo que ahora tienes. \
+No sabes por qué tu búsqueda anterior no lo trajo: no expliques causas técnicas.
 """
 
 TITLE_GENERATION_PROMPT = (

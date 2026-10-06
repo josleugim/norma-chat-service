@@ -29,6 +29,12 @@ Principios que el diagnóstico pide explícitamente y que aquí se respetan:
 import re
 from collections import defaultdict
 
+
+def _iso(fecha) -> str | None:
+    """`DD-MM-YYYY` de la API a `YYYY-MM-DD`, que es como compara el resolutor."""
+    m = re.fullmatch(r"(\d{2})-(\d{2})-(\d{4})", str(fecha or "").strip())
+    return f"{m.group(3)}-{m.group(2)}-{m.group(1)}" if m else None
+
 # `1259-1260_2017_2JD`, `565_2023_1TCC_2025_04_24`, `480_2018_2SCJN`.
 # El número puede traer acumulados con guion; el sufijo de fecha es opcional.
 _JUDICIAL = re.compile(
@@ -202,6 +208,19 @@ class ResolutorDeIdentidades:
 
             elegidos = [a for a in actos if fecha and a["fecha"] == fecha]
 
+            # La fecha pedida es la de la resolución original, no la de un
+            # acto posterior: es el principal.
+            if (fecha and not elegidos
+                    and getattr(self, "fecha_principal", {}).get(cl) == fecha):
+                salida.append({
+                    "mencion": f"{cl} ({fecha})",
+                    "candidatos": [cl],
+                    "ambiguo": False,
+                    "organo_pedido": None,
+                    "tiene_derivados": [a["case_link"] for a in actos],
+                })
+                continue
+
             # Fecha explícita que no corresponde a ningún acto conocido.
             #
             # Antes esto caía en `continue` y la mención desaparecía en
@@ -270,6 +289,39 @@ class ResolutorDeIdentidades:
         if m:
             return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
         return None
+
+    def cargar_relaciones(self, mapa) -> None:
+        """
+        Toma los cumplimientos y las fechas de los principales del mapa de
+        relaciones.
+
+        Hasta aquí `actos_de` salía del sufijo del identificador
+        (`VCN-004-2022_2025_10_09` → `VCN-004-2022`). COFECE lo pidió el 25-sep:
+        *"No deducir parentesco quitando el sufijo"*. Con el mapa, un acto es
+        del principal porque su registro lo dice (`parent`).
+
+        Y la fecha del principal: pedir "VCN-001-2017 del 18 de mayo de 2017"
+        chocaba contra la única fecha conocida, la del cumplimiento de 2019, y
+        devolvía un conflicto falso.
+        """
+        actos: dict[str, list[dict]] = defaultdict(list)
+        fechas: dict[str, str] = {}
+        for cl, r in mapa.registros.items():
+            if cl not in self.conocidos:
+                continue
+            iso = _iso(r.get("resolutionDate"))
+            if iso:
+                fechas[cl] = iso
+            e = mapa.hacia_arriba.get(cl)
+            naturaleza = str(r.get("natureOfResolution") or "").lower()
+            if (e and e.estado == "resuelto" and e.origen
+                    and "cumplimiento" in naturaleza):
+                actos[e.origen].append({
+                    "case_link": cl,
+                    "fecha": _iso(r.get("amparoComplianceResolutionDate")) or "",
+                })
+        self.actos_de = actos
+        self.fecha_principal = fechas
 
     def existe(self, case_link: str) -> bool:
         return str(case_link or "").strip() in self.conocidos
