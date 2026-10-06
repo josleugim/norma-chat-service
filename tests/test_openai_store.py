@@ -66,7 +66,8 @@ def test_ninguna_llamada_al_sdk_se_salta_el_parametro():
     """Una cuarta llamada que se agregue sin `store` tiene que romper esto."""
     import llm.openai_adapter as m
     src = inspect.getsource(m)
-    llamadas = src.count("chat.completions.create(")
+    # /v1/chat/completions y, para los modelos que razonan, /v1/responses.
+    llamadas = src.count("chat.completions.create(") + src.count("responses.create(")
     assert llamadas == src.count("store=STORE")
     assert m.STORE is False
 

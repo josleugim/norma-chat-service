@@ -17,6 +17,39 @@ from models.schemas import (
 
 logger = logging.getLogger(__name__)
 
+# Modelos que piensan (Claude Sonnet 5.5 y posteriores). Reglas de la API,
+# leídas el 6-oct en la guía de migración a Sonnet 5.5:
+# - `temperature` distinta de la predeterminada es un 400;
+# - el pensamiento es adaptativo y se controla con `output_config.effort`;
+#   `medium` es el punto de partida para varias herramientas;
+# - los bloques `thinking` se devuelven SIN CAMBIOS en el turno siguiente, y el
+#   historial no se edita (si se edita, los bloques ya no valen).
+# `drop_block` hace que, si alguna ruta del agente edita el historial (la
+# síntesis forzada o la condensación para streaming), la API descarte esos
+# bloques en lugar de rechazar la petición.
+MODELOS_QUE_PIENSAN = {"claude-sonnet-5-5"}
+ESFUERZO = "medium"
+_PENSAMIENTO = {
+    "type": "adaptive",
+    "block_binding": {"prefix_mismatch_behavior": "drop_block"},
+}
+_BETA_PENSAMIENTO = {"anthropic-beta": "thinking-binding-controls-2026-08-01"}
+# El pensamiento cuenta dentro de `max_tokens`: con 4,096 se comería la
+# respuesta.
+MAX_TOKENS_CON_PENSAMIENTO = 16000
+
+
+def _parametros(model: str, temperature: float, max_tokens: int) -> dict:
+    if model in MODELOS_QUE_PIENSAN:
+        return {
+            "thinking": _PENSAMIENTO,
+            "output_config": {"effort": ESFUERZO},
+            "max_tokens": max(max_tokens, MAX_TOKENS_CON_PENSAMIENTO),
+            "extra_headers": _BETA_PENSAMIENTO,
+        }
+    return {"temperature": temperature, "max_tokens": max_tokens}
+
+
 # Retry config para 429 rate limiting
 MAX_RETRIES = 3
 INITIAL_BACKOFF = 5  # segundos
@@ -109,8 +142,7 @@ class AnthropicAdapter(BaseLLMAdapter):
                     model=model,
                     system=system_msg,
                     messages=user_msgs,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
+                    **_parametros(model, temperature, max_tokens),
                 ) as stream:
                     async for text in stream.text_stream:
                         yield LLMStreamChunk(text=text)
@@ -144,6 +176,7 @@ class AnthropicAdapter(BaseLLMAdapter):
         tools: list[dict],
         temperature: float = 0.3,
         max_tokens: int = 4096,
+        solo_texto: bool = False,
     ) -> LLMToolResponse:
         # Extraer system si está en messages
         system_msg = ""
@@ -160,11 +193,15 @@ class AnthropicAdapter(BaseLLMAdapter):
             model=model,
             system=system_msg,
             messages=api_msgs,
-            max_tokens=max_tokens,
-            temperature=temperature,
+            **_parametros(model, temperature, max_tokens),
         )
         if anthropic_tools:
             kwargs["tools"] = anthropic_tools
+            # Para forzar texto se conservan las herramientas y se prohíbe
+            # usarlas: quitar la lista cambia el prefijo y, con pensamiento,
+            # invalida los bloques anteriores.
+            if solo_texto:
+                kwargs["tool_choice"] = {"type": "none"}
 
         response = await self._retry_on_rate_limit(
             lambda: self.client.messages.create(**kwargs),
@@ -172,11 +209,26 @@ class AnthropicAdapter(BaseLLMAdapter):
         )
 
         tool_calls = []
-        content_text = None
+        textos = []
 
+        # Una negativa llega con HTTP 200: hay que mirar `stop_reason` antes
+        # de leer el contenido.
+        if getattr(response, "stop_reason", None) == "refusal":
+            detalle = getattr(response, "stop_details", None)
+            logger.warning(f"Claude declinó la petición ({model}): {detalle}")
+            return LLMToolResponse(
+                content=("No puedo responder esta consulta. Reformúlala o "
+                         "intenta con otra pregunta."),
+                input_tokens=response.usage.input_tokens,
+                output_tokens=response.usage.output_tokens,
+                rechazo=str(detalle or "refusal"),
+            )
+
+        # Por tipo, no por posición: con pensamiento, la respuesta puede
+        # empezar con bloques `thinking`.
         for block in response.content:
             if block.type == "text":
-                content_text = block.text
+                textos.append(block.text)
             elif block.type == "tool_use":
                 tool_calls.append(ToolCallRequest(
                     id=block.id,
@@ -186,10 +238,13 @@ class AnthropicAdapter(BaseLLMAdapter):
                 ))
 
         return LLMToolResponse(
-            content=content_text,
+            content="".join(textos) or None,
             tool_calls=tool_calls,
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
+            # El turno tal cual lo produjo el modelo, pensamiento incluido,
+            # para devolverlo sin cambios.
+            raw_content=[b.model_dump(exclude_none=True) for b in response.content],
         )
 
     # ── Quick completion ────────────────────────────────────
@@ -207,8 +262,7 @@ class AnthropicAdapter(BaseLLMAdapter):
                 model=model,
                 system=system_msg,
                 messages=user_msgs,
-                max_tokens=max_tokens,
-                temperature=0.5,
+                **_parametros(model, 0.5, max_tokens),
             ),
             description=f"quick_completion({model})",
         )
@@ -220,9 +274,9 @@ class AnthropicAdapter(BaseLLMAdapter):
     # ── Models ──────────────────────────────────────────────
 
     def supported_models(self) -> list[ModelInfo]:
+        # Los dos que había (claude-sonnet-4-20250514, claude-opus-4-20250514)
+        # daban 404 desde agosto. Sólo se ofrece lo que se midió.
         return [
-            ModelInfo(provider="anthropic", model_id="claude-sonnet-4-20250514",
-                      display_name="Claude Sonnet 4"),
-            ModelInfo(provider="anthropic", model_id="claude-opus-4-20250514",
-                      display_name="Claude Opus 4"),
+            ModelInfo(provider="anthropic", model_id="claude-sonnet-5-5",
+                      display_name="Claude Sonnet 5.5"),
         ]

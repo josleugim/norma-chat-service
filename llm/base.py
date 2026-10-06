@@ -29,6 +29,7 @@ class BaseLLMAdapter(ABC):
         tools: list[dict],
         temperature: float = 0.3,
         max_tokens: int = 4096,
+        solo_texto: bool = False,
     ) -> LLMToolResponse:
         """
         Completación con posibilidad de tool calls.

@@ -268,6 +268,12 @@ class NormaPlusAgent:
                 })
 
             if response.tool_calls:
+                # Anthropic: el turno del asistente se devuelve COMPLETO y sin
+                # cambios (pensamiento incluido), y todos los resultados van
+                # juntos en un solo turno del usuario. Reconstruirlo con sólo
+                # el `tool_use`, uno por herramienta, invalida los bloques de
+                # pensamiento de Claude Sonnet 5.5.
+                resultados_anthropic: list[tuple] = []
                 # El LLM quiere usar herramientas
                 for tc in response.tool_calls:
                     tool_call_count += 1
@@ -328,9 +334,18 @@ class NormaPlusAgent:
                         self._serialize_tool_result(tc.name, result, state),
                         ensure_ascii=False, default=str,
                     )
-                    messages = self._append_tool_result(
-                        messages, tc, result_str, provider
-                    )
+                    if provider == "anthropic":
+                        resultados_anthropic.append((tc, result_str))
+                    else:
+                        messages = self._append_tool_result(
+                            messages, tc, result_str, provider,
+                            # Modelos de OpenAI que razonan: su razonamiento
+                            # viaja con el turno (ver a_entrada_responses).
+                            raw=response.raw_content,
+                        )
+                if provider == "anthropic":
+                    messages = self._append_turno_anthropic(
+                        messages, response, resultados_anthropic)
             else:
                 # El LLM tiene la respuesta final — hacer streaming
                 if response.content:
@@ -407,10 +422,14 @@ class NormaPlusAgent:
 
             # Forzar una completion sin tools para que el LLM responda
             try:
+                # Sin herramientas para forzar texto. En Anthropic se conserva la
+                # lista y se prohíbe usarla: quitarla cambia el prefijo y, con
+                # pensamiento, invalida los bloques anteriores.
                 fallback_response = await adapter.completion_with_tools(
                     messages=messages,
                     model=model,
-                    tools=[],  # sin tools → forzar respuesta de texto
+                    tools=TOOLS if provider == "anthropic" else [],
+                    solo_texto=True,
                 )
                 total_input_tokens += fallback_response.input_tokens
                 total_output_tokens += fallback_response.output_tokens
@@ -872,17 +891,36 @@ class NormaPlusAgent:
             })
         return items
 
+    @staticmethod
+    def _append_turno_anthropic(messages: list[dict], response,
+                                resultados: list[tuple]) -> list[dict]:
+        """
+        Un turno del asistente con su contenido original y un turno del usuario
+        con todos los resultados, en el orden de los `tool_use`.
+        """
+        contenido = response.raw_content or [
+            {"type": "tool_use", "id": tc.id, "name": tc.name, "input": tc.arguments}
+            for tc, _ in resultados
+        ]
+        messages.append({"role": "assistant", "content": contenido})
+        messages.append({"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": tc.id, "content": r}
+            for tc, r in resultados
+        ]})
+        return messages
+
     def _append_tool_result(
         self,
         messages: list[dict],
         tool_call,
         result_str: str,
         provider: str,
+        raw: list | None = None,
     ) -> list[dict]:
         """Agrega resultado de tool call al historial (formato del proveedor)."""
         if provider == "openai":
             # OpenAI: assistant message with tool_calls + tool result message
-            messages.append({
+            asistente = {
                 "role": "assistant",
                 "content": None,
                 "tool_calls": [{
@@ -893,7 +931,10 @@ class NormaPlusAgent:
                         "arguments": json.dumps(tool_call.arguments, ensure_ascii=False),
                     },
                 }],
-            })
+            }
+            if raw:
+                asistente["_responses_output"] = raw
+            messages.append(asistente)
             messages.append({
                 "role": "tool",
                 "tool_call_id": tool_call.id,
