@@ -317,8 +317,9 @@ class MapaDeRelaciones:
                 f"La información disponible no indica cuál de los amparos ({', '.join(amparos)}) "
                 f"dio lugar a {', '.join(cumplimientos)}, ni a quién benefició "
                 "cada amparo. Aunque sólo uno haya concedido, no lo afirmes "
-                "ni lo insinúes ('lo que llevó a', 'en cumplimiento de ese "
-                "amparo'): di que la información disponible no lo indica.")
+                "('lo que llevó a', 'en cumplimiento de ese amparo'). Si hace "
+                "falta, dilo una sola vez en la respuesta, no por cada "
+                "documento.")
         return h
 
     def pendientes(self) -> list[dict]:

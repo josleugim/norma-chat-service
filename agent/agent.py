@@ -33,7 +33,7 @@ from core.verificacion_semantica import (
     texto_de_evidencia as texto_de_evidencia_semantica,
 )
 from core.validacion_salida import validar_borrador
-from core.enlaces_fuentes import enlazar_fuentes
+from core.enlaces_fuentes import enlazar_fuentes, retirar_centinelas
 from core.estructura_interna import expuestos as estructura_expuesta
 from core.relaciones import resumen_historia_procesal
 from core.voz import clasificar_voz, etiqueta as etiqueta_voz, VOTO_PARTICULAR, NO_IDENTIFICADA
@@ -1019,6 +1019,10 @@ class NormaPlusAgent:
                 logger.warning(
                     f"Verificación semántica omitida: {type(e).__name__}: {e}")
 
+        # El centinela de "no disponible" se retira de FUENTES antes de medir:
+        # el indicador tiene que contar lo que ve el usuario.
+        revision["texto"], centinelas = retirar_centinelas(revision["texto"])
+
         # Antes de los enlaces: sus URLs llevan `caseLink=`, que no es algo que
         # la respuesta haya dicho.
         if state is not None:
@@ -1031,6 +1035,7 @@ class NormaPlusAgent:
             revision["texto"], state.registry if state else None,
             ancla_de=(getattr(state, "anclas_criterio", None) or {}).get)
         if state is not None:
+            enlaces["centinelas_retirados"] = centinelas
             state.enlaces_fuentes = enlaces
         return texto_final
 
