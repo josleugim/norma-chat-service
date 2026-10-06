@@ -1671,6 +1671,46 @@ class NormaPlusAgent:
                 break
         return salida
 
+    @staticmethod
+    def _plazo_hasta_cumplimiento(registros: list[dict], actos: list[dict],
+                                  campo_fin: str) -> tuple[list[dict], list[dict]]:
+        """
+        Copias de los registros cuyo `campo_fin` pasa a ser la fecha del
+        cumplimiento más reciente, y la lista de lo que se cambió.
+
+        La fecha sale de `amparoComplianceResolutionDate` del acto, que se liga
+        a su asunto por `parent` (`expediente_principal`), no por el nombre.
+        """
+        from datetime import datetime
+
+        def _f(s):
+            try:
+                return datetime.strptime(str(s), "%d-%m-%Y")
+            except (TypeError, ValueError):
+                return None
+
+        ultimo: dict[str, dict] = {}
+        for a in actos:
+            principal = a.get("expediente_principal")
+            fecha = a.get("amparoComplianceResolutionDate")
+            if not principal or not _f(fecha):
+                continue
+            if principal not in ultimo or _f(fecha) > _f(ultimo[principal]["fecha"]):
+                ultimo[principal] = {"cumplimiento": a.get("caseLink"), "fecha": fecha}
+
+        salida, cambios = [], []
+        for r in registros:
+            u = ultimo.get(r.get("caseLink"))
+            if u is None:
+                salida.append(r)
+                continue
+            salida.append({**r, campo_fin: u["fecha"]})
+            cambios.append({"asunto": r.get("caseLink"),
+                            "cumplimiento": u["cumplimiento"],
+                            "fecha_inicial": r.get(campo_fin),
+                            "fecha_final_usada": u["fecha"]})
+        return salida, cambios
+
     async def _exec_agregar_expedientes(
         self, args: dict, collector=None, state=None
     ) -> dict:
@@ -1747,6 +1787,18 @@ class NormaPlusAgent:
                     }
                     for r in actos_cumplimiento
                 ])
+
+        # Hasta la resolución final, sólo si se pide (Imanol, 6-oct): "se cuenta
+        # del inicio a la resolución inicial y solo sumaría el plazo del
+        # cumplimiento si el usuario lo pide". El asunto se sigue contando una
+        # vez; lo que cambia es su fecha final, que pasa a ser la del
+        # cumplimiento más reciente enlazado por `parent`.
+        hasta_final: list[dict] = []
+        if (args.get("hasta_resolucion_final") and metrica != "multa"
+                and actos_cumplimiento):
+            registros, hasta_final = self._plazo_hasta_cumplimiento(
+                registros, actos_cumplimiento,
+                args.get("campo_fin", "resolutionDate"))
 
         # Casos con problemas de fecha; se llena solo en métricas temporales.
         anomalias_calculo: list[dict] = []
@@ -1887,6 +1939,18 @@ class NormaPlusAgent:
                 "expediente no tiene `ref`, menciónalo sin cita."
             )
 
+        if hasta_final:
+            resultado["PLAZO_HASTA_RESOLUCION_FINAL"] = {
+                "asuntos": hasta_final,
+                "nota": (
+                    "Se pidió incluir el cumplimiento: en estos asuntos el plazo "
+                    "corre hasta la resolución en cumplimiento de amparo, no "
+                    "hasta la inicial. Dilo, y di que incluye el tiempo del "
+                    "litigio de amparo."
+                ),
+            }
+            # No se describen como excluidos: su fecha sí se usó.
+            actos_cumplimiento = []
         if actos_cumplimiento:
             resultado["ACTOS_DE_CUMPLIMIENTO_EXCLUIDOS"] = {
                 "count": len(actos_cumplimiento),
@@ -1948,6 +2012,10 @@ class NormaPlusAgent:
                    f"cumplimiento de amparo: sus asuntos ya cuentan, una vez, "
                    f"por su resolución original."
                    if actos_cumplimiento else "")
+                + (f" En {len(hasta_final)} asuntos el plazo corre hasta su "
+                   f"resolución en cumplimiento de amparo, como se pidió; "
+                   f"incluye el tiempo del litigio."
+                   if hasta_final else "")
                 + aviso_cobertura
                 + " USA EXACTAMENTE ESTAS CIFRAS: no digas que el cálculo se "
                   "hizo sobre los expedientes procesados si el denominador real "
