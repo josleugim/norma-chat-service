@@ -54,6 +54,12 @@ class Settings(BaseSettings):
     # Una corrida = un baseline congelado. Cambiar run_id abre una corrida nueva.
     tracing_enabled: bool = True
     traces_dir: str = "traces"
+    # Destinos de trazas, separados por coma: jsonl (disco del contenedor; se
+    # pierde al redesplegar), stdout (resumen a CloudWatch), s3 (traza completa).
+    trace_sinks: str = "jsonl"
+    trace_s3_bucket: str = ""
+    trace_s3_prefix: str = "trazas"
+    trace_s3_region: str = "mx-central-1"
     run_id: str = "dev"
     run_label: str = ""
     question_set: str = ""

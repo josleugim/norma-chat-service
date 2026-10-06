@@ -78,6 +78,9 @@ class Request(BaseModel):
     is_first_message: bool = False
     client: str = "frontend"
     question_set_id: Optional[str] = None
+    # Los manda el proxy: identificador opaco del usuario y su plan.
+    usuario_ref: Optional[str] = None
+    plan: Optional[str] = None
 
 
 class Scope(BaseModel):
@@ -403,6 +406,8 @@ class Trace(BaseModel):
             "tokens_output": self.outcome.tokens.get("output", 0),
             "cost_usd_estimate": self.outcome.cost_usd_estimate,
             "errors": len(self.errors),
+            "usuario_ref": self.request.usuario_ref,
+            "plan": self.request.plan,
         }
 
 
