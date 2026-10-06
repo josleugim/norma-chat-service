@@ -163,6 +163,9 @@ class Decisions(BaseModel):
     # Nombres internos que la respuesta dejó ver (campos, herramientas,
     # señales del payload). Vacío es lo correcto.
     estructura_interna_expuesta: list[str] = Field(default_factory=list)
+    # Historia procesal (COFECE 25-sep §4.3): documentos usados que tenían
+    # actuaciones posteriores, y las que la respuesta no mencionó.
+    historia_procesal: Optional[dict[str, Any]] = None
     # Sobre cuánta evidencia se verificaron los requisitos, y qué costó
     # recuperarla. Un requisito cumplido no dice si lo sostuvo el registro,
     # los criterios o los dos; y `tool_call_count` no dice cuántas peticiones
@@ -361,6 +364,11 @@ class Trace(BaseModel):
             "ausencia_sin_complemento": self.decisions.ausencia_sin_complemento,
             "estructura_interna_expuesta": ", ".join(
                 self.decisions.estructura_interna_expuesta),
+            # Documentos usados que tenían actuaciones posteriores a la vista
+            # del modelo, y de los que la respuesta no advirtió ninguna.
+            "historia_no_advertida": len(
+                (self.decisions.historia_procesal or {}).get(
+                    "documentos_sin_aviso") or []) or None,
             "fuentes_resolucion": (self.decisions.composicion_fuentes or {}).get(
                 "resolucion"),
             "fuentes_sentencia": (self.decisions.composicion_fuentes or {}).get(

@@ -13,6 +13,7 @@ Existe por dos razones:
    fuente— y ese es exactamente el alcance de este objeto.
 """
 from dataclasses import dataclass, field
+from typing import Any
 
 from core.citations import CitationRegistry
 
@@ -133,6 +134,11 @@ class TurnState:
     # ver. Imanol (5-oct): el chatbot no debe mostrar cómo está construida su
     # base.
     estructura_interna_expuesta: list[str] = field(default_factory=list)
+
+    # Historia procesal (COFECE 25-sep §4.3): el mapa vigente y, por documento
+    # recuperado, qué actuaciones relacionadas se le mostraron al modelo.
+    mapa_relaciones: Any = None
+    historia_procesal: list[dict] = field(default_factory=list)
 
     # Requisitos verificables de la pregunta (C03): qué documento, qué voz y
     # si exige comparar dos fuentes. Se comprueban contra la evidencia

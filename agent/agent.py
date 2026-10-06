@@ -35,6 +35,7 @@ from core.verificacion_semantica import (
 from core.validacion_salida import validar_borrador
 from core.enlaces_fuentes import enlazar_fuentes
 from core.estructura_interna import expuestos as estructura_expuesta
+from core.relaciones import resumen_historia_procesal
 from core.voz import clasificar_voz, etiqueta as etiqueta_voz, VOTO_PARTICULAR, NO_IDENTIFICADA
 from models.schemas import (
     StreamEvent, LLMMessage,
@@ -118,6 +119,12 @@ class NormaPlusAgent:
         self.resolutor = (
             ResolutorDeIdentidades(universo.case_links) if universo else None
         )
+
+        # Mapa de relaciones entre resoluciones (historia procesal). Se carga
+        # al primer uso y se refresca cada hora: el acervo se mueve, y una
+        # actuación nueva tiene que aparecer sin redesplegar.
+        self._mapa_relaciones = None
+        self._mapa_lock = None
 
         # ── Trazabilidad ────────────────────────────────────
         # Observa; nunca altera el comportamiento del agente.
@@ -283,6 +290,12 @@ class NormaPlusAgent:
                         result = await self.tool_executors[tc.name](
                             tc.arguments, collector, state
                         )
+                        # La historia procesal se pega al documento al
+                        # serializarlo; el mapa tiene que estar listo antes.
+                        if state is not None and tc.name in (
+                            "buscar_criterios", "buscar_expedientes"
+                        ):
+                            state.mapa_relaciones = await self._relaciones()
                         if collector is not None:
                             collector.record_result(result)
                             collector.end_step("ok")
@@ -549,6 +562,10 @@ class NormaPlusAgent:
             collector.set_decision(
                 "estructura_interna_expuesta",
                 state.estructura_interna_expuesta, "derived")
+            collector.set_decision(
+                "historia_procesal",
+                resumen_historia_procesal(state.historia_procesal, final_text, state.registry),
+                "derived")
             # ¿Alguna ruta vino vacía y su complementaria nunca se ejerció?
             # Es objetivo y no depende de leer el texto: si la respuesta afirma
             # ausencia con esto encendido, es falsa exhaustividad.
@@ -2701,6 +2718,135 @@ class NormaPlusAgent:
 
     # ── Helpers ─────────────────────────────────────────────
 
+    # ── Historia procesal ───────────────────────────────────
+
+    _TTL_RELACIONES = 3600
+    # Tope de lo que se pega por respuesta de herramienta. El 22-sep la
+    # metadata de más sepultó un criterio (H10): la historia procesal no puede
+    # repetir eso. Lo que excede se declara, no se calla.
+    _HISTORIA_MAX_DOCUMENTOS = 10
+    _HISTORIA_MAX_POSTERIORES = 8
+
+    async def _relaciones(self):
+        """
+        El mapa de relaciones, o None si no se pudo construir.
+
+        None no es "no hay historia procesal": quien lo use tiene que decir que
+        la revisión no se hizo.
+        """
+        import asyncio
+        import time
+        from core.relaciones import MapaDeRelaciones
+
+        mapa = getattr(self, "_mapa_relaciones", None)
+        if mapa is not None and time.time() - mapa.construido_en < self._TTL_RELACIONES:
+            return mapa
+        if getattr(self, "_mapa_lock", None) is None:
+            self._mapa_lock = asyncio.Lock()
+        async with self._mapa_lock:
+            mapa = self._mapa_relaciones
+            if mapa is not None and time.time() - mapa.construido_en < self._TTL_RELACIONES:
+                return mapa
+            try:
+                registros, _, completo = await self.estadistica.fetch_universe()
+                nuevo = MapaDeRelaciones.desde_registros(registros)
+                if not completo:
+                    logger.warning(
+                        "Mapa de relaciones sobre un universo incompleto: "
+                        "puede faltar historia procesal.")
+                self._mapa_relaciones = nuevo
+                if getattr(self, "resolutor", None) is not None:
+                    self.resolutor.cargar_relaciones(nuevo)
+                logger.info(f"Mapa de relaciones: {nuevo.resumen()}")
+                return nuevo
+            except Exception as e:
+                logger.error(
+                    f"No se pudo construir el mapa de relaciones: "
+                    f"{type(e).__name__}: {e}")
+                # Si hay uno anterior, mejor viejo que ninguno; se registra.
+                return self._mapa_relaciones
+
+    def _historia_procesal(self, docs: list[dict], state) -> dict | None:
+        """
+        Las actuaciones relacionadas con los documentos recuperados, con su
+        marcador de cita, para que el modelo las advierta.
+        """
+        mapa = getattr(state, "mapa_relaciones", None)
+        if mapa is None:
+            state.historia_procesal.append({"estado": "no_consultada"})
+            return {
+                "estado": "NO_CONSULTADA",
+                "instruccion": (
+                    "No se pudo revisar la historia procesal de estos "
+                    "documentos. No afirmes que no fueron impugnados ni que "
+                    "están firmes."),
+            }
+
+        por_documento: dict = {}
+        omitidos = []
+        vistos = []
+        for d in docs:
+            cl = case_link_de(d)
+            if not cl or cl in vistos:
+                continue
+            vistos.append(cl)
+            h = mapa.historia_de(cl)
+            if not h:
+                continue
+            if len(por_documento) >= self._HISTORIA_MAX_DOCUMENTOS:
+                omitidos.append(cl)
+                continue
+            posteriores = h.get("actuaciones_posteriores", [])
+            if len(posteriores) > self._HISTORIA_MAX_POSTERIORES:
+                h["actuaciones_no_mostradas"] = [
+                    p["expediente"] for p in posteriores[self._HISTORIA_MAX_POSTERIORES:]]
+                posteriores = posteriores[:self._HISTORIA_MAX_POSTERIORES]
+                h["actuaciones_posteriores"] = posteriores
+            # Cada actuación se puede citar: el registro entra al turno con su
+            # marcador, igual que un documento recuperado por búsqueda.
+            for p in posteriores:
+                reg = mapa.registros.get(p["expediente"])
+                if reg is not None:
+                    ref = state.registry.assign(reg, "E")
+                    if ref:
+                        p["ref"] = ref
+                        state.acumular_evidencia([{**reg, "ref": ref}])
+            for a in h.get("deriva_de", []):
+                reg = mapa.registros.get(a.get("origen") or "")
+                if reg is not None:
+                    ref = state.registry.assign(reg, "E")
+                    if ref:
+                        a["ref_origen"] = ref
+                        state.acumular_evidencia([{**reg, "ref": ref}])
+            por_documento[cl] = h
+            state.historia_procesal.append({
+                "documento": cl,
+                "posteriores": [
+                    {"expediente": p["expediente"], "ref": p.get("ref"),
+                     "enlace": p["enlace"]} for p in posteriores],
+                "deriva_de": [a.get("origen") for a in h.get("deriva_de", [])],
+                "no_mostradas": h.get("actuaciones_no_mostradas", []),
+            })
+
+        if not por_documento:
+            return None
+        salida = {
+            "documentos": por_documento,
+            "instruccion": (
+                "Estas son las actuaciones relacionadas con los documentos que "
+                "recuperaste, según la información disponible. Si usas uno de "
+                "esos documentos, advierte en la respuesta las actuaciones "
+                "posteriores pertinentes con su marcador `ref`, aunque no te "
+                "las pregunten: qué decidieron y respecto de quién, según su "
+                "campo de efecto. No digas que una actuación invalidó, confirmó "
+                "o dejó firme algo más allá de lo que dice su efecto, y no "
+                "afirmes que una actuación motivó otra si no aparece aquí como "
+                "`deriva_de`. Si un enlace no está 'resuelto', dilo."),
+        }
+        if omitidos:
+            salida["documentos_sin_revisar"] = omitidos
+        return salida
+
     def _serialize_tool_result(self, tool_name: str, result, state=None) -> dict | list:
         """
         Serializa resultado de tool para el LLM.
@@ -2747,6 +2893,15 @@ class NormaPlusAgent:
                 # Toda la evidencia del turno queda junta, venga de la
                 # herramienta que venga. Ver `TurnState.acumular_evidencia`.
                 state.acumular_evidencia(result)
+
+                # Historia procesal (COFECE, 25-sep §4.3): las actuaciones
+                # posteriores van pegadas a lo recuperado, también en una
+                # búsqueda temática, para que el modelo no tenga que adivinar
+                # que existen ni el usuario que preguntar por ellas.
+                historia = self._historia_procesal(
+                    [d for d in result if isinstance(d, dict)], state)
+                if historia:
+                    payload["HISTORIA_PROCESAL"] = historia
 
             # Requisitos por componente (C03). Se comprueban contra la
             # evidencia identificada —documento, voz, los dos lados de una
