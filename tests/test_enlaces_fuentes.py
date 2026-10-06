@@ -300,3 +300,37 @@ class TestCentinelas:
         from core.enlaces_fuentes import retirar_centinelas
         texto = "El dato NO_DISPONIBLE_EN_ESTA_BUSQUEDA aparece aquí."
         assert retirar_centinelas(texto) == (texto, 0)
+
+
+class TestMarcadoresConEspacios:
+    """6-oct: Imanol vio '[ E1 ]' sin enlace en el sitio. gpt-4.1, 8 % de respuestas."""
+
+    def test_se_normalizan(self):
+        from core.validacion_salida import normalizar_marcadores
+        texto, n = normalizar_marcadores("multado[ E1 ]. Luego[ E5 ] y [C2], [ C1] y [E 3].")
+        assert texto == "multado[E1]. Luego[E5] y [C2], [C1] y [E3]."
+        assert n == 4
+
+    def test_no_toca_otros_corchetes(self):
+        from core.validacion_salida import normalizar_marcadores
+        texto = "[RESOLUCIÓN] [CONOCIMIENTO GENERAL] [ nota ] [E1]"
+        assert normalizar_marcadores(texto) == (texto, 0)
+
+    def test_normalizado_se_enlaza(self):
+        from core.validacion_salida import normalizar_marcadores
+        from core.citations import CitationRegistry
+        from core.enlaces_fuentes import enlazar_fuentes
+        reg = CitationRegistry()
+        reg.assign({"caseLink": "VCN-001-2017", "id": "x"}, "E")
+        texto, _ = normalizar_marcadores("Multa al notario[ E1 ].")
+        nuevo, resumen = enlazar_fuentes(texto, reg)
+        assert nuevo == ("Multa al notario[[E1]](/case-search?caseLink=VCN-001-2017"
+                         "&details=true).")
+        assert resumen["en_texto"] == 1
+
+    def test_corre_antes_de_validar(self):
+        """Si se normalizara después, un '[ E9 ]' inexistente se colaría sin revisar."""
+        import inspect
+        from agent.agent import NormaPlusAgent
+        src = inspect.getsource(NormaPlusAgent._emitir_validado)
+        assert src.index("normalizar_marcadores(texto)") < src.index("validar_borrador(texto")

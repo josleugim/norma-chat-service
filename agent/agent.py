@@ -32,7 +32,7 @@ from core.verificacion_semantica import (
     verificar as verificar_semantica,
     texto_de_evidencia as texto_de_evidencia_semantica,
 )
-from core.validacion_salida import validar_borrador
+from core.validacion_salida import validar_borrador, normalizar_marcadores
 from core.enlaces_fuentes import enlazar_fuentes, retirar_centinelas
 from core.estructura_interna import expuestos as estructura_expuesta
 from core.relaciones import resumen_historia_procesal
@@ -987,6 +987,9 @@ class NormaPlusAgent:
 
         Devuelve el texto ya revisado; el llamador emite los trozos.
         """
+        # Antes que nada: un marcador con espacios (`[ E1 ]`) tiene que pasar
+        # por la misma validación, enlace y referencias que `[E1]`.
+        texto, marcadores_normalizados = normalizar_marcadores(texto)
         revision = validar_borrador(texto, state.registry if state else None)
         if revision["reparado"]:
             if state is not None:
@@ -1078,6 +1081,7 @@ class NormaPlusAgent:
             ancla_de=(getattr(state, "anclas_criterio", None) or {}).get)
         if state is not None:
             enlaces["centinelas_retirados"] = centinelas
+            enlaces["marcadores_normalizados"] = marcadores_normalizados
             state.enlaces_fuentes = enlaces
         return texto_final
 
