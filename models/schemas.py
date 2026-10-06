@@ -345,6 +345,11 @@ class LLMToolResponse(BaseModel):
     tool_calls: list[ToolCallRequest] = Field(default_factory=list)
     input_tokens: int = 0
     output_tokens: int = 0
+    # Anthropic: el contenido del turno tal cual lo produjo el modelo,
+    # bloques de pensamiento incluidos, para devolverlo sin cambios.
+    raw_content: Optional[list[dict]] = None
+    # Anthropic: el modelo declinó (`stop_reason == "refusal"`).
+    rechazo: Optional[str] = None
 
 
 class LLMStreamChunk(BaseModel):
