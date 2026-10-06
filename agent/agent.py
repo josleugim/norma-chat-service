@@ -34,6 +34,7 @@ from core.verificacion_semantica import (
 )
 from core.validacion_salida import validar_borrador
 from core.enlaces_fuentes import enlazar_fuentes
+from core.estructura_interna import expuestos as estructura_expuesta
 from core.voz import clasificar_voz, etiqueta as etiqueta_voz, VOTO_PARTICULAR, NO_IDENTIFICADA
 from models.schemas import (
     StreamEvent, LLMMessage,
@@ -545,6 +546,9 @@ class NormaPlusAgent:
                 "reparacion_salida", state.reparacion_salida, "derived")
             collector.set_decision(
                 "enlaces_fuentes", state.enlaces_fuentes, "derived")
+            collector.set_decision(
+                "estructura_interna_expuesta",
+                state.estructura_interna_expuesta, "derived")
             # ¿Alguna ruta vino vacía y su complementaria nunca se ejerció?
             # Es objetivo y no depende de leer el texto: si la respuesta afirma
             # ausencia con esto encendido, es falsa exhaustividad.
@@ -997,6 +1001,11 @@ class NormaPlusAgent:
                 # anota y la respuesta sale igual: está en evaluación.
                 logger.warning(
                     f"Verificación semántica omitida: {type(e).__name__}: {e}")
+
+        # Antes de los enlaces: sus URLs llevan `caseLink=`, que no es algo que
+        # la respuesta haya dicho.
+        if state is not None:
+            state.estructura_interna_expuesta = estructura_expuesta(revision["texto"])
 
         # Los enlaces van al final, sobre el texto ya reparado y verificado:
         # el revisor juzga lo que dice la respuesta, no sus URLs, y un
@@ -2815,8 +2824,10 @@ class NormaPlusAgent:
                             "afirmar que no existe: sólo cubre una de las dos "
                             f"rutas. Llama a `{complemento}` antes de concluir "
                             "ausencia. Si tampoco encuentra nada, dilo diciendo "
-                            "qué buscaste y por qué ruta, no como un hecho "
-                            "sobre el mundo."
+                            "qué buscaste y dónde —en los datos de los "
+                            "expedientes, en el texto de las resoluciones—, "
+                            "no como un hecho sobre el mundo. Sin nombres de "
+                            "herramientas, campos ni tipos de búsqueda."
                         ),
                     }
 

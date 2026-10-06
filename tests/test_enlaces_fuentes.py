@@ -234,3 +234,4 @@ class TestEnlacesFuentes:
         c.recordar_anclas("s1", {})
         assert c.anclas("s1") == {"8471": self.ANCHOR}
         assert c.anclas("otra") == {}
+

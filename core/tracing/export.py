@@ -22,6 +22,7 @@ COLUMNS = [
     "retrieval_retries", "abstained", "coverage_strategy", "docs_retrieved",
     "coverage_truncated", "exhaustive_but_truncated", "deadline_tool_called",
     "fuentes_resolucion", "fuentes_sentencia", "ausencia_sin_complemento",
+    "estructura_interna_expuesta",
     "plazo_cases", "plazo_inputs_missing", "plazo_out_of_coverage",
     "coverage_truncation_reasons",
     "second_retrieval", "exhausted_tools", "context_condensed",

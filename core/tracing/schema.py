@@ -160,6 +160,9 @@ class Decisions(BaseModel):
     reparacion_salida: Optional[dict[str, Any]] = None
     # Enlaces de FUENTES a la ficha del expediente, y los que no se pusieron.
     enlaces_fuentes: Optional[dict[str, Any]] = None
+    # Nombres internos que la respuesta dejó ver (campos, herramientas,
+    # señales del payload). Vacío es lo correcto.
+    estructura_interna_expuesta: list[str] = Field(default_factory=list)
     # Sobre cuánta evidencia se verificaron los requisitos, y qué costó
     # recuperarla. Un requisito cumplido no dice si lo sostuvo el registro,
     # los criterios o los dos; y `tool_call_count` no dice cuántas peticiones
@@ -356,6 +359,8 @@ class Trace(BaseModel):
             # traza completa no se puede comparar entre corridas — que es
             # justo para lo que se construyó.
             "ausencia_sin_complemento": self.decisions.ausencia_sin_complemento,
+            "estructura_interna_expuesta": ", ".join(
+                self.decisions.estructura_interna_expuesta),
             "fuentes_resolucion": (self.decisions.composicion_fuentes or {}).get(
                 "resolucion"),
             "fuentes_sentencia": (self.decisions.composicion_fuentes or {}).get(

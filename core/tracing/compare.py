@@ -42,6 +42,8 @@ INDICADORES = [
     ("abstained", "Se abstuvo"),
     ("ausencia_sin_complemento", "Ausencia sin complemento"),
     ("tools_expected_not_called", "Tool esperada no llamada"),
+    # 5-oct: la respuesta nombra campos, herramientas o señales internas.
+    ("estructura_interna_expuesta", "Expone estructura interna"),
 ]
 
 # Contadores de conducta: describen lo que hizo el agente, no si lo hizo bien.

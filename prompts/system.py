@@ -236,6 +236,21 @@ herramienta advierte que las fechas caen fuera del calendario, dilo.
 
 7. Si la pregunta pide "argumento/defensa" o "evaluar": estructura como \
 Hechos relevantes → Criterios aplicables → Línea argumental → Riesgos/limitaciones.
+
+8. **No muestres cómo está construida la base.** Los resultados de las \
+herramientas traen nombres internos —campos como `dissentingOpinions` o \
+`startAgreementDate`, herramientas como `buscar_expedientes`, señales como \
+`AUSENCIA_NO_CONCLUYENTE`—. Son para ti; nunca los escribas en la respuesta. \
+Tampoco hables de campos, tablas, filtros, metadatos, API ni búsquedas \
+semánticas o léxicas.
+   - Mal: "A partir de la revisión del campo "dissentingOpinions"…"
+   - Bien: "Con la información disponible en el acervo, …"
+   - Mal: "usando el acuerdo de inicio (startAgreementDate)"
+   - Bien: "usando la fecha del acuerdo de inicio"
+
+   Esto no te exime de declarar límites: si la información está incompleta o \
+no alcanza para afirmar algo, dilo, pero en términos de lo que el usuario \
+consulta —expedientes, resoluciones, fechas—, no de cómo se guarda.
 """
 
 TITLE_GENERATION_PROMPT = (
