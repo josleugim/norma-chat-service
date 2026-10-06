@@ -40,6 +40,28 @@ logger = logging.getLogger(__name__)
 
 MARCADOR = re.compile(r"\[([CE]\d+)\]")
 
+# gpt-4.1 escribe a veces el marcador con espacios: `[ E1 ]`, `[ C1]`. Medido
+# el 6-oct: 138 de 1,675 respuestas registradas (8 %); ni gpt-5.6-terra ni
+# Claude Sonnet 5.5 lo hacen. Con espacios el marcador escapaba a todo lo que
+# busca `[E1]`: no se enlazaba (Imanol lo vio en el sitio), no se validaba
+# contra el registro y no entraba a las referencias.
+_MARCADOR_CON_ESPACIOS = re.compile(r"\[[ \t]*([CE])[ \t]*(\d+)[ \t]*\]")
+
+
+def normalizar_marcadores(texto: str) -> tuple[str, int]:
+    """`[ E1 ]` → `[E1]`. Devuelve el texto y cuántos se corrigieron."""
+    if not texto:
+        return texto, 0
+    n = 0
+
+    def _sub(m):
+        nonlocal n
+        limpio = f"[{m.group(1)}{m.group(2)}]"
+        if m.group(0) != limpio:
+            n += 1
+        return limpio
+    return _MARCADOR_CON_ESPACIOS.sub(_sub, texto), n
+
 
 def validar_borrador(texto: str, registry) -> dict:
     """
