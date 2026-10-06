@@ -22,11 +22,19 @@ from models.schemas import (
 # almacenan los datos depende de esto.
 STORE = False
 
+TIEMPO_LIMITE_S = 90.0
+
 
 class OpenAIAdapter(BaseLLMAdapter):
 
     def __init__(self, api_key: str):
-        self.client = AsyncOpenAI(api_key=api_key)
+        # Tiempo límite explícito. Sin él rige el del SDK (10 minutos por
+        # intento, con reintentos): la noche del 6-oct, en la banda del
+        # holdout, varias llamadas se quedaron colgadas ~15 minutos cada una
+        # antes de reintentar, y una banda de 30 minutos tardó casi 6 horas.
+        # Para el usuario eso es un chat que no contesta. Una respuesta
+        # completa tarda menos de un minuto; el reintento del SDK sigue.
+        self.client = AsyncOpenAI(api_key=api_key, timeout=TIEMPO_LIMITE_S)
 
     # ── Streaming (respuesta final) ─────────────────────────
 

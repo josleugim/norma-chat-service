@@ -69,3 +69,11 @@ def test_ninguna_llamada_al_sdk_se_salta_el_parametro():
     llamadas = src.count("chat.completions.create(")
     assert llamadas == src.count("store=STORE")
     assert m.STORE is False
+
+
+def test_el_cliente_tiene_tiempo_limite():
+    """6-oct: sin límite, llamadas colgadas ~15 min cada una."""
+    from llm.openai_adapter import OpenAIAdapter, TIEMPO_LIMITE_S
+    ad = OpenAIAdapter(api_key="sk-test")
+    assert ad.client.timeout == TIEMPO_LIMITE_S
+    assert TIEMPO_LIMITE_S <= 120
