@@ -223,6 +223,16 @@ TOOLS = [
                     "type": "string",
                     "description": "Solo para métricas de días: campo de fecha final",
                 },
+                "incluir_actos_de_cumplimiento": {
+                    "type": "boolean",
+                    "description": (
+                        "Por defecto false: cada asunto cuenta una vez, por su "
+                        "resolución original, y las resoluciones en "
+                        "cumplimiento de amparo se excluyen y se informan. "
+                        "Ponlo en true SÓLO si la pregunta es sobre esas "
+                        "resoluciones en cumplimiento."
+                    ),
+                },
             },
             "required": ["operacion", "metrica"],
         },

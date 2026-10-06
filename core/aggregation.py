@@ -221,3 +221,34 @@ def render_listado(registros: list[dict]) -> str:
             partes.append(str(r["resolutionDate"]))
         filas.append(f"{len(filas) + 1}. " + " | ".join(partes))
     return "\n".join(filas)
+
+
+def es_acto_de_cumplimiento(r: dict) -> bool:
+    """
+    Resolución en cumplimiento de amparo: un acto posterior de un asunto que
+    ya existe en el acervo con su resolución original.
+
+    Se reconoce por la relación que documenta la API —`parent`, que llega como
+    `expediente_principal`— o por su naturaleza. No por la forma del
+    identificador: `VCN-004-2022_2025_10_09` parece un cumplimiento, pero eso
+    es una inferencia.
+    """
+    if r.get("expediente_principal"):
+        return True
+    naturaleza = str(r.get("natureOfResolution") or "").lower()
+    return "cumplimiento de amparo" in naturaleza
+
+
+def separar_actos_de_cumplimiento(registros: list[dict]) -> tuple[list[dict], list[dict]]:
+    """
+    `(actos, asuntos)`. Un asunto se cuenta una vez, por su resolución
+    original.
+
+    Hasta el 5-oct-2026 los cuatro actos de cumplimiento VCN entraban al
+    promedio de plazos junto a su principal: el mismo asunto dos veces, la
+    segunda con el litigio de amparo incluido (463 a 750 días hábiles contra
+    34 a 61). El promedio salía en 102.08; sobre los 32 asuntos es 43.66.
+    """
+    actos = [r for r in registros if es_acto_de_cumplimiento(r)]
+    asuntos = [r for r in registros if not es_acto_de_cumplimiento(r)]
+    return actos, asuntos

@@ -1,6 +1,6 @@
 {
   "question_set_id": "pruebas_imanol_v1",
-  "version": "1.1",
+  "version": "1.2",
   "created": "2026-08-13",
   "source": "Conversaciones de Imanol (COFECE) en normaplus.ai/chat, 11-ago-2026, documentadas en 'Pruebas 1 Agente Norma+.docx'",
   "confirmado_por": "Imanol (COFECE), 14-ago-2026 — validó la lista completa, incluidas las reconstruidas",
@@ -45,7 +45,7 @@
         10
       ],
       "por_que_importa": "Es la pregunta que produjo el error VCN/CNT del comentario #7: el agente respondió con expedientes CNT (CNT-030-2015, CNT-011-2017, ...) y un promedio de 49 días hábiles que no corresponde a VCN.",
-      "ground_truth": "38 VCN en total, 36 de COFECE, y los 36 tienen startAgreementDate y resolutionDate → el promedio SÍ es calculable sobre 36 de 36. notificationDate sigue en 0/38 y no aplica por diseño en VCN: una respuesta que diga \"no se puede calcular\" o que use notificación es incorrecta. La respuesta debe declarar su denominador y que coincida con la herramienta.",
+      "ground_truth": "36 VCN de COFECE = 32 asuntos con su resolución original + 4 resoluciones en cumplimiento de amparo de asuntos que ya están entre los 32 (VCN-001-2017, VCN-002-2017, VCN-002-2023, VCN-004-2022). Cada asunto cuenta una vez: promedio 43.66 días hábiles sobre 32, mediana 38 (startAgreementDate → resolutionDate). La respuesta debe decir que excluye las 4 resoluciones en cumplimiento y NO describirlas como expedientes sin datos. Hasta el 5-oct-2026 este ground truth decía \"36 de 36\" y la herramienta daba 102.08: contaba esos 4 asuntos dos veces, la segunda con el litigio de amparo incluido. Si se pregunta hasta la resolución final (cumplimiento cuando lo hay), son 109.0 sobre 32. notificationDate no aplica por diseño en VCN.",
       "senales_esperadas": [
         "scope_mismatch",
         "plazo_inputs_missing",

@@ -34,6 +34,7 @@ from core.verificacion_semantica import (
 )
 from core.validacion_salida import validar_borrador
 from core.enlaces_fuentes import enlazar_fuentes
+from core.estructura_interna import expuestos as estructura_expuesta
 from core.voz import clasificar_voz, etiqueta as etiqueta_voz, VOTO_PARTICULAR, NO_IDENTIFICADA
 from models.schemas import (
     StreamEvent, LLMMessage,
@@ -545,6 +546,9 @@ class NormaPlusAgent:
                 "reparacion_salida", state.reparacion_salida, "derived")
             collector.set_decision(
                 "enlaces_fuentes", state.enlaces_fuentes, "derived")
+            collector.set_decision(
+                "estructura_interna_expuesta",
+                state.estructura_interna_expuesta, "derived")
             # ¿Alguna ruta vino vacía y su complementaria nunca se ejerció?
             # Es objetivo y no depende de leer el texto: si la respuesta afirma
             # ausencia con esto encendido, es falsa exhaustividad.
@@ -997,6 +1001,11 @@ class NormaPlusAgent:
                 # anota y la respuesta sale igual: está en evaluación.
                 logger.warning(
                     f"Verificación semántica omitida: {type(e).__name__}: {e}")
+
+        # Antes de los enlaces: sus URLs llevan `caseLink=`, que no es algo que
+        # la respuesta haya dicho.
+        if state is not None:
+            state.estructura_interna_expuesta = estructura_expuesta(revision["texto"])
 
         # Los enlaces van al final, sobre el texto ya reparado y verificado:
         # el revisor juzga lo que dice la respuesta, no sus URLs, y un
@@ -1686,6 +1695,37 @@ class NormaPlusAgent:
         universo_total = len(registros)
         registros = self._filtrar_local(registros, args, state)
 
+        # Un asunto, una vez. Un acto de cumplimiento de amparo es una
+        # resolución posterior de un asunto que ya está en el universo con su
+        # resolución original; sumarlo cuenta el mismo asunto dos veces. Así
+        # salió 102.08 días hábiles en q01, sobre 43.66 reales.
+        from core.aggregation import separar_actos_de_cumplimiento
+        actos_cumplimiento: list[dict] = []
+        if not args.get("incluir_actos_de_cumplimiento"):
+            actos_cumplimiento, registros = separar_actos_de_cumplimiento(registros)
+            if actos_cumplimiento and state is not None:
+                state.filtros_aplicados.append({
+                    "filtro": "actos_de_cumplimiento",
+                    "valor_recibido": False,
+                    "universo_antes": len(registros) + len(actos_cumplimiento),
+                    "universo_despues": len(registros),
+                    "descartados": len(actos_cumplimiento),
+                    "ejemplos_descartados": [
+                        f"{r.get('caseLink')} → principal "
+                        f"{r.get('expediente_principal') or '(sin principal)'}"
+                        for r in actos_cumplimiento[:8]
+                    ],
+                })
+                state.computation_audit.extend([
+                    {
+                        "case_link": r.get("caseLink"),
+                        "status": "excluded",
+                        "exclusion_reason": "acto_de_cumplimiento_de_amparo",
+                        "value_used": False,
+                    }
+                    for r in actos_cumplimiento
+                ])
+
         # Casos con problemas de fecha; se llena solo en métricas temporales.
         anomalias_calculo: list[dict] = []
 
@@ -1825,6 +1865,22 @@ class NormaPlusAgent:
                 "expediente no tiene `ref`, menciónalo sin cita."
             )
 
+        if actos_cumplimiento:
+            resultado["ACTOS_DE_CUMPLIMIENTO_EXCLUIDOS"] = {
+                "count": len(actos_cumplimiento),
+                "actos": [
+                    {"expediente": r.get("caseLink"),
+                     "asunto_principal": r.get("expediente_principal")}
+                    for r in actos_cumplimiento
+                ],
+                "nota": (
+                    "Son resoluciones en cumplimiento de amparo de asuntos que "
+                    "ya cuentan por su resolución original. Se excluyen para no "
+                    "contar el mismo asunto dos veces. No son expedientes sin "
+                    "datos: no los describas así."
+                ),
+            }
+
         resultado["universo_recuperado"] = universo_total
         resultado["universo_tras_filtros"] = len(registros)
         resultado["total_en_la_base"] = total_en_base
@@ -1866,6 +1922,10 @@ class NormaPlusAgent:
                 f"{con_valor}"
                 + (f" ({sin_valor} quedaron fuera por falta de datos)." if sin_valor
                    else ".")
+                + (f" No se incluyen {len(actos_cumplimiento)} resoluciones en "
+                   f"cumplimiento de amparo: sus asuntos ya cuentan, una vez, "
+                   f"por su resolución original."
+                   if actos_cumplimiento else "")
                 + aviso_cobertura
                 + " USA EXACTAMENTE ESTAS CIFRAS: no digas que el cálculo se "
                   "hizo sobre los expedientes procesados si el denominador real "
@@ -2815,8 +2875,10 @@ class NormaPlusAgent:
                             "afirmar que no existe: sólo cubre una de las dos "
                             f"rutas. Llama a `{complemento}` antes de concluir "
                             "ausencia. Si tampoco encuentra nada, dilo diciendo "
-                            "qué buscaste y por qué ruta, no como un hecho "
-                            "sobre el mundo."
+                            "qué buscaste y dónde —en los datos de los "
+                            "expedientes, en el texto de las resoluciones—, "
+                            "no como un hecho sobre el mundo. Sin nombres de "
+                            "herramientas, campos ni tipos de búsqueda."
                         ),
                     }
 
