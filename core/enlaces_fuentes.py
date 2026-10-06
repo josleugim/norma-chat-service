@@ -1,26 +1,36 @@
 """
-Enlaces en la sección FUENTES.
+Enlaces de las citas: en el texto y en FUENTES.
 
 El frontend convierte en link el markdown que recibe. José Miguel definió las
 dos rutas (2 y 5-oct-2026):
 
-    [E1] [VCN-001-2017](/case-search?caseLink=VCN-001-2017&details=true) | COFECE | ...
-    [C1] [1251_2017_1JD](</digital-resolution?caseLink=…&anchor=…&paragraphId=8471>) | pp. 3 | ...
+    expediente → /case-search?caseLink=…&details=true
+    criterio   → /digital-resolution?caseLink=…&anchor=…&paragraphId=…
 
 La de expediente abre su ficha; la de criterio abre la resolución digital con
-el párrafo subrayado. El `anchor` es texto largo, así que la URL va entre
+el párrafo subrayado. El `anchor` es texto largo, así que esa URL va entre
 `<>` y codificada como `encodeURIComponent`, como la arma el frontend.
+
+Dónde va el enlace (Imanol, 5-oct-2026):
+
+- **En el texto**, cada marcador es enlace: `[[C1]](…)` se ve como `[C1]`.
+- **En FUENTES**, el enlace es **todo el renglón**, no sólo el expediente: el
+  renglón describe la referencia exacta —página, título del criterio—, y un
+  enlace sólo sobre el expediente parece llevar al caso en general.
+
+Los corchetes del marcador se dejan sin escapar a propósito. Los corchetes
+balanceados son válidos dentro del texto de un enlace, y así `[C1]` sigue
+apareciendo literal para todo lo que lee marcadores después: el constructor de
+referencias, el análisis de la traza.
 
 Se hace aquí y no en el prompt. Pedirle al modelo que escriba el markdown
 funciona unas veces sí y otras no —las conductas narrativas varían entre
 corridas idénticas—, y una URL que el modelo arma es una URL que puede
 inventar.
 
-El identificador del enlace sale del **registro de citas**, no del texto del
-renglón: el modelo copió el expediente al lado de su marcador, pero lo que
-sabemos que corresponde a `[E1]` es lo que dice el registro. Si el renglón no
-contiene ese identificador, no se enlaza: enlazar otra cadena sería afirmar
-que el modelo escribió lo que no escribió.
+El destino sale del **registro de citas**, no del texto. Un renglón de FUENTES
+que no nombra el expediente de su marcador no se enlaza: el texto del enlace
+diría un expediente y llevaría a otro.
 
 El `anchor` no viaja en el documento que ve el modelo —se le quita para no
 sepultar el texto del criterio—, así que llega aparte, por `ancla_de`.
@@ -41,6 +51,9 @@ ENCABEZADO_FUENTES = re.compile(
     r"^[ \t]*(?:#+[ \t]*)?(?:\*\*)?[ \t]*FUENTES[ \t]*(?:\*\*)?[ \t]*:?[ \t]*(?:\*\*)?[ \t]*$",
     re.IGNORECASE | re.MULTILINE,
 )
+
+# Viñeta o numeración al inicio del renglón: queda fuera del enlace.
+_PREFIJO_RENGLON = re.compile(r"^([ \t]*(?:[-*•][ \t]+|\d+[.)][ \t]+)?)")
 
 
 def ruta_expediente(case_link: str) -> str:
@@ -64,25 +77,28 @@ def ruta_parrafo(case_link: str, anchor: str, paragraph_id: str) -> str:
     )
 
 
-def _destino(marcador: str, case_link: str, registry, ancla_de) -> tuple[str, str]:
+def _destino(marcador: str, registry, ancla_de) -> tuple[str, str, str]:
     """
-    El destino del enlace en markdown, o el motivo por el que no lo hay.
+    `(destino_markdown, case_link, motivo)`. Sin destino, `motivo` dice por qué.
 
     Un criterio sin `anchor` o sin `id` no se enlaza a la ficha del expediente
-    como premio de consolación: el renglón dice "este párrafo", y mandar a
-    otra cosa sería un enlace que no lleva a lo citado.
+    como premio de consolación: la cita es un párrafo, y mandar a otra cosa
+    sería un enlace que no lleva a lo citado.
     """
+    case_link = registry.case_link_of(marcador)
+    if not case_link:
+        return "", "", "sin_expediente_en_registro"
     if marcador.startswith("E"):
-        return f"({ruta_expediente(case_link)})", ""
+        return f"({ruta_expediente(case_link)})", case_link, ""
     doc = registry.resolve(marcador) or {}
     paragraph_id = str(doc.get("id") or "")
     if not paragraph_id:
-        return "", "criterio_sin_id"
+        return "", case_link, "criterio_sin_id"
     meta = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
     anchor = (meta.get("anchor") or "") or (ancla_de(paragraph_id) if ancla_de else "")
     if not anchor:
-        return "", "criterio_sin_anchor"
-    return f"(<{ruta_parrafo(case_link, anchor, paragraph_id)}>)", ""
+        return "", case_link, "criterio_sin_anchor"
+    return f"(<{ruta_parrafo(case_link, anchor, paragraph_id)}>)", case_link, ""
 
 
 def _buscar_identificador(renglon: str, case_link: str, desde: int) -> int:
@@ -109,62 +125,96 @@ def _buscar_identificador(renglon: str, case_link: str, desde: int) -> int:
     return -1
 
 
+def _ya_enlazado(texto: str, m: re.Match) -> bool:
+    """`[[C1]](…)`: el marcador ya es el texto de un enlace."""
+    return texto[m.start() - 1: m.start()] == "[" and texto[m.end(): m.end() + 2] == "]("
+
+
+def _enlazar_cuerpo(cuerpo: str, registry, ancla_de, resumen: dict) -> str:
+    """Cada marcador del texto se vuelve enlace a lo que cita."""
+    def sustituir(m: re.Match) -> str:
+        if _ya_enlazado(cuerpo, m):
+            return m.group(0)
+        destino, _, motivo = _destino(m.group(1), registry, ancla_de)
+        if not destino:
+            resumen["sin_enlazar"].append(
+                {"marker": m.group(1), "donde": "texto", "motivo": motivo})
+            return m.group(0)
+        resumen["en_texto"] += 1
+        return f"[{m.group(0)}]{destino}"
+    return MARCADOR_FUENTE.sub(sustituir, cuerpo)
+
+
+def _enlazar_renglon(renglon: str, registry, ancla_de, resumen: dict) -> str:
+    marcas = list(MARCADOR_FUENTE.finditer(renglon))
+    if not marcas:
+        return renglon
+    if "](" in renglon:
+        return renglon  # ya enlazado
+
+    # Un solo marcador: el renglón entero es la referencia y el enlace la
+    # cubre completa.
+    if len({m.group(1) for m in marcas}) == 1:
+        marcador = marcas[0].group(1)
+        destino, case_link, motivo = _destino(marcador, registry, ancla_de)
+        if destino and _buscar_identificador(renglon, case_link, marcas[0].end()) < 0:
+            destino, motivo = "", "identificador_no_aparece_en_renglon"
+        if not destino:
+            resumen["sin_enlazar"].append({
+                "marker": marcador, "case_link": case_link,
+                "donde": "fuentes", "motivo": motivo})
+            return renglon
+        prefijo = _PREFIJO_RENGLON.match(renglon).group(1)
+        contenido = renglon[len(prefijo):].rstrip()
+        resto = renglon[len(prefijo) + len(contenido):]
+        resumen["en_fuentes"] += 1
+        return f"{prefijo}[{contenido}]{destino}{resto}"
+
+    # Varios marcadores en un renglón: el modelo a veces agrupa
+    # (`[E1]–[E36] VCN-002-2024 a VCN-004-2022_2025_10_09`). Un solo enlace
+    # sobre todo el renglón llevaría a uno de ellos; cada marcador enlaza su
+    # propio identificador.
+    #
+    # Las posiciones de `finditer` son del renglón original; los enlaces se
+    # insertan después del primer marcador, así que esa sí es estable.
+    inicio = marcas[0].end()
+    for m in marcas:
+        marcador = m.group(1)
+        destino, case_link, motivo = _destino(marcador, registry, ancla_de)
+        if case_link and f"[{case_link}](" in renglon:
+            continue
+        pos = _buscar_identificador(renglon, case_link, inicio) if case_link else -1
+        if destino and pos < 0:
+            destino, motivo = "", "identificador_no_aparece_en_renglon"
+        if not destino:
+            resumen["sin_enlazar"].append({
+                "marker": marcador, "case_link": case_link,
+                "donde": "fuentes", "motivo": motivo})
+            continue
+        renglon = renglon[:pos] + f"[{case_link}]{destino}" + renglon[pos + len(case_link):]
+        resumen["en_fuentes"] += 1
+    return renglon
+
+
 def enlazar_fuentes(texto: str, registry, ancla_de=None) -> tuple[str, dict]:
     """
-    Enlaza el identificador de cada renglón de FUENTES: `[E#]` a la ficha del
-    expediente, `[C#]` al párrafo citado.
+    Enlaza las citas del texto y los renglones de FUENTES.
 
     `ancla_de(paragraph_id)` devuelve el `anchor` de un criterio.
 
-    Devuelve el texto y un resumen para la traza: cuántos renglones se
-    enlazaron y cuáles no, con el motivo. Un renglón sin enlazar no es error
+    Devuelve el texto y un resumen para la traza: cuántos enlaces se pusieron
+    en cada lugar y cuáles no, con el motivo. Una cita sin enlace no es error
     —la respuesta sale igual—, pero tiene que quedar a la vista.
     """
-    resumen = {"enlazados": 0, "sin_enlazar": []}
+    resumen = {"en_texto": 0, "en_fuentes": 0, "sin_enlazar": []}
     if not texto or registry is None:
         return texto, resumen
 
     encabezados = list(ENCABEZADO_FUENTES.finditer(texto))
-    if not encabezados:
-        return texto, resumen
-    corte = encabezados[-1].end()
+    corte = encabezados[-1].end() if encabezados else len(texto)
     cuerpo, fuentes = texto[:corte], texto[corte:]
 
-    renglones = fuentes.split("\n")
-    for i, renglon in enumerate(renglones):
-        # Puede haber varios marcadores en un renglón: el modelo a veces
-        # agrupa (`[E1]–[E36] VCN-002-2024 a VCN-004-2022_2025_10_09`).
-        # Cada uno enlaza su propio expediente, si el renglón lo nombra.
-        marcas = list(MARCADOR_FUENTE.finditer(renglon))
-        if not marcas:
-            continue
-        # Las posiciones de `finditer` son del renglón original; los enlaces
-        # se insertan después del primer marcador, así que esa sí es estable.
-        inicio = marcas[0].end()
-        for m in marcas:
-            marcador = m.group(1)
-            case_link = registry.case_link_of(marcador)
-            if not case_link:
-                resumen["sin_enlazar"].append(
-                    {"marker": marcador, "motivo": "sin_expediente_en_registro"})
-                continue
-            if f"[{case_link}](" in renglon:
-                continue  # ya enlazado
-            # Después del primer marcador, para no tocar los `[E#]`/`[C#]`.
-            pos = _buscar_identificador(renglon, case_link, inicio)
-            if pos < 0:
-                resumen["sin_enlazar"].append(
-                    {"marker": marcador, "case_link": case_link,
-                     "motivo": "identificador_no_aparece_en_renglon"})
-                continue
-            destino, motivo = _destino(marcador, case_link, registry, ancla_de)
-            if not destino:
-                resumen["sin_enlazar"].append(
-                    {"marker": marcador, "case_link": case_link, "motivo": motivo})
-                continue
-            enlace = f"[{case_link}]{destino}"
-            renglon = renglon[:pos] + enlace + renglon[pos + len(case_link):]
-            resumen["enlazados"] += 1
-        renglones[i] = renglon
-
-    return cuerpo + "\n".join(renglones), resumen
+    cuerpo = _enlazar_cuerpo(cuerpo, registry, ancla_de, resumen)
+    fuentes = "\n".join(
+        _enlazar_renglon(r, registry, ancla_de, resumen) for r in fuentes.split("\n"))
+    return cuerpo + fuentes, resumen

@@ -1563,6 +1563,8 @@ class TestTodasLasRutasDeSalidaValidan:
     class _Reg:
         def __init__(self, validos): self.validos = set(validos)
         def resolve(self, m): return {"x": 1} if m in self.validos else None
+        # Lo que daría el registro real: estos documentos no traen expediente.
+        def case_link_of(self, m): return ""
 
     class _State:
         def __init__(self, reg): self.registry = reg; self.reparacion_salida = None
