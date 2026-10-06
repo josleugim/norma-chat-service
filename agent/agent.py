@@ -14,6 +14,7 @@ from retrieval.estadistica_client import EstadisticaSearchClient
 from temporal.analyzer import TemporalAnalyzer
 from core.citation_builder import CitationBuilder
 from core.citations import CitationRegistry
+from core.costos import costo_estimado
 from core.evidence_cache import EvidenceCache
 from agent.turn_state import TurnState
 from core.tracing import (
@@ -36,7 +37,6 @@ from core.validacion_salida import validar_borrador
 from core.enlaces_fuentes import enlazar_fuentes, retirar_centinelas
 from core.estructura_interna import expuestos as estructura_expuesta
 from core.relaciones import resumen_historia_procesal
-from core.costos import costo_estimado
 from core.voz import clasificar_voz, etiqueta as etiqueta_voz, VOTO_PARTICULAR, NO_IDENTIFICADA
 from models.schemas import (
     StreamEvent, LLMMessage,
