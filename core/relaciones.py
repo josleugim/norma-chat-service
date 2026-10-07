@@ -32,6 +32,7 @@ Un enlace pendiente no se convierte en "no hay historia procesal".
 """
 from __future__ import annotations
 
+import re
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -65,6 +66,33 @@ def _origen_parent(r: dict) -> str:
 
 def _norm(s: Any) -> str:
     return " ".join(str(s or "").split()).lower()
+
+
+_ORDINALES = {
+    "primer": "1", "primero": "1", "segundo": "2", "tercer": "3", "tercero": "3",
+    "cuarto": "4", "quinto": "5", "sexto": "6", "septimo": "7", "octavo": "8",
+}
+
+
+def _organo_clave(s: Any) -> tuple | None:
+    """
+    El órgano reducido a (tipo, ordinal): ("juzgado", "2"), ("tribunal", "1").
+
+    El nombre completo no sirve para comparar: el 7-oct, el registro de un
+    juzgado decía "…Administrativa Especializada…" y el tribunal que lo
+    revisa lo citaba como "…Administrativa Especializado…". Por esa letra,
+    seis sentencias que sí están en el acervo quedaban como externas.
+    """
+    import unicodedata
+    t = unicodedata.normalize("NFKD", str(s or "")).encode("ascii", "ignore").decode().lower()
+    if not t.strip():
+        return None
+    tipo = ("juzgado" if "juzgado" in t else
+            "tribunal" if "tribunal" in t else
+            "scjn" if "suprema" in t or "scjn" in t else None)
+    ordinal = next((n for palabra, n in _ORDINALES.items()
+                    if re.search(r"\b" + palabra + r"\b", t)), None)
+    return (tipo, ordinal) if tipo else None
 
 
 def _expedientes_de(r: dict) -> set[str]:
@@ -194,7 +222,7 @@ class MapaDeRelaciones:
                 continue
             if fecha and o.get(fecha_destino) != fecha:
                 continue
-            if organo and _norm(o.get("authority")) != _norm(organo):
+            if organo and _organo_clave(o.get("authority")) != _organo_clave(organo):
                 continue
             exp = _expedientes_de(o)
             if exp and not (exp & numeros):

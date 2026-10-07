@@ -211,3 +211,35 @@ class TestEnElAgente:
         from prompts.system import AGENT_SYSTEM_PROMPT as P
         assert "HISTORIA PROCESAL" in P
         assert "No inventes la causa de una falla propia" in P
+
+
+class TestOrganoFlexible:
+    """
+    7-oct: el juzgado se llama "…Especializada…" en su registro y el tribunal
+    lo cita como "…Especializado…". Por esa letra, seis sentencias que sí
+    están en el acervo quedaban como externas.
+    """
+
+    def test_misma_clave_aunque_cambie_la_redaccion(self):
+        from core.relaciones import _organo_clave
+        a = "Juzgado Segundo de Distrito en Materia Administrativa Especializada en Competencia"
+        b = "Juzgado Segundo de Distrito en Materia Administrativa Especializado en Competencia"
+        assert _organo_clave(a) == _organo_clave(b) == ("juzgado", "2")
+        assert _organo_clave("Primer Tribunal Colegiado de Circuito") == ("tribunal", "1")
+
+    def test_ordinal_distinto_no_empata(self):
+        from core.relaciones import _organo_clave
+        assert _organo_clave("Juzgado Primero de Distrito") != _organo_clave("Juzgado Tercero de Distrito")
+
+    def test_la_revision_se_enlaza_pese_a_la_redaccion(self):
+        from core.relaciones import MapaDeRelaciones
+        m = MapaDeRelaciones.desde_registros([
+            {"caseLink": "1587_2015_2JD", "typeOfProcedure": "Amparo indirecto",
+             "authority": "Juzgado Segundo de Distrito en Materia Administrativa Especializada",
+             "judgmentDate": "04-10-2016"},
+            {"caseLink": "153_2016_2TCC", "originAmparoCaseFiles": ["1587/2015"],
+             "appealedJudgmentBody": "Juzgado Segundo de Distrito en Materia Administrativa Especializado",
+             "appealedJudgmentDate": "04-10-2016"},
+        ])
+        e = m.hacia_arriba["153_2016_2TCC"]
+        assert (e.origen, e.estado) == ("1587_2015_2JD", "resuelto_sin_numero")
