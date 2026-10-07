@@ -243,3 +243,18 @@ class TestOrganoFlexible:
         ])
         e = m.hacia_arriba["153_2016_2TCC"]
         assert (e.origen, e.estado) == ("1587_2015_2JD", "resuelto_sin_numero")
+
+
+def test_las_actuaciones_llevan_su_tipo_de_fuente():
+    """7-oct: sin tipo, el modelo etiquetaba [RESOLUCIÓN] las sentencias."""
+    from agent.agent import NormaPlusAgent
+    from agent.turn_state import TurnState
+    ag = NormaPlusAgent.__new__(NormaPlusAgent)
+    st = TurnState()
+    st.mapa_relaciones = _mapa()
+    h = ag._historia_procesal([{"caseLink": "VCN-001-2017"}], st)
+    tipos = {p["expediente"]: p["tipo_fuente"]
+             for p in h["documentos"]["VCN-001-2017"]["actuaciones_posteriores"]}
+    assert tipos["1258_2017_2JD"] == "sentencia"
+    assert tipos["93_2018_2TCC"] == "sentencia"
+    assert tipos["VCN-001-2017_2019_03_14"] == "resolucion"

@@ -2975,6 +2975,10 @@ class NormaPlusAgent:
             # Cada actuación se puede citar: el registro entra al turno con su
             # marcador, igual que un documento recuperado por búsqueda.
             for p in posteriores:
+                # El tipo de fuente, igual que en un resultado de búsqueda: sin
+                # él, el modelo etiquetaba [RESOLUCIÓN] la sentencia de un
+                # juzgado (7-oct, cadena de CNT-092-2017).
+                p["tipo_fuente"] = clasificar_fuente(p["expediente"])
                 reg = mapa.registros.get(p["expediente"])
                 if reg is not None:
                     ref = state.registry.assign(reg, "E")
@@ -2982,6 +2986,8 @@ class NormaPlusAgent:
                         p["ref"] = ref
                         state.acumular_evidencia([{**reg, "ref": ref}])
             for a in h.get("deriva_de", []):
+                if a.get("origen"):
+                    a["tipo_fuente_origen"] = clasificar_fuente(a["origen"])
                 reg = mapa.registros.get(a.get("origen") or "")
                 if reg is not None:
                     ref = state.registry.assign(reg, "E")
