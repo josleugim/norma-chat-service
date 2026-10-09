@@ -5,7 +5,7 @@ Inicializa todos los componentes e inyecta dependencias.
 """
 import logging
 
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, AsyncExitStack
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -203,7 +203,15 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
 
     logger.info("Chat Agent Service inicializado correctamente")
-    yield
+    async with AsyncExitStack() as pila:
+        if _MCP_ACTIVO:
+            # El conector "@norma" usa el mismo agente: comparte clientes,
+            # calendario y mapa de relaciones con el chat.
+            from mcp_server.servidor import servidor, configurar
+            configurar(agent, settings.norma_web_url)
+            await pila.enter_async_context(servidor.session_manager.run())
+            logger.info("Conector MCP activo en /mcp (sin login: fase 1)")
+        yield
     if manifest_store is not None:
         manifest_store.finish()
     trace_sink.close()
@@ -231,6 +239,22 @@ app.add_middleware(
 
 # Routers
 app.include_router(chat_router, prefix="/api")
+
+# Conector MCP ("@norma" en Claude y ChatGPT). Apagado por omisión: en la fase
+# 1 no tiene login, así que no puede quedar expuesto hasta que exista el OAuth.
+_MCP_ACTIVO = settings.mcp_enabled
+if _MCP_ACTIVO:
+    from mcp.server.transport_security import TransportSecuritySettings
+    from mcp_server.servidor import servidor as _servidor_mcp
+    _hosts = [h.strip() for h in settings.mcp_allowed_hosts.split(",") if h.strip()]
+    _mcp_app = _servidor_mcp.streamable_http_app(
+        streamable_http_path="/mcp",
+        stateless_http=True,
+        json_response=True,
+        transport_security=TransportSecuritySettings(
+            enable_dns_rebinding_protection=True, allowed_hosts=_hosts),
+    )
+    app.router.routes.extend(_mcp_app.routes)
 
 
 @app.get("/health")

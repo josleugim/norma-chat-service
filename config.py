@@ -57,6 +57,14 @@ class Settings(BaseSettings):
     # Destinos de trazas, separados por coma: jsonl (disco del contenedor; se
     # pierde al redesplegar), stdout (resumen a CloudWatch), s3 (traza completa).
     trace_sinks: str = "jsonl"
+
+    # Conector MCP ("@norma"). Apagado por omisión: la fase 1 no tiene login.
+    mcp_enabled: bool = False
+    # Hosts que el conector acepta (protección contra DNS rebinding). En
+    # producción: mcp.normaplus.ai.
+    mcp_allowed_hosts: str = "localhost:*,127.0.0.1:*"
+    # Base de las URLs que devuelve el conector (fichas y párrafos).
+    norma_web_url: str = "https://normaplus.ai"
     trace_s3_bucket: str = ""
     trace_s3_prefix: str = "trazas"
     trace_s3_region: str = "mx-central-1"
