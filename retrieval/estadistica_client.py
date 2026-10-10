@@ -27,12 +27,41 @@ nombre que inventara el modelo se reenviaba tal cual y la API lo descartaba sin
 avisar: el agente creía haber filtrado y respondía sobre el corpus completo.
 Ahora un filtro desconocido levanta `FiltroDesconocidoError`.
 """
+import contextvars
 import logging
 import httpx
 from models.schemas import ExpedienteRecord
 
 logger = logging.getLogger(__name__)
 
+
+
+# Estado de la última consulta, por petición. El cliente es uno solo para todo
+# el servicio; con estos valores como atributos normales, dos consultas
+# simultáneas (dos usuarios del chat, o el chat y el conector MCP) se pisaban el
+# total y el aviso de truncamiento entre la búsqueda y su lectura. Cada petición
+# corre en su propia tarea de asyncio, que tiene su propio contexto.
+_ULTIMA_CONSULTA: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "ultima_consulta", default=None)
+_POR_OMISION = {"last_total": None, "last_returned": 0, "last_limit": None,
+                "last_truncado": False, "last_pages_fetched": 1}
+
+
+class _EstadoDeLaUltimaConsulta:
+    def __set_name__(self, owner, nombre):
+        self.nombre = nombre
+
+    def __get__(self, obj, owner=None):
+        if obj is None:
+            return self
+        estado = _ULTIMA_CONSULTA.get() or {}
+        return estado.get(self.nombre, _POR_OMISION[self.nombre])
+
+    def __set__(self, obj, valor):
+        # Copia: no modificar el dict que otro contexto pudo heredar.
+        estado = dict(_ULTIMA_CONSULTA.get() or {})
+        estado[self.nombre] = valor
+        _ULTIMA_CONSULTA.set(estado)
 
 class BusquedaFallidaError(RuntimeError):
     """
@@ -116,6 +145,12 @@ TIMEOUT_PETICION_GRANDE = 120.0
 
 class EstadisticaSearchClient:
 
+    last_total = _EstadoDeLaUltimaConsulta()
+    last_returned = _EstadoDeLaUltimaConsulta()
+    last_limit = _EstadoDeLaUltimaConsulta()
+    last_truncado = _EstadoDeLaUltimaConsulta()
+    last_pages_fetched = _EstadoDeLaUltimaConsulta()
+
     def __init__(
         self,
         base_url: str,
@@ -134,11 +169,8 @@ class EstadisticaSearchClient:
         # `meta.total`. Queda en None solo si la API dejara de mandarlo y la
         # respuesta pudo cortarse: afirmar cobertura completa a partir de una
         # estimación es justo el error que perseguimos.
-        self.last_total: int | None = None
-        self.last_returned: int = 0
-        self.last_limit: int | None = None
-        self.last_truncado: bool = False
-        self.last_pages_fetched: int = 1
+        # Viven por petición (ver `_EstadoDeLaUltimaConsulta`), no en el
+        # cliente, que es uno solo para todo el servicio.
 
         # Universo restringido (paso 01 del holdout). Cuando está puesto, todo
         # lo que sale de este cliente queda acotado a esa lista cerrada, y la
