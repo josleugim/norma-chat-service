@@ -183,3 +183,12 @@ def test_las_instrucciones_del_servidor_describen_sin_ordenar():
     texto = servidor.instructions
     assert "situacion_posterior" in texto
     assert not IMPERATIVOS.search(texto), texto
+
+
+def test_las_herramientas_de_fichas_describen_la_situacion_posterior():
+    """claude.ai descarta las instrucciones del servidor (anthropics/claude-ai-mcp#93):
+    lo que el modelo tiene que saber del dato va en la descripción de la herramienta."""
+    d = {t.name: t.description for t in _herramientas()}
+    for nombre in ("ver_expediente", "buscar_expedientes"):
+        assert "situacion_posterior" in d[nombre]
+    assert "modificó o revocó" in d["buscar_criterios"]

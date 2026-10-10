@@ -131,7 +131,9 @@ async def _historias(agente, expedientes: list[str]) -> dict:
         "resoluciones de competencia económica y de las sentencias que las "
         "revisan. Devuelve párrafos con su expediente, título, artículo, "
         "páginas, quién lo sostiene (resolución o voto particular), la URL al "
-        "párrafo y la historia procesal de cada expediente."
+        "párrafo y la historia procesal de cada expediente. Si una revisión "
+        "modificó o revocó un documento, su historia procesal lo indica en "
+        "resumen; lo que dice ese documento ya no es lo vigente."
     ),
     annotations=_lectura("Buscar criterios"),
 )
@@ -166,7 +168,11 @@ async def buscar_criterios(consulta: str, expedientes: list[str] | None = None,
         "Busca expedientes del acervo por número, tipo, autoridad, sentido, "
         "años o texto libre (nombre del caso, agentes económicos, mercados). "
         "Devuelve la ficha de cada expediente —fechas, agentes, multas, "
-        "sentido, votos— con su URL y su historia procesal."
+        "sentido, votos— con su URL y su historia procesal. "
+        "Cada ficha abre con situacion_posterior cuando hubo amparos, "
+        "revisiones o resoluciones en cumplimiento; si una revisión modificó o "
+        "revocó el documento, el sentido y los efectos de su ficha no son los "
+        "vigentes. Cada resultado trae su URL en normaplus.ai."
     ),
     annotations=_lectura("Buscar expedientes"),
 )
@@ -214,7 +220,11 @@ async def buscar_expedientes(
     description=(
         "Devuelve la ficha completa de un expediente por su número, con su URL "
         "y su historia procesal: de qué deriva y qué actuaciones posteriores "
-        "tuvo (amparos, revisiones, resoluciones en cumplimiento)."
+        "tuvo (amparos, revisiones, resoluciones en cumplimiento). "
+        "Cada ficha abre con situacion_posterior cuando hubo amparos, "
+        "revisiones o resoluciones en cumplimiento; si una revisión modificó o "
+        "revocó el documento, el sentido y los efectos de su ficha no son los "
+        "vigentes. Cada resultado trae su URL en normaplus.ai."
     ),
     annotations=_lectura("Ver expediente"),
 )
