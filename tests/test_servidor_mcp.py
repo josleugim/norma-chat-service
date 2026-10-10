@@ -137,3 +137,42 @@ def test_el_conector_esta_apagado_por_omision():
     assert Settings.model_fields["mcp_enabled"].default is False
     import main
     assert not any(getattr(r, "path", "") == "/mcp" for r in main.app.router.routes)
+
+
+class TestSituacionPosterior:
+    """H05 del holdout: la sentencia que un tribunal modificó no se lee como firme."""
+
+    REVISION = {"expediente": "353_2024_1TCC", "deriva_de": "275_2023_1JD",
+                "tipo": "Amparo en revisión", "fecha_de_la_resolucion": "21-08-2025",
+                "enlace": "resuelto", "senseOfReview": ["modifica"],
+                "finalAmparoResult": ["concede", "niega"]}
+
+    def test_la_revision_que_modifica_queda_al_principio_y_como_hecho(self):
+        h = limpieza.historia({"actuaciones_posteriores": [self.REVISION]},
+                              "https://normaplus.ai", "275_2023_1JD")
+        assert next(iter(h)) == "resumen"
+        assert "353_2024_1TCC" in h["resumen"] and "modifica" in h["resumen"]
+        assert "anteriores a esa revisión" in h["resumen"]
+        assert not IMPERATIVOS.search(h["resumen"])
+
+    def test_una_revision_que_confirma_no_dice_que_cambio(self):
+        confirma = {**self.REVISION, "senseOfReview": ["confirma"]}
+        h = limpieza.historia({"actuaciones_posteriores": [confirma]}, "https://normaplus.ai")
+        assert "353_2024_1TCC" in h["resumen"]
+        assert "modificó o revocó" not in h["resumen"]
+
+    def test_la_ficha_lo_trae_como_primer_campo(self):
+        from mcp_server.servidor import _con_situacion_posterior
+        h = limpieza.historia({"actuaciones_posteriores": [self.REVISION]}, "https://normaplus.ai")
+        f = _con_situacion_posterior({"expediente": "275_2023_1JD", "sentido_del_amparo": ["concede"]},
+                                     {"275_2023_1JD": h})
+        assert next(iter(f)) == "situacion_posterior"
+
+    def test_la_revision_de_un_amparo_posterior_no_modifica_la_resolucion(self):
+        h = limpieza.historia({"actuaciones_posteriores": [self.REVISION]},
+                              "https://normaplus.ai", "VCN-002-2023")
+        assert "deriva de 275_2023_1JD" in h["resumen"]
+        assert "modificó o revocó" not in h["resumen"]
+
+    def test_sin_actuaciones_no_hay_resumen(self):
+        assert limpieza.resumen_posterior([]) is None

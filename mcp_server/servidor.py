@@ -95,6 +95,12 @@ async def _ejecutar(nombre: str, coro):
     return resultado
 
 
+def _con_situacion_posterior(ficha: dict, historias: dict) -> dict:
+    """La ficha con el resumen de lo que pasó después, como primer campo."""
+    resumen = (historias.get(ficha.get("expediente")) or {}).get("resumen")
+    return {"situacion_posterior": resumen, **ficha} if resumen else ficha
+
+
 async def _historias(agente, expedientes: list[str]) -> dict:
     """La historia procesal de los expedientes, si el mapa está disponible."""
     mapa = await agente._relaciones()
@@ -104,7 +110,7 @@ async def _historias(agente, expedientes: list[str]) -> dict:
     for cl in dict.fromkeys(c for c in expedientes if c):
         if len(salida) >= MAX_HISTORIAS:
             break
-        h = limpieza.historia(mapa.historia_de(cl), _base_web)
+        h = limpieza.historia(mapa.historia_de(cl), _base_web, cl)
         if h:
             salida[cl] = h
     return salida
@@ -186,10 +192,12 @@ async def buscar_expedientes(
     regs = await _ejecutar("buscar_expedientes", ag._exec_buscar_expedientes(args, None, st))
     fichas = [limpieza.expediente(r, _base_web) for r in (regs or []) if isinstance(r, dict)]
     total = getattr(ag.estadistica, "last_total", None)
+    historias = await _historias(ag, [f.get("expediente") for f in fichas])
+    fichas = [_con_situacion_posterior(f, historias) for f in fichas]
     salida = {"expedientes": fichas, "devueltos": len(fichas)}
     if isinstance(total, int):
         salida["total_que_cumple_los_filtros"] = total
-    salida["historia_procesal"] = await _historias(ag, [f.get("expediente") for f in fichas])
+    salida["historia_procesal"] = historias
     return salida
 
 
@@ -211,9 +219,10 @@ async def ver_expediente(expediente: str) -> dict:
     exacto = [r for r in (regs or []) if isinstance(r, dict) and r.get("caseLink") == expediente]
     if not exacto:
         raise ToolError(f"No hay un expediente con el número exacto {expediente!r} en el acervo de Norma+.")
+    historias = await _historias(ag, [expediente])
     return {
-        "expediente": limpieza.expediente(exacto[0], _base_web),
-        "historia_procesal": (await _historias(ag, [expediente])).get(expediente),
+        "expediente": _con_situacion_posterior(limpieza.expediente(exacto[0], _base_web), historias),
+        "historia_procesal": historias.get(expediente),
     }
 
 

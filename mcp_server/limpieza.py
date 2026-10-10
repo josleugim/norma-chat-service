@@ -141,7 +141,7 @@ def _voz(doc: dict) -> str:
     }.get(voz, "no identificado en el texto recuperado")
 
 
-def historia(h: dict | None, base: str) -> dict | None:
+def historia(h: dict | None, base: str, documento: str | None = None) -> dict | None:
     """
     La historia procesal de un documento como datos.
 
@@ -189,6 +189,10 @@ def historia(h: dict | None, base: str) -> dict | None:
     if h.get("actuaciones_no_mostradas"):
         salida["actuaciones_no_mostradas"] = h["actuaciones_no_mostradas"]
 
+    resumen = resumen_posterior(posteriores, documento)
+    if resumen:
+        salida = {"resumen": resumen, **salida}
+
     cumplimientos = [p["expediente"] for p in posteriores
                      if "cumplimiento" in str(p.get("tipo", "")).lower()]
     amparos = [p["expediente"] for p in posteriores
@@ -199,6 +203,53 @@ def historia(h: dict | None, base: str) -> dict | None:
             f"({', '.join(amparos)}) dio lugar a {', '.join(cumplimientos)}, "
             "ni a quién benefició cada amparo.")
     return salida or None
+
+
+# Sentidos de una revisión o de una resolución posterior que cambian lo que
+# dice el documento revisado.
+_CAMBIA = ("modifica", "revoca", "deja insubsistente", "sobresee")
+
+
+def resumen_posterior(posteriores: list[dict], documento: str | None = None) -> str | None:
+    """
+    Una oración con lo que pasó después del documento.
+
+    Existe porque la lista de actuaciones posteriores, sola, no basta: en la
+    primera medición del conector Claude calculó los plazos de una sentencia
+    de amparo con su ficha y no mencionó que un tribunal colegiado la había
+    modificado (H05, 0 de 3), aunque el dato venía en la historia procesal.
+    Va como hecho, al principio de la ficha, no como instrucción.
+    """
+    if not posteriores:
+        return None
+    partes, cambia = [], False
+    for p in posteriores:
+        sentido = (p.get("sentido_de_la_revision") or p.get("sentido_del_amparo")
+                   or p.get("sentido_de_la_resolucion") or [])
+        sentido = [sentido] if isinstance(sentido, str) else list(sentido)
+        texto = f"{p.get('expediente')} ({str(p.get('tipo') or 'actuación').lower()}"
+        if p.get("fecha_de_la_resolucion"):
+            texto += f", {p['fecha_de_la_resolucion']}"
+        if p.get("deriva_de") and p["deriva_de"] != documento:
+            texto += f", deriva de {p['deriva_de']}"
+        texto += ")"
+        if sentido:
+            texto += f", sentido: {', '.join(map(str, sentido))}"
+        if p.get("resultado_final_del_amparo"):
+            texto += f"; resultado final del amparo: {', '.join(map(str, p['resultado_final_del_amparo']))}"
+        partes.append(texto)
+        # Sólo la revisión de este mismo documento lo modifica; la de un
+        # amparo posterior en la cadena modifica ese amparo, no éste.
+        directa = documento is None or p.get("deriva_de") == documento
+        if directa and p.get("sentido_de_la_revision") and any(
+                c in str(x).lower() for x in sentido for c in _CAMBIA):
+            cambia = True
+    resumen = f"Actuaciones posteriores a este documento: {'; '.join(partes)}."
+    if cambia:
+        resumen += (" Una revisión posterior modificó o revocó este documento: su "
+                    "sentido y sus efectos, tal como aparecen en esta ficha, son los "
+                    "anteriores a esa revisión.")
+    return resumen
 
 
 def _estado(estado: str | None) -> str | None:
