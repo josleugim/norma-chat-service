@@ -52,7 +52,15 @@ servidor = MCPServer(
         "trae la URL de su ficha o de su párrafo en normaplus.ai. Las cifras "
         "—multas, plazos, promedios, conteos— las calcula Norma+ sobre el "
         "acervo, no se estiman. Tipos de expediente: VCN, concentración no "
-        "notificada; CNT, concentración notificada; IO, omisión de notificar."
+        "notificada; CNT, concentración notificada; IO, omisión de notificar. "
+        "Las resoluciones y sentencias forman cadenas procesales: una resolución "
+        "puede ser impugnada en amparo, la sentencia de amparo revisada por un "
+        "tribunal colegiado, y la autoridad puede emitir una nueva resolución en "
+        "cumplimiento. El campo situacion_posterior, al inicio de una ficha, "
+        "resume esas actuaciones. Cuando una revisión modificó o revocó el "
+        "documento, el sentido y los efectos que muestra su ficha no son los "
+        "vigentes, y las fechas y plazos de ese documento corresponden a una "
+        "decisión que después cambió."
     ),
     website_url="https://normaplus.ai",
 )

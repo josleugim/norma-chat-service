@@ -176,3 +176,10 @@ class TestSituacionPosterior:
 
     def test_sin_actuaciones_no_hay_resumen(self):
         assert limpieza.resumen_posterior([]) is None
+
+
+def test_las_instrucciones_del_servidor_describen_sin_ordenar():
+    from mcp_server.servidor import servidor
+    texto = servidor.instructions
+    assert "situacion_posterior" in texto
+    assert not IMPERATIVOS.search(texto), texto
