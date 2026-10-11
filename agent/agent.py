@@ -1136,6 +1136,10 @@ class NormaPlusAgent:
     # total (resumidos). Ver la ejecución de `buscar_expedientes`.
     _FICHAS_COMPLETAS = 50
     _TOPE_REGISTROS = 200
+    # Cuántos renglones se le dan para enumerar. Con 200 en el listado, el
+    # modelo escribía 50, ponía "continúa hasta el 200" y ofrecía "la siguiente
+    # parte", que no existe (s06, 10-oct). 50 es lo que alcanza a escribir.
+    _TOPE_LISTADO = 50
     _CAMPOS_RESUMEN = ("ref", "tipo_fuente", "caseLink", "name", "authority",
                        "typeOfProcedure", "senseOfResolution", "resolutionDate",
                        "expediente_principal")
@@ -3101,9 +3105,14 @@ class NormaPlusAgent:
                     "nota": (
                         f"Se recuperaron {len(result)} expedientes; aquí van "
                         f"{len(payload['results'])} con sus datos básicos. Si "
-                        "presentas una lista, di cuántos muestras de cuántos. "
-                        "Para el detalle de uno, búscalo por su identificador; "
-                        "para cifras sobre el conjunto, usa la agregación."
+                        f"presentas una lista, enumera a lo más "
+                        f"{self._TOPE_LISTADO} y di cuántos muestras de "
+                        f"cuántos. No ofrezcas continuar la lista ni mandar "
+                        "otra parte: no hay paginación. Para ver otros, el "
+                        "usuario puede acotar (tipo de procedimiento, año, "
+                        "autoridad, sentido) o pedir un conteo o cifra sobre "
+                        "el conjunto. Para el detalle de uno, búscalo por su "
+                        "identificador."
                     ),
                 }
                 if state is not None:
@@ -3316,7 +3325,9 @@ class NormaPlusAgent:
                 # para que lo reproduzca en vez de rearmarlo de memoria.
                 if result and len(result) > 5:
                     from core.aggregation import render_listado
-                    listado = render_listado(result[:self._TOPE_REGISTROS])
+                    tope = (self._TOPE_LISTADO if len(result) > self._FICHAS_COMPLETAS
+                            else self._TOPE_REGISTROS)
+                    listado = render_listado(result[:tope])
                     payload["LISTADO_CANONICO"] = listado
                     payload["LISTADO_CANONICO_COUNT"] = listado.count("\n") + 1 if listado else 0
                     payload["INSTRUCCION_LISTADO"] = (

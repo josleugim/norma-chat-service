@@ -85,7 +85,10 @@ def test_una_busqueda_enorme_entra_resumida_y_con_tope():
     assert len(p["results"]) == NormaPlusAgent._TOPE_REGISTROS
     assert "operationDescription" not in p["results"][0]
     assert p["REGISTROS_RESUMIDOS"]["recuperados"] == 4737
-    assert p["LISTADO_CANONICO_COUNT"] == NormaPlusAgent._TOPE_REGISTROS
+    # El listado para enumerar va con su propio tope, y la nota no deja
+    # ofrecer una "siguiente parte" que no existe.
+    assert p["LISTADO_CANONICO_COUNT"] == NormaPlusAgent._TOPE_LISTADO == 50
+    assert "No ofrezcas continuar" in p["REGISTROS_RESUMIDOS"]["nota"]
     assert st.registros_resumidos == {"recuperados": 4737, "mostrados": 200}
 
 
@@ -98,6 +101,7 @@ def test_una_busqueda_normal_conserva_la_ficha_completa():
                  for i in range(38)]
     p = ag._serialize_tool_result("buscar_expedientes", registros, TurnState())
     assert len(p["results"]) == 38 and "REGISTROS_RESUMIDOS" not in p
+    assert p["LISTADO_CANONICO_COUNT"] == 38
     assert p["results"][0]["operationDescription"] == "detalle"
 
 
