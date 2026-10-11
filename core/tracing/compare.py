@@ -46,6 +46,8 @@ INDICADORES = [
     ("estructura_interna_expuesta", "Expone estructura interna"),
     # 6-oct: usó un documento con actuaciones posteriores y no las advirtió.
     ("historia_no_advertida", "Historia procesal no advertida"),
+    # 10-oct: respuesta bloqueada por reproducir las instrucciones.
+    ("fuga_instrucciones_bloqueada", "Fuga de instrucciones bloqueada"),
 ]
 
 # Contadores de conducta: describen lo que hizo el agente, no si lo hizo bien.

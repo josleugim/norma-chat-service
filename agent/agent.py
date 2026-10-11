@@ -36,6 +36,7 @@ from core.verificacion_semantica import (
 from core.validacion_salida import validar_borrador, normalizar_marcadores
 from core.enlaces_fuentes import enlazar_fuentes, retirar_centinelas
 from core.estructura_interna import expuestos as estructura_expuesta
+from core.fuga_instrucciones import reproduce_instrucciones, RESPUESTA_BLOQUEADA
 from core.relaciones import resumen_historia_procesal
 from core.aggregation import autoridad_de_la_pregunta
 from core.voz import clasificar_voz, etiqueta as etiqueta_voz, VOTO_PARTICULAR, NO_IDENTIFICADA
@@ -588,6 +589,8 @@ class NormaPlusAgent:
                 "estructura_interna_expuesta",
                 state.estructura_interna_expuesta, "derived")
             collector.set_decision(
+                "fuga_instrucciones", state.fuga_instrucciones, "derived")
+            collector.set_decision(
                 "historia_procesal",
                 resumen_historia_procesal(state.historia_procesal, final_text, state.registry),
                 "derived")
@@ -1007,6 +1010,20 @@ class NormaPlusAgent:
         # Antes que nada: un marcador con espacios (`[ E1 ]`) tiene que pasar
         # por la misma validación, enlace y referencias que `[E1]`.
         texto, marcadores_normalizados = normalizar_marcadores(texto)
+
+        # Una respuesta que reproduce las instrucciones no se emite (revisión
+        # de seguridad de JM, 10-oct). Va primero: no tiene parte rescatable y
+        # no vale la pena verificarla ni enlazarla.
+        fuga = reproduce_instrucciones(texto)
+        if fuga:
+            if state is not None:
+                state.fuga_instrucciones = {"ruta": ruta, **fuga}
+            if collector is not None:
+                collector.add_error(
+                    "fuga_instrucciones",
+                    f"[{ruta}] respuesta bloqueada: {', '.join(fuga['motivos'])}")
+            return RESPUESTA_BLOQUEADA
+
         revision = validar_borrador(texto, state.registry if state else None)
         if revision["reparado"]:
             if state is not None:
