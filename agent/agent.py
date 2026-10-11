@@ -591,6 +591,8 @@ class NormaPlusAgent:
             collector.set_decision(
                 "fuga_instrucciones", state.fuga_instrucciones, "derived")
             collector.set_decision(
+                "registros_resumidos", state.registros_resumidos, "derived")
+            collector.set_decision(
                 "historia_procesal",
                 resumen_historia_procesal(state.historia_procesal, final_text, state.registry),
                 "derived")
@@ -1129,6 +1131,14 @@ class NormaPlusAgent:
     # `devueltos < tope` es lo que permite afirmar que se vio el documento
     # entero, y el documento más grande del universo tiene 62 criterios.
     _TOPE_AMPLIACION = 100
+
+    # Cuántos expedientes entran al contexto con ficha completa, y cuántos en
+    # total (resumidos). Ver la ejecución de `buscar_expedientes`.
+    _FICHAS_COMPLETAS = 50
+    _TOPE_REGISTROS = 200
+    _CAMPOS_RESUMEN = ("ref", "tipo_fuente", "caseLink", "name", "authority",
+                       "typeOfProcedure", "senseOfResolution", "resolutionDate",
+                       "expediente_principal")
     _AMPLIAR_DOCUMENTOS = 2
     _AMPLIAR_PASAJES = 8
 
@@ -3072,6 +3082,34 @@ class NormaPlusAgent:
                 ]
             payload = {"results": result, "count": len(result)}
 
+            # Tope de lo que entra al contexto (revisión de seguridad, 10-oct).
+            # "Dame 500 expedientes sin filtro" recorría el universo y mandaba
+            # las 4,737 fichas completas: 808 mil tokens en una sola llamada,
+            # ~1.6 USD y 85 s por pregunta. Medido sobre las corridas previas,
+            # una pregunta legítima pasa de 50 registros pocas veces (q09: 148)
+            # y nunca necesitó la ficha completa de todos: para cifras sobre el
+            # conjunto está la agregación, que no pasa por aquí.
+            if tool_name == "buscar_expedientes" and len(result) > self._FICHAS_COMPLETAS:
+                mostrados = result[:self._TOPE_REGISTROS]
+                payload["results"] = [
+                    {k: d[k] for k in self._CAMPOS_RESUMEN if d.get(k) not in (None, "", [])}
+                    for d in mostrados if isinstance(d, dict)
+                ]
+                payload["REGISTROS_RESUMIDOS"] = {
+                    "recuperados": len(result),
+                    "mostrados": len(payload["results"]),
+                    "nota": (
+                        f"Se recuperaron {len(result)} expedientes; aquí van "
+                        f"{len(payload['results'])} con sus datos básicos. Si "
+                        "presentas una lista, di cuántos muestras de cuántos. "
+                        "Para el detalle de uno, búscalo por su identificador; "
+                        "para cifras sobre el conjunto, usa la agregación."
+                    ),
+                }
+                if state is not None:
+                    state.registros_resumidos = {
+                        "recuperados": len(result), "mostrados": len(payload["results"])}
+
             # Composición de la evidencia, explícita para el modelo y para la
             # traza: una respuesta que mezcla resoluciones con sentencias no
             # puede verse igual que una que sólo usó resoluciones.
@@ -3278,7 +3316,7 @@ class NormaPlusAgent:
                 # para que lo reproduzca en vez de rearmarlo de memoria.
                 if result and len(result) > 5:
                     from core.aggregation import render_listado
-                    listado = render_listado(result)
+                    listado = render_listado(result[:self._TOPE_REGISTROS])
                     payload["LISTADO_CANONICO"] = listado
                     payload["LISTADO_CANONICO_COUNT"] = listado.count("\n") + 1 if listado else 0
                     payload["INSTRUCCION_LISTADO"] = (

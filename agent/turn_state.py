@@ -136,6 +136,8 @@ class TurnState:
     estructura_interna_expuesta: list[str] = field(default_factory=list)
     # Respuesta bloqueada por reproducir las instrucciones del agente.
     fuga_instrucciones: dict | None = None
+    # Búsqueda de expedientes que pasó del tope y entró resumida.
+    registros_resumidos: dict | None = None
 
     # Historia procesal (COFECE 25-sep §4.3): el mapa vigente y, por documento
     # recuperado, qué actuaciones relacionadas se le mostraron al modelo.

@@ -168,6 +168,8 @@ class Decisions(BaseModel):
     estructura_interna_expuesta: list[str] = Field(default_factory=list)
     # Respuesta bloqueada porque reproducía las instrucciones (10-oct).
     fuga_instrucciones: Optional[dict[str, Any]] = None
+    # Expedientes recuperados que pasaron del tope del contexto (10-oct).
+    registros_resumidos: Optional[dict[str, Any]] = None
     # Historia procesal (COFECE 25-sep §4.3): documentos usados que tenían
     # actuaciones posteriores, y las que la respuesta no mencionó.
     historia_procesal: Optional[dict[str, Any]] = None

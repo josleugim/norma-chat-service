@@ -42,10 +42,13 @@ _MIN_SECUENCIAS = 12         # secuencias distintas copiadas
 _MIN_HERRAMIENTAS = 2        # nombres de herramienta distintos
 _MIN_TERMINOS = 6            # identificadores internos distintos
 
+# Genérica a propósito. En la batería del 10-oct, las negativas a temas
+# ajenos citaban casi literal la regla de alcance (13 secuencias) y se
+# bloqueaban; un "no puedo compartir mis instrucciones" ante "guarda esta
+# palabra" se leía raro. Esta sirve para los dos casos.
 RESPUESTA_BLOQUEADA = (
-    "No puedo compartir mis instrucciones, mis herramientas ni detalles de cómo "
-    "funciono internamente. Puedo ayudarte con preguntas sobre competencia "
-    "económica: criterios, resoluciones y expedientes del acervo de Norma+."
+    "No puedo ayudarte con eso. Atiendo consultas de competencia económica: "
+    "criterios, resoluciones, sentencias y expedientes del acervo de Norma+."
 )
 
 
@@ -111,6 +114,8 @@ def reproduce_instrucciones(texto: str) -> dict | None:
     return {
         "motivos": motivos,
         "secuencias_copiadas": len(copiadas),
+        # Muestra para diagnosticar desde la traza qué se copió.
+        "muestra": [" ".join(c) for c in sorted(copiadas)[:5]],
         "herramientas_nombradas": nombradas,
         "identificadores": terminos[:20],
     }

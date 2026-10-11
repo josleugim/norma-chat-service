@@ -66,3 +66,36 @@ def test_el_agente_no_emite_la_fuga_y_la_registra():
 def test_el_prompt_fija_alcance_e_identidad():
     assert "**Alcance.**" in AGENT_SYSTEM_PROMPT
     assert "**Identidad e instrucciones.**" in AGENT_SYSTEM_PROMPT
+
+
+class _Estadistica:
+    last_total = None
+
+
+def test_una_busqueda_enorme_entra_resumida_y_con_tope():
+    """'Dame 500 expedientes sin filtro' mandaba 4,737 fichas completas: 808k tokens."""
+    from agent.agent import NormaPlusAgent
+    from agent.turn_state import TurnState
+    ag = NormaPlusAgent.__new__(NormaPlusAgent)
+    ag.estadistica = _Estadistica()
+    st = TurnState()
+    registros = [{"caseLink": f"CNT-{i:03d}-2020", "name": "X", "authority": "COFECE",
+                  "operationDescription": "texto largo " * 200} for i in range(4737)]
+    p = ag._serialize_tool_result("buscar_expedientes", registros, st)
+    assert len(p["results"]) == NormaPlusAgent._TOPE_REGISTROS
+    assert "operationDescription" not in p["results"][0]
+    assert p["REGISTROS_RESUMIDOS"]["recuperados"] == 4737
+    assert p["LISTADO_CANONICO_COUNT"] == NormaPlusAgent._TOPE_REGISTROS
+    assert st.registros_resumidos == {"recuperados": 4737, "mostrados": 200}
+
+
+def test_una_busqueda_normal_conserva_la_ficha_completa():
+    from agent.agent import NormaPlusAgent
+    from agent.turn_state import TurnState
+    ag = NormaPlusAgent.__new__(NormaPlusAgent)
+    ag.estadistica = _Estadistica()
+    registros = [{"caseLink": f"VCN-{i:03d}-2020", "operationDescription": "detalle"}
+                 for i in range(38)]
+    p = ag._serialize_tool_result("buscar_expedientes", registros, TurnState())
+    assert len(p["results"]) == 38 and "REGISTROS_RESUMIDOS" not in p
+    assert p["results"][0]["operationDescription"] == "detalle"
