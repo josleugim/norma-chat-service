@@ -94,6 +94,7 @@ async def lifespan(app: FastAPI):
         from core.universo import UniversoRestringido
         universo = UniversoRestringido.desde_archivo(settings.universo_path)
         estadistica_client.universo = universo
+        criterios_client.universo = universo
         logger.info(
             f"UNIVERSO RESTRINGIDO a {len(universo)} expedientes "
             f"({universo.etiqueta}). Las consultas estructuradas y las "

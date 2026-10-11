@@ -36,6 +36,7 @@ from core.verificacion_semantica import (
 from core.validacion_salida import validar_borrador, normalizar_marcadores
 from core.enlaces_fuentes import enlazar_fuentes, retirar_centinelas
 from core.estructura_interna import expuestos as estructura_expuesta
+from core.fuga_instrucciones import reproduce_instrucciones, RESPUESTA_BLOQUEADA
 from core.relaciones import resumen_historia_procesal
 from core.aggregation import autoridad_de_la_pregunta
 from core.voz import clasificar_voz, etiqueta as etiqueta_voz, VOTO_PARTICULAR, NO_IDENTIFICADA
@@ -588,6 +589,10 @@ class NormaPlusAgent:
                 "estructura_interna_expuesta",
                 state.estructura_interna_expuesta, "derived")
             collector.set_decision(
+                "fuga_instrucciones", state.fuga_instrucciones, "derived")
+            collector.set_decision(
+                "registros_resumidos", state.registros_resumidos, "derived")
+            collector.set_decision(
                 "historia_procesal",
                 resumen_historia_procesal(state.historia_procesal, final_text, state.registry),
                 "derived")
@@ -1007,6 +1012,20 @@ class NormaPlusAgent:
         # Antes que nada: un marcador con espacios (`[ E1 ]`) tiene que pasar
         # por la misma validación, enlace y referencias que `[E1]`.
         texto, marcadores_normalizados = normalizar_marcadores(texto)
+
+        # Una respuesta que reproduce las instrucciones no se emite (revisión
+        # de seguridad de JM, 10-oct). Va primero: no tiene parte rescatable y
+        # no vale la pena verificarla ni enlazarla.
+        fuga = reproduce_instrucciones(texto)
+        if fuga:
+            if state is not None:
+                state.fuga_instrucciones = {"ruta": ruta, **fuga}
+            if collector is not None:
+                collector.add_error(
+                    "fuga_instrucciones",
+                    f"[{ruta}] respuesta bloqueada: {', '.join(fuga['motivos'])}")
+            return RESPUESTA_BLOQUEADA
+
         revision = validar_borrador(texto, state.registry if state else None)
         if revision["reparado"]:
             if state is not None:
@@ -1112,6 +1131,18 @@ class NormaPlusAgent:
     # `devueltos < tope` es lo que permite afirmar que se vio el documento
     # entero, y el documento más grande del universo tiene 62 criterios.
     _TOPE_AMPLIACION = 100
+
+    # Cuántos expedientes entran al contexto con ficha completa, y cuántos en
+    # total (resumidos). Ver la ejecución de `buscar_expedientes`.
+    _FICHAS_COMPLETAS = 50
+    _TOPE_REGISTROS = 200
+    # Cuántos renglones se le dan para enumerar. Con 200 en el listado, el
+    # modelo escribía 50, ponía "continúa hasta el 200" y ofrecía "la siguiente
+    # parte", que no existe (s06, 10-oct). 50 es lo que alcanza a escribir.
+    _TOPE_LISTADO = 50
+    _CAMPOS_RESUMEN = ("ref", "tipo_fuente", "caseLink", "name", "authority",
+                       "typeOfProcedure", "senseOfResolution", "resolutionDate",
+                       "expediente_principal")
     _AMPLIAR_DOCUMENTOS = 2
     _AMPLIAR_PASAJES = 8
 
@@ -3055,6 +3086,39 @@ class NormaPlusAgent:
                 ]
             payload = {"results": result, "count": len(result)}
 
+            # Tope de lo que entra al contexto (revisión de seguridad, 10-oct).
+            # "Dame 500 expedientes sin filtro" recorría el universo y mandaba
+            # las 4,737 fichas completas: 808 mil tokens en una sola llamada,
+            # ~1.6 USD y 85 s por pregunta. Medido sobre las corridas previas,
+            # una pregunta legítima pasa de 50 registros pocas veces (q09: 148)
+            # y nunca necesitó la ficha completa de todos: para cifras sobre el
+            # conjunto está la agregación, que no pasa por aquí.
+            if tool_name == "buscar_expedientes" and len(result) > self._FICHAS_COMPLETAS:
+                mostrados = result[:self._TOPE_REGISTROS]
+                payload["results"] = [
+                    {k: d[k] for k in self._CAMPOS_RESUMEN if d.get(k) not in (None, "", [])}
+                    for d in mostrados if isinstance(d, dict)
+                ]
+                payload["REGISTROS_RESUMIDOS"] = {
+                    "recuperados": len(result),
+                    "mostrados": len(payload["results"]),
+                    "nota": (
+                        f"Se recuperaron {len(result)} expedientes; aquí van "
+                        f"{len(payload['results'])} con sus datos básicos. Si "
+                        f"presentas una lista, enumera a lo más "
+                        f"{self._TOPE_LISTADO} y di cuántos muestras de "
+                        f"cuántos. No ofrezcas continuar la lista ni mandar "
+                        "otra parte: no hay paginación. Para ver otros, el "
+                        "usuario puede acotar (tipo de procedimiento, año, "
+                        "autoridad, sentido) o pedir un conteo o cifra sobre "
+                        "el conjunto. Para el detalle de uno, búscalo por su "
+                        "identificador."
+                    ),
+                }
+                if state is not None:
+                    state.registros_resumidos = {
+                        "recuperados": len(result), "mostrados": len(payload["results"])}
+
             # Composición de la evidencia, explícita para el modelo y para la
             # traza: una respuesta que mezcla resoluciones con sentencias no
             # puede verse igual que una que sólo usó resoluciones.
@@ -3261,7 +3325,9 @@ class NormaPlusAgent:
                 # para que lo reproduzca en vez de rearmarlo de memoria.
                 if result and len(result) > 5:
                     from core.aggregation import render_listado
-                    listado = render_listado(result)
+                    tope = (self._TOPE_LISTADO if len(result) > self._FICHAS_COMPLETAS
+                            else self._TOPE_REGISTROS)
+                    listado = render_listado(result[:tope])
                     payload["LISTADO_CANONICO"] = listado
                     payload["LISTADO_CANONICO_COUNT"] = listado.count("\n") + 1 if listado else 0
                     payload["INSTRUCCION_LISTADO"] = (

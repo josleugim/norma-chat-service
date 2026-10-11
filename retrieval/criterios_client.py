@@ -25,6 +25,8 @@ class CriteriosSearchClient:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
+        # Lista blanca de expedientes (UNIVERSO_PATH). Ver `search`.
+        self.universo = None
         # Candidatos que devolvió la API en la última búsqueda, ANTES del
         # filtro por distancia. Sin este dato no se puede distinguir "el
         # documento tiene pocos criterios" de "el filtro descartó la mitad",
@@ -54,9 +56,17 @@ class CriteriosSearchClient:
             collector: TraceCollector opcional. Si viene, se registran las
                        etapas de retrieval. No altera el resultado.
         """
+        # Con universo restringido se pide de más y se recorta al universo.
+        #
+        # El 20-sep el índice tenía exactamente 62 de los 63 documentos del
+        # holdout y nada fuera, y por eso los criterios no se filtraban. El
+        # 10-oct ya tiene ~189 expedientes: H08, H16 y H17 metían CNT al
+        # contexto en 3 de 3, con el código del 6-oct igual que con el de hoy.
+        # El supuesto era un dato y el dato cambió.
+        pedir = min(top_k * 4, 100) if self.universo is not None else top_k
         payload = {
             "question": query,
-            "limit": top_k,
+            "limit": pedir,
         }
 
         # Agregar filtros opcionales (mapeo nombre interno → nombre API)
@@ -111,6 +121,12 @@ class CriteriosSearchClient:
                 docs=list(items),
                 notes=f"limit={top_k} enviado a la API.",
             )
+
+        fuera_del_universo = 0
+        if self.universo is not None:
+            dentro = [i for i in items if i.get("caseLink") in self.universo]
+            fuera_del_universo = len(items) - len(dentro)
+            items = dentro[:top_k]
 
         self.last_candidatos = len(items)
         results = []
@@ -188,6 +204,9 @@ class CriteriosSearchClient:
                 notes=(
                     "No hay reranker en el pipeline. Esta etapa descarta por "
                     "distancia y reordena por score."
+                    + (f" Antes, {fuera_del_universo} candidatos fuera del "
+                       "universo restringido descartados."
+                       if self.universo is not None else "")
                 ),
             )
             collector.record_coverage(
