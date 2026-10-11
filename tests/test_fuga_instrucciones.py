@@ -99,3 +99,31 @@ def test_una_busqueda_normal_conserva_la_ficha_completa():
     p = ag._serialize_tool_result("buscar_expedientes", registros, TurnState())
     assert len(p["results"]) == 38 and "REGISTROS_RESUMIDOS" not in p
     assert p["results"][0]["operationDescription"] == "detalle"
+
+
+def test_con_universo_los_criterios_de_fuera_no_entran(monkeypatch):
+    """10-oct: el índice ya no coincide con el universo del holdout."""
+    from retrieval.criterios_client import CriteriosSearchClient
+    items = ([{"id": str(i), "content": "x", "caseLink": "CNT-001-2000", "distance": 0.3}
+              for i in range(10)]
+             + [{"id": "v", "content": "y", "caseLink": "VCN-004-2024", "distance": 0.4}])
+    pedido = {}
+
+    class _Resp:
+        def raise_for_status(self): pass
+        def json(self): return items
+
+    class _Cliente:
+        def __init__(self, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        async def post(self, url, json, headers):
+            pedido.update(json); return _Resp()
+
+    import retrieval.criterios_client as m
+    monkeypatch.setattr(m.httpx, "AsyncClient", _Cliente)
+    c = CriteriosSearchClient("http://x", "k")
+    c.universo = {"VCN-004-2024"}
+    r = asyncio.run(c.search("multa", top_k=5))
+    assert [x.metadata["caseLink"] for x in r] == ["VCN-004-2024"]
+    assert pedido["limit"] == 20
