@@ -184,6 +184,8 @@ class Decisions(BaseModel):
     lecturas_resolucion: list[dict[str, Any]] = Field(default_factory=list)
     # Concepto contestado sin buscar: se pidió una búsqueda antes de responder.
     busqueda_forzada: Optional[bool] = None
+    # Actuaciones posteriores agregadas por código (la respuesta no las citó).
+    historia_completada: Optional[dict[str, Any]] = None
     # I5: ¿el pasaje sostiene la afirmación? En evaluación, no bloquea.
     verificacion_semantica: Optional[dict[str, Any]] = None
     # El payload exacto de evidencia que recibió el modelo. Sin esto, una

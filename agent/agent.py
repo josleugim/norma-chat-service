@@ -38,7 +38,7 @@ from core.validacion_salida import validar_borrador, normalizar_marcadores
 from core.enlaces_fuentes import enlazar_fuentes, retirar_centinelas
 from core.estructura_interna import expuestos as estructura_expuesta
 from core.fuga_instrucciones import reproduce_instrucciones, RESPUESTA_BLOQUEADA
-from core.relaciones import resumen_historia_procesal
+from core.relaciones import completar_historia_procesal, resumen_historia_procesal
 from core.aggregation import autoridad_de_la_pregunta
 from core.voz import clasificar_voz, etiqueta as etiqueta_voz, VOTO_PARTICULAR, NO_IDENTIFICADA
 from models.schemas import (
@@ -631,6 +631,8 @@ class NormaPlusAgent:
             collector.set_decision(
                 "lecturas_resolucion", state.lecturas_resolucion, "derived")
             collector.set_decision(
+                "historia_completada", state.historia_completada, "derived")
+            collector.set_decision(
                 "cobertura_por_documento", state.cobertura_por_documento, "derived")
             collector.set_decision(
                 "reparacion_salida", state.reparacion_salida, "derived")
@@ -645,7 +647,9 @@ class NormaPlusAgent:
                 "registros_resumidos", state.registros_resumidos, "derived")
             collector.set_decision(
                 "historia_procesal",
-                resumen_historia_procesal(state.historia_procesal, final_text, state.registry),
+                resumen_historia_procesal(
+                    state.historia_procesal, final_text, state.registry,
+                    agregadas_por_codigo=(state.historia_completada or {}).get("agregadas")),
                 "derived")
             # ¿Alguna ruta vino vacía y su complementaria nunca se ejerció?
             # Es objetivo y no depende de leer el texto: si la respuesta afirma
@@ -1166,6 +1170,14 @@ class NormaPlusAgent:
         # la respuesta haya dicho.
         if state is not None:
             state.estructura_interna_expuesta = estructura_expuesta(revision["texto"])
+
+        # Actuaciones posteriores que la respuesta no citó: se agregan con su
+        # marcador. Antes de enlazar, para que la nota salga enlazada.
+        if state is not None and getattr(state, "historia_procesal", None):
+            revision["texto"], agregadas = completar_historia_procesal(
+                state.historia_procesal, revision["texto"], state.registry)
+            if agregadas:
+                state.historia_completada = {"ruta": ruta, "agregadas": agregadas}
 
         # Los enlaces van al final, sobre el texto ya reparado y verificado:
         # el revisor juzga lo que dice la respuesta, no sus URLs, y un
@@ -3218,7 +3230,8 @@ class NormaPlusAgent:
                 "documento": cl,
                 "posteriores": [
                     {"expediente": p["expediente"], "ref": p.get("ref"),
-                     "enlace": p["enlace"]} for p in posteriores],
+                     "enlace": p["enlace"], "tipo": p.get("tipo"),
+                     "fecha": p.get("fecha_de_la_resolucion")} for p in posteriores],
                 "deriva_de": [a.get("origen") for a in h.get("deriva_de", [])],
                 "no_mostradas": h.get("actuaciones_no_mostradas", []),
             })

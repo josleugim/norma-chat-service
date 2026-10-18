@@ -182,6 +182,9 @@ class TurnState:
 
     # Pregunta de concepto contestada sin buscar: se pide una búsqueda, una vez.
     busqueda_forzada: bool = False
+
+    # Actuaciones posteriores que agregó el código porque la respuesta no las citó.
+    historia_completada: dict | None = None
     evidencia_en_cache: bool = False
     lecturas_resolucion: list[dict] = field(default_factory=list)
     tokens_lector_entrada: int = 0
