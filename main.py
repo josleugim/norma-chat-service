@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from config import get_settings
 from llm import LLMRegistry, OpenAIAdapter, AnthropicAdapter
 from retrieval import CriteriosSearchClient, EstadisticaSearchClient
+from retrieval.resolucion_client import ResolucionDigitalClient
 from temporal import HolidayCalendar, TemporalAnalyzer
 from core import CitationBuilder, EvidenceCache
 from core.tracing import RunManifestStore, build_sink
@@ -198,6 +199,15 @@ async def lifespan(app: FastAPI):
         trace_sink=trace_sink,
         manifest_store=manifest_store,
         settings=settings,
+        resolucion_client=(
+            ResolucionDigitalClient(
+                base_url=settings.search_api_base_url,
+                api_key=settings.search_api_key,
+                # El documento completo pesa varios MB: no cabe en el timeout
+                # de las búsquedas.
+                timeout=max(settings.search_api_timeout, 60.0),
+            ) if settings.agent_leer_resolucion else None),
+        max_lecturas_resolucion=settings.agent_max_lecturas_resolucion,
     )
 
     app.state.agent = agent

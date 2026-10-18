@@ -172,3 +172,105 @@ class TestParser:
         lec = asyncio.run(leer(_Adaptador(salida), "gpt-4.1", resolucion, "¿?"))
         assert lec.error is None and lec.citas_verificadas == 1
         assert lec.respuesta == "Son distintos [1]." and not lec.no_consta
+
+
+# ── La herramienta en el agente ─────────────────────────────────────────────
+
+class _Clientes:
+    """Doble del cliente de resolución: mismo contrato que el real."""
+
+    def __init__(self, resolucion):
+        self.resolucion, self.pedidas = resolucion, []
+
+    async def obtener(self, case_link):
+        self.pedidas.append(case_link)
+        return self.resolucion
+
+
+class _Universo:
+    case_links = {"VCN-005-2024"}
+
+
+class _Estadistica:
+    universo = None
+
+
+def _agente(cliente, universo=None):
+    from agent.agent import NormaPlusAgent
+    ag = NormaPlusAgent.__new__(NormaPlusAgent)
+    ag.resoluciones = cliente
+    ag.max_lecturas_resolucion = 3
+    ag.estadistica = _Estadistica()
+    ag.estadistica.universo = universo
+    return ag
+
+
+def _estado(salida):
+    from agent.turn_state import TurnState
+    st = TurnState()
+    st.llm = (_Adaptador(salida), "gpt-4.1")
+    return st
+
+
+_SALIDA_BUENA = ("RESPUESTA:\nSon distintos [1]. Hubo multa [2].\nCITAS:\n"
+                 "[1] p. 13 | los incrementos de capital son distintos\n"
+                 "[2] p. 14 | se impuso una multa de diez millones\nNO_CONSTA: no")
+
+
+class TestHerramienta:
+    def test_lectura_con_marcador_paginas_y_costo(self, resolucion):
+        ag, st = _agente(_Clientes(resolucion)), _estado(_SALIDA_BUENA)
+        r = asyncio.run(ag._exec_leer_resolucion(
+            {"expediente": "VCN-005-2024", "pregunta": "¿?"}, None, st))
+        assert r["ref"] == "E1" and st.registry.case_link_of("E1") == "VCN-005-2024"
+        # Las marcas del lector se vuelven páginas y la oración sin respaldo se va.
+        assert r["lectura"] == "Son distintos (p. 13)."
+        assert r["pasajes_verificados"] == [
+            {"pagina": 13, "texto": "los incrementos de capital son distintos"}]
+        # El costo del lector cuenta en el turno, y la evidencia queda acumulada.
+        assert st.tokens_lector_entrada == 100_000
+        assert any(d.get("ref") == "E1" for d in st.evidencia_acumulada)
+        lec = st.lecturas_resolucion[0]
+        assert lec["citas_verificadas"] == 1 and lec["oraciones_retiradas"] == ["Hubo multa [2]."]
+
+    def test_fuera_del_universo_no_se_lee(self, resolucion):
+        cli = _Clientes(resolucion)
+        r = asyncio.run(_agente(cli, _Universo())._exec_leer_resolucion(
+            {"expediente": "CNT-018-2023", "pregunta": "¿?"}, None, _estado("")))
+        assert not r["leida"] and cli.pedidas == []
+
+    def test_tope_por_turno(self, resolucion):
+        ag, st = _agente(_Clientes(resolucion)), _estado(_SALIDA_BUENA)
+        for _ in range(3):
+            asyncio.run(ag._exec_leer_resolucion({"expediente": "VCN-005-2024", "pregunta": "¿?"}, None, st))
+        r = asyncio.run(ag._exec_leer_resolucion({"expediente": "VCN-005-2024", "pregunta": "¿?"}, None, st))
+        assert not r["leida"] and st.lecturas_resolucion[-1]["motivo"] == "tope"
+
+    def test_no_disponible_no_afirma_inexistencia(self):
+        ag, st = _agente(_Clientes(armar_resolucion("X", []))), _estado("nunca")
+        r = asyncio.run(ag._exec_leer_resolucion({"expediente": "X", "pregunta": "¿?"}, None, st))
+        assert not r["leida"] and "no existe" in r["instruccion"]
+        assert st.llm[0].mensajes is None and st.registry.markers() == []
+
+    def test_sin_cliente_configurado(self):
+        r = asyncio.run(_agente(None)._exec_leer_resolucion(
+            {"expediente": "X", "pregunta": "¿?"}, None, _estado("")))
+        assert not r["leida"]
+
+    def test_esta_registrada_en_el_agente_el_prompt_y_las_herramientas(self):
+        from agent.tools import TOOLS
+        from prompts.system import AGENT_SYSTEM_PROMPT
+        assert any(t["name"] == "leer_resolucion" for t in TOOLS)
+        assert "leer_resolucion" in AGENT_SYSTEM_PROMPT
+
+    def test_main_importa_el_cliente(self):
+        # El arranque falló una vez con NameError: el servicio no levantaba.
+        import main
+        assert main.ResolucionDigitalClient is not None
+
+
+class TestMarcadorConPagina:
+    def test_pagina_dentro_del_corchete_se_saca(self):
+        from core.validacion_salida import normalizar_marcadores
+        texto, n = normalizar_marcadores("dijo X[E1, p. 15]. Y [ E2, pp. 183-184].")
+        assert texto == "dijo X[E1] (p. 15). Y [E2] (pp. 183-184)." and n == 2

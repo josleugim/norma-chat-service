@@ -6,6 +6,7 @@ Cada tool call emite un evento SSE de razonamiento para el frontend.
 """
 import json
 import logging
+import re
 from typing import AsyncIterator, Optional
 
 from llm.registry import LLMRegistry
@@ -95,8 +96,14 @@ class NormaPlusAgent:
         trace_sink=None,
         manifest_store=None,
         settings=None,
+        resolucion_client=None,
+        max_lecturas_resolucion: int = 3,
     ):
         self.llm_registry = llm_registry
+        # Lectura de la resolución completa. Opcional: sin cliente, la
+        # herramienta responde que no está disponible en vez de fallar.
+        self.resoluciones = resolucion_client
+        self.max_lecturas_resolucion = max_lecturas_resolucion
         self.criterios = criterios_client
         self.estadistica = estadistica_client
         self.temporal = temporal_analyzer
@@ -141,6 +148,7 @@ class NormaPlusAgent:
             "contar_expedientes": self._exec_contar_expedientes,
             "agregar_expedientes": self._exec_agregar_expedientes,
             "calcular_plazos": self._exec_calcular_plazos,
+            "leer_resolucion": self._exec_leer_resolucion,
         }
 
     async def run(
@@ -206,6 +214,7 @@ class NormaPlusAgent:
         # pisarían.
         state = TurnState()
         state.anclas_criterio = self.evidence_cache.anclas(session_id)
+        state.llm = (adapter, model)
 
         # Routing: clasificar la consulta antes de buscar, para poder exigir
         # después que la estrategia haya correspondido al tipo de pregunta.
@@ -580,6 +589,8 @@ class NormaPlusAgent:
                 },
                 "derived")
             collector.set_decision(
+                "lecturas_resolucion", state.lecturas_resolucion, "derived")
+            collector.set_decision(
                 "cobertura_por_documento", state.cobertura_por_documento, "derived")
             collector.set_decision(
                 "reparacion_salida", state.reparacion_salida, "derived")
@@ -646,6 +657,11 @@ class NormaPlusAgent:
             except Exception as e:
                 logger.warning(f"Error generando título: {e}")
                 session_title = user_query[:60]
+
+        # El lector de resoluciones hace su propia llamada al modelo: sin esto
+        # el costo del turno saldría subestimado en ~90k tokens por lectura.
+        total_input_tokens += state.tokens_lector_entrada
+        total_output_tokens += state.tokens_lector_salida
 
         # ── Done ────────────────────────────────────────────
         # El trace_id viaja al frontend para que un reporte de "esta respuesta
@@ -2346,6 +2362,112 @@ class NormaPlusAgent:
 
         return serialized
 
+    async def _exec_leer_resolucion(self, args: dict, collector=None, state=None) -> dict:
+        """
+        Lee una resolución completa con su propia llamada al modelo
+        (`core.lector_resolucion`) y devuelve la lectura con sus pasajes
+        verificados contra el texto.
+
+        Va como llamada aparte, no como texto en el contexto del agente: el
+        ciclo de herramientas reenvía todo el historial en cada vuelta, y
+        ~90k tokens de resolución multiplicados por las vueltas restantes
+        costarían varias veces la lectura.
+        """
+        from core.lector_resolucion import leer as leer_resolucion
+        from retrieval.resolucion_client import ResolucionDigital
+
+        expediente = str(args.get("expediente") or "").strip()
+        pregunta = str(args.get("pregunta") or "").strip() or (state.query if state else "")
+        lecturas = state.lecturas_resolucion if state is not None else []
+
+        def sin_lectura(motivo: str, detalle: str) -> dict:
+            lecturas.append({"documento": expediente, "leida": False, "motivo": motivo})
+            return {"expediente": expediente, "leida": False, "motivo": detalle}
+
+        if not expediente:
+            return sin_lectura("sin_expediente", "Falta el identificador del documento.")
+        if self.resoluciones is None:
+            return sin_lectura("no_configurado",
+                               "La lectura de resoluciones completas no está disponible.")
+        if sum(1 for x in lecturas if x.get("leida")) >= self.max_lecturas_resolucion:
+            return sin_lectura(
+                "tope", f"Ya se leyeron {self.max_lecturas_resolucion} documentos en esta "
+                        "consulta; contesta con lo que tienes y dilo.")
+        universo = getattr(self.estadistica, "universo", None)
+        if universo is not None and expediente not in universo.case_links:
+            return sin_lectura(
+                "fuera_del_universo",
+                f"{expediente} no está en el acervo consultable. Si es una errata, "
+                "busca el identificador exacto con buscar_expedientes.")
+
+        if state is not None:
+            state.peticiones_http += 1
+        resolucion = await self.resoluciones.obtener(expediente)
+        adapter, model = state.llm if state is not None and state.llm else (None, None)
+        lectura = await leer_resolucion(adapter, model, resolucion, pregunta)
+        if state is not None:
+            state.tokens_lector_entrada += lectura.tokens_entrada
+            state.tokens_lector_salida += lectura.tokens_salida
+
+        verificadas = [c for c in lectura.citas if c.get("verificada")]
+        paginas = {c["n"]: c.get("pagina_encontrada", c.get("pagina")) for c in verificadas}
+        # Las marcas [n] del lector se vuelven páginas: el agente cita con
+        # sus propios marcadores y dos numeraciones en el mismo texto
+        # terminarían cruzándose.
+        respuesta = re.sub(
+            r"\[(\d+)\]",
+            lambda m: f"(p. {paginas[int(m.group(1))]})" if int(m.group(1)) in paginas else "",
+            lectura.respuesta)
+
+        ref = ""
+        if state is not None and resolucion.disponible:
+            ref = state.registry.assign({"caseLink": expediente}, "E")
+            pasajes = "\n".join(f"p. {paginas[c['n']]}: {c['fragmento']}" for c in verificadas)
+            if ref and pasajes:
+                state.acumular_evidencia([{
+                    "caseLink": expediente, "id": f"lectura:{expediente}",
+                    "ref": ref, "content": pasajes}])
+
+        lecturas.append({
+            "documento": expediente, "leida": resolucion.disponible,
+            "motivo": None if resolucion.disponible else "no_disponible",
+            "pregunta": pregunta, "resolucion": resolucion.resumen(),
+            "citas_total": len(lectura.citas), "citas_verificadas": len(verificadas),
+            "oraciones_retiradas": lectura.retiradas, "no_consta": lectura.no_consta,
+            "tokens_entrada": lectura.tokens_entrada, "tokens_salida": lectura.tokens_salida,
+            "costo_usd": lectura.costo_usd, "segundos": lectura.segundos,
+            "error": lectura.error,
+        })
+
+        if not resolucion.disponible:
+            return {
+                "expediente": expediente, "leida": False,
+                "motivo": resolucion.motivo,
+                "instruccion": (
+                    "No digas que el documento no existe ni que no contiene "
+                    "algo: sólo que su texto no está disponible para leerlo."),
+            }
+        return {
+            "ref": ref,
+            "expediente": expediente,
+            "tipo_fuente": clasificar_fuente(expediente),
+            "leida": True,
+            "paginas": resolucion.numero_paginas,
+            "lectura": respuesta,
+            "pasajes_verificados": [
+                {"pagina": paginas[c["n"]], "texto": c["fragmento"]} for c in verificadas],
+            "no_consta": lectura.no_consta,
+            "partes_testadas": resolucion.testados > 0,
+            "instruccion": (
+                "Esta lectura se hizo sobre el texto completo del documento y "
+                "sus pasajes se comprobaron palabra por palabra. Cita el "
+                f"documento con su marcador y la página afuera del corchete: "
+                f"[{ref}] (p. 15). No agregues "
+                "afirmaciones sobre el documento que no estén en la lectura. "
+                "Si no_consta es true, di que el documento no lo contiene; no "
+                "lo completes con otras fuentes atribuyéndoselo."),
+        }
+
     async def _exec_calcular_plazos(self, args: dict, collector=None, state=None) -> dict:
         # ── Modo A: dos fechas sueltas ──────────────────────
         # Antes no existía: ante "¿cuántos días hábiles entre X e Y?" el modelo
@@ -3479,6 +3601,8 @@ class NormaPlusAgent:
             return f"Buscando criterios sobre: {args.get('query', '')}"
         elif name == "buscar_expedientes":
             return self._describe_expedientes_search(args)
+        elif name == "leer_resolucion":
+            return f"Leyendo la resolución {args.get('expediente', '')} completa..."
         elif name == "contar_expedientes":
             prefijo = args.get("prefijo_expediente")
             return f"Contando expedientes{f' {prefijo}' if prefijo else ''}..."

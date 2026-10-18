@@ -366,4 +366,38 @@ TOOLS = [
             },
         },
     },
+    {
+        "name": "leer_resolucion",
+        "description": (
+            "Lee el texto COMPLETO de una resolución o sentencia concreta y "
+            "contesta una pregunta sobre su contenido, con pasajes textuales "
+            "comprobados contra el documento. Úsala cuando la pregunta sea "
+            "sobre lo que dice un documento identificado —sus razones, cómo "
+            "votó el Pleno, qué ordenó, qué consideró o no consideró, qué está "
+            "testado— y los criterios o la ficha del expediente no alcancen. "
+            "Es cara: no la uses para datos que ya trae la ficha (fechas, "
+            "multas, sentido) ni para preguntas sobre el acervo en general. "
+            "Máximo 3 documentos por consulta."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "expediente": {
+                    "type": "string",
+                    "description": (
+                        "Identificador exacto del documento (VCN-004-2024, "
+                        "1258_2017_2JD). No un prefijo ni un tipo."
+                    ),
+                },
+                "pregunta": {
+                    "type": "string",
+                    "description": (
+                        "Qué hay que encontrar en el documento, formulado "
+                        "como pregunta completa."
+                    ),
+                },
+            },
+            "required": ["expediente", "pregunta"],
+        },
+    },
 ]

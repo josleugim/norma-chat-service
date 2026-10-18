@@ -48,11 +48,24 @@ MARCADOR = re.compile(r"\[([CE]\d+)\]")
 _MARCADOR_CON_ESPACIOS = re.compile(r"\[[ \t]*([CE])[ \t]*(\d+)[ \t]*\]")
 
 
+# `[E1, p. 15]` → `[E1] (p. 15)`. Con la lectura de la resolución completa el
+# modelo pega la página dentro del corchete, y así el marcador no se reconoce:
+# ni se valida contra el registro ni se enlaza (humo del 17-oct, 2 de 3).
+_MARCADOR_CON_PAGINA = re.compile(
+    r"\[\s*([CE])\s*(\d+)\s*,\s*(p(?:p|ágs?|ág)?\.?\s*[\d\s,–-]+?)\s*\]", re.IGNORECASE)
+
+
 def normalizar_marcadores(texto: str) -> tuple[str, int]:
     """`[ E1 ]` → `[E1]`. Devuelve el texto y cuántos se corrigieron."""
     if not texto:
         return texto, 0
     n = 0
+
+    def _con_pagina(m):
+        nonlocal n
+        n += 1
+        return f"[{m.group(1).upper()}{m.group(2)}] ({m.group(3).strip()})"
+    texto = _MARCADOR_CON_PAGINA.sub(_con_pagina, texto)
 
     def _sub(m):
         nonlocal n
