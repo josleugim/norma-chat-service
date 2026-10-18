@@ -294,27 +294,46 @@ class NormaPlusAgent:
                 for tc in response.tool_calls:
                     tool_call_count += 1
 
+                    # Lectura pedida antes de consultar la ficha: en vez de
+                    # rechazarla y gastar otra llamada en que el modelo pida
+                    # la ficha, se trae la ficha en esta misma. Así llega con
+                    # su historia procesal y sus controles, y si no alcanza el
+                    # modelo vuelve a pedir la lectura. Banda del 17-oct: H18
+                    # gastaba 2 de sus 6 llamadas en rechazos y en una
+                    # repetición se quedó sin llamadas.
+                    nombre, argumentos, nota_ficha = tc.name, tc.arguments, None
+                    if nombre == "leer_resolucion":
+                        exp = str((tc.arguments or {}).get("expediente") or "").strip()
+                        if exp and self.resoluciones is not None and not self._consulto_documento(state, exp):
+                            nombre, argumentos = "buscar_expedientes", {"id_expediente": exp}
+                            nota_ficha = (
+                                f"Pediste leer {exp} completo; antes va su ficha, que es "
+                                "esta. Contesta con ella si alcanza. Si no alcanza, vuelve "
+                                f"a llamar leer_resolucion con expediente={exp}.")
+                            state.lecturas_resolucion.append(
+                                {"documento": exp, "leida": False, "motivo": "ficha_primero"})
+
                     # Emitir evento de razonamiento
                     yield StreamEvent(
                         type="thinking",
                         data={
-                            "tool": tc.name,
-                            "description": self._describe_tool_call(tc.name, tc.arguments),
+                            "tool": nombre,
+                            "description": self._describe_tool_call(nombre, argumentos),
                             "step": tool_call_count,
                         },
                     )
 
                     # Ejecutar herramienta
                     if collector is not None:
-                        collector.begin_step("tool_call", tool=tc.name,
-                                             arguments=tc.arguments)
+                        collector.begin_step("tool_call", tool=nombre,
+                                             arguments=argumentos)
                     try:
-                        result = await self.tool_executors[tc.name](
-                            tc.arguments, collector, state
+                        result = await self.tool_executors[nombre](
+                            argumentos, collector, state
                         )
                         # La historia procesal se pega al documento al
                         # serializarlo; el mapa tiene que estar listo antes.
-                        if state is not None and tc.name in (
+                        if state is not None and nombre in (
                             "buscar_criterios", "buscar_expedientes"
                         ):
                             state.mapa_relaciones = await self._relaciones()
@@ -327,29 +346,29 @@ class NormaPlusAgent:
                         # sirve para diagnosticar nada. Se registra siempre
                         # el tipo.
                         detalle = f"{type(e).__name__}: {e}".rstrip(": ")
-                        logger.error(f"Error ejecutando {tc.name}: {detalle}")
+                        logger.error(f"Error ejecutando {nombre}: {detalle}")
                         result = {"error": detalle}
                         if collector is not None:
                             collector.end_step("error", error=detalle)
-                            collector.add_error(f"tool:{tc.name}", detalle)
+                            collector.add_error(f"tool:{nombre}", detalle)
 
                     # Rastrear resultados para citation_builder
-                    if tc.name == "buscar_criterios":
+                    if nombre == "buscar_criterios":
                         all_criterios_results.append(
                             [r.__dict__ if hasattr(r, "__dict__") else r for r in result]
                             if isinstance(result, list) else []
                         )
-                    elif tc.name == "buscar_expedientes":
+                    elif nombre == "buscar_expedientes":
                         all_expedientes_results.append(
                             [r.model_dump() if hasattr(r, "model_dump") else r for r in result]
                             if isinstance(result, list) else []
                         )
 
                     # Agregar al historial del LLM (formato depende del proveedor)
-                    result_str = json.dumps(
-                        self._serialize_tool_result(tc.name, result, state),
-                        ensure_ascii=False, default=str,
-                    )
+                    serializado = self._serialize_tool_result(nombre, result, state)
+                    if nota_ficha and isinstance(serializado, dict):
+                        serializado = {"LECTURA_PENDIENTE": nota_ficha, **serializado}
+                    result_str = json.dumps(serializado, ensure_ascii=False, default=str)
                     if provider == "anthropic":
                         resultados_anthropic.append((tc, result_str))
                     else:
@@ -2385,6 +2404,16 @@ class NormaPlusAgent:
 
         return serialized
 
+    @staticmethod
+    def _consulto_documento(state, expediente: str) -> bool:
+        """¿Ya se consultó en el turno la ficha o los criterios de este documento?"""
+        if state is None:
+            return True
+        return any(
+            case_link_de(d) == expediente
+            and not str(d.get("id") or "").startswith("lectura:")
+            for d in state.evidencia_acumulada if isinstance(d, dict))
+
     async def _exec_leer_resolucion(self, args: dict, collector=None, state=None) -> dict:
         """
         Lee una resolución completa con su propia llamada al modelo
@@ -2429,11 +2458,7 @@ class NormaPlusAgent:
         # 6-9 de 20 preguntas y perdía lo que sólo trae la ficha — la
         # historia procesal (H05 dejó de advertir la revisión 353/2024 en
         # 3 de 3) y los controles de requisitos.
-        if state is not None and not any(
-            case_link_de(d) == expediente
-            and not str(d.get("id") or "").startswith("lectura:")
-            for d in state.evidencia_acumulada if isinstance(d, dict)
-        ):
+        if state is not None and not self._consulto_documento(state, expediente):
             return sin_lectura(
                 "sin_consulta_previa",
                 f"Antes de leer {expediente} completo, consulta su ficha con "

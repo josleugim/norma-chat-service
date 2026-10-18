@@ -29,8 +29,8 @@ sea sobre lo que dice una resolución o sentencia concreta (sus razones, la \
 votación, lo que ordenó, lo que no consideró) y ni los criterios ni la ficha del \
 expediente lo contesten. Va DESPUÉS: primero consulta la ficha \
 (buscar_expedientes) o los criterios (buscar_criterios) de ese documento, y \
-léelo completo sólo si con eso no alcanza; sin esa consulta previa la \
-herramienta no lo lee. No la uses para datos de la ficha (fechas, multas, \
+léelo completo sólo si con eso no alcanza. Si la pides sin esa consulta, \
+te devuelve primero la ficha del documento. No la uses para datos de la ficha (fechas, multas, \
 sentido) ni para preguntas sobre el acervo en general. Máximo 3 por consulta.
 
 ## ESTRATEGIA DE RAZONAMIENTO
