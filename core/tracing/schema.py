@@ -182,6 +182,8 @@ class Decisions(BaseModel):
     # Resoluciones leídas completas: documento, costo, citas verificadas y
     # oraciones retiradas por cita no verificada.
     lecturas_resolucion: list[dict[str, Any]] = Field(default_factory=list)
+    # Concepto contestado sin buscar: se pidió una búsqueda antes de responder.
+    busqueda_forzada: Optional[bool] = None
     # I5: ¿el pasaje sostiene la afirmación? En evaluación, no bloquea.
     verificacion_semantica: Optional[dict[str, Any]] = None
     # El payload exacto de evidencia que recibió el modelo. Sin esto, una

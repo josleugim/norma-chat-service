@@ -363,6 +363,27 @@ class NormaPlusAgent:
                     messages = self._append_turno_anthropic(
                         messages, response, resultados_anthropic)
             else:
+                # Una pregunta de concepto contestada sin buscar nada sale de la
+                # memoria del modelo, y ahí se le atribuye a la COFECE lo que
+                # no consta en el acervo ("la COFECE ha seguido este enfoque",
+                # 3 de 3 en master el 17-oct). Se le pide buscar una vez antes
+                # de contestar. No aplica si ya buscó, si tiene evidencia de
+                # turnos anteriores, ni a lo que el ruteo no ve como concepto
+                # ("hola", preguntas fuera del tema).
+                if (tool_call_count == 0 and not state.busqueda_forzada
+                        and state.query_type == "semantic_retrieval"
+                        and not state.evidencia_en_cache):
+                    state.busqueda_forzada = True
+                    if collector is not None:
+                        collector.set_decision("busqueda_forzada", True, "derived")
+                    messages = self._append_user_message(
+                        messages, provider=provider, text=
+                        "Antes de responder, busca en el acervo con "
+                        "buscar_criterios: la respuesta tiene que apoyarse en "
+                        "criterios de Norma+. Lo que agregues de conocimiento "
+                        "general márcalo como [CONOCIMIENTO GENERAL] y no lo "
+                        "atribuyas a la COFECE ni a otra autoridad.")
+                    continue
                 # El LLM tiene la respuesta final — hacer streaming
                 if response.content:
                     # Si ya generó texto sin tools, emitirlo
@@ -786,6 +807,8 @@ class NormaPlusAgent:
         # Obtener evidencia cacheada relevante
         cached_criterios, cached_expedientes, used_cache = \
             self.evidence_cache.select(session_id, user_query)
+        if state is not None:
+            state.evidencia_en_cache = bool(used_cache)
 
         # Construir contexto del cache si hay evidencia
         cache_context = ""
