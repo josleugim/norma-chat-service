@@ -205,10 +205,12 @@ def _agente(cliente, universo=None):
     return ag
 
 
-def _estado(salida):
+def _estado(salida, consultados=("VCN-005-2024", "X")):
+    """Estado con la ficha de esos documentos ya consultada en el turno."""
     from agent.turn_state import TurnState
     st = TurnState()
     st.llm = (_Adaptador(salida), "gpt-4.1")
+    st.acumular_evidencia([{"caseLink": c} for c in consultados])
     return st
 
 
@@ -230,6 +232,7 @@ class TestHerramienta:
         # El costo del lector cuenta en el turno, y la evidencia queda acumulada.
         assert st.tokens_lector_entrada == 100_000
         assert any(d.get("ref") == "E1" for d in st.evidencia_acumulada)
+        assert st.lecturas_resolucion[0]["leida"]
         lec = st.lecturas_resolucion[0]
         assert lec["citas_verificadas"] == 1 and lec["oraciones_retiradas"] == ["Hubo multa [2]."]
 
@@ -274,3 +277,21 @@ class TestMarcadorConPagina:
         from core.validacion_salida import normalizar_marcadores
         texto, n = normalizar_marcadores("dijo X[E1, p. 15]. Y [ E2, pp. 183-184].")
         assert texto == "dijo X[E1] (p. 15). Y [E2] (pp. 183-184)." and n == 2
+
+
+class TestOrden:
+    def test_sin_ficha_ni_criterios_del_documento_no_se_lee(self, resolucion):
+        cli = _Clientes(resolucion)
+        st = _estado(_SALIDA_BUENA, consultados=("OTRO-001-2020",))
+        r = asyncio.run(_agente(cli)._exec_leer_resolucion(
+            {"expediente": "VCN-005-2024", "pregunta": "¿?"}, None, st))
+        assert not r["leida"] and "buscar_expedientes" in r["motivo"]
+        assert cli.pedidas == [] and st.llm[0].mensajes is None
+
+    def test_una_lectura_previa_no_cuenta_como_consulta(self, resolucion):
+        cli = _Clientes(resolucion)
+        st = _estado(_SALIDA_BUENA, consultados=())
+        st.acumular_evidencia([{"caseLink": "VCN-005-2024", "id": "lectura:VCN-005-2024"}])
+        r = asyncio.run(_agente(cli)._exec_leer_resolucion(
+            {"expediente": "VCN-005-2024", "pregunta": "¿?"}, None, st))
+        assert not r["leida"]

@@ -2400,6 +2400,24 @@ class NormaPlusAgent:
                 f"{expediente} no está en el acervo consultable. Si es una errata, "
                 "busca el identificador exacto con buscar_expedientes.")
 
+        # Primero la ficha o los criterios; la lectura es para cuando no
+        # alcanzan (así lo pidió COFECE el 5-oct). Medido en la banda del
+        # 17-oct: sin este orden el agente saltaba directo a la lectura en
+        # 6-9 de 20 preguntas y perdía lo que sólo trae la ficha — la
+        # historia procesal (H05 dejó de advertir la revisión 353/2024 en
+        # 3 de 3) y los controles de requisitos.
+        if state is not None and not any(
+            case_link_de(d) == expediente
+            and not str(d.get("id") or "").startswith("lectura:")
+            for d in state.evidencia_acumulada if isinstance(d, dict)
+        ):
+            return sin_lectura(
+                "sin_consulta_previa",
+                f"Antes de leer {expediente} completo, consulta su ficha con "
+                f"buscar_expedientes (id_expediente={expediente}) o sus criterios "
+                f"con buscar_criterios (en_expedientes=[{expediente}]). Si con eso "
+                "no alcanza para contestar, vuelve a llamar esta herramienta.")
+
         if state is not None:
             state.peticiones_http += 1
         resolucion = await self.resoluciones.obtener(expediente)

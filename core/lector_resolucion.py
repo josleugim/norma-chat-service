@@ -44,7 +44,12 @@ Reglas:
 4. Distingue quién habla: la mayoría del Pleno o del órgano, un voto particular
    o concurrente, los argumentos de las partes, o un acto citado. No atribuyas
    a la autoridad lo que dice una parte o un voto.
-5. No menciones marcas de página, fragmentos ni campos: el usuario sólo ve la
+5. Conserva las condiciones, plazos y salvedades de lo que el documento
+   ordena o decide. Una orden "una vez que cause ejecutoria" no dice que la
+   ejecutoria se haya dado; que una parte quede "intocada" no la vuelve firme.
+   No presentes como ya ocurrido o definitivo lo que el documento sujeta a
+   una condición.
+6. No menciones marcas de página, fragmentos ni campos: el usuario sólo ve la
    respuesta y las citas.
 
 Formato de salida, exactamente así:
