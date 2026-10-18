@@ -38,6 +38,7 @@ from core.validacion_salida import validar_borrador, normalizar_marcadores
 from core.enlaces_fuentes import enlazar_fuentes, retirar_centinelas
 from core.estructura_interna import expuestos as estructura_expuesta
 from core.fuga_instrucciones import reproduce_instrucciones, RESPUESTA_BLOQUEADA
+from core.personas import CAMPOS_PERSONA, filtrar_por_persona
 from core.relaciones import completar_historia_procesal, resumen_historia_procesal
 from core.aggregation import autoridad_de_la_pregunta
 from core.voz import clasificar_voz, etiqueta as etiqueta_voz, VOTO_PARTICULAR, NO_IDENTIFICADA
@@ -1738,6 +1739,8 @@ class NormaPlusAgent:
         locales = self._filtrar_local(
             [r.para_prompt() for r in registros], args, state
         )
+        if args.get("persona"):
+            locales = filtrar_por_persona(locales, str(args["persona"]))
 
         # Sin `meta.total`, "exacto" solo se puede afirmar cuando la API
         # devolvió menos filas que el tope pedido. Si topó, el universo pudo
@@ -2297,8 +2300,45 @@ class NormaPlusAgent:
         # así que ahí sí hay que traer de más para no quedarse corto. Las
         # multas ya las intersecta el servidor con `agentFines`.
         fetch_limit = limit * 3 if args.get("sentido_resolucion") else limit
+        persona = str(args.get("persona") or "").strip()
 
-        if prefijo:
+        if persona:
+            # La API no busca en los campos de personas (quién resolvió,
+            # votó o recurrió), así que se trae el universo que cumple los
+            # demás filtros y se filtra aquí. Cabe en una petición.
+            if prefijo:
+                registros = await self.estadistica.fetch_by_prefix(
+                    prefijo, filters=filters, collector=collector)
+            else:
+                registros, _, _ = await self.estadistica.fetch_universe(
+                    text_search=text_search,
+                    filters=filters if filters else None,
+                    collector=collector)
+            completo = not self.estadistica.last_truncado
+            serialized = self._filtrar_local(
+                [r.para_prompt() for r in registros], args, state)
+            antes = len(serialized)
+            serialized = filtrar_por_persona(serialized, persona)
+            encontrados = len(serialized)
+            state.filtros_aplicados.append({
+                "filtro": "persona",
+                "campos": list(CAMPOS_PERSONA),
+                "valor_solicitado": persona,
+                "universo_antes": antes,
+                "universo_despues": encontrados,
+                "descartados": antes - encontrados,
+            })
+            if not exhaustivo and encontrados > limit:
+                serialized = serialized[:limit]
+            state.universo_completo = completo and len(serialized) == encontrados
+            state.universo_tamano = encontrados
+            if collector is not None:
+                collector.set_decision("busqueda_persona", {
+                    "persona": persona, "encontrados": encontrados,
+                    "devueltos": len(serialized), "universo_completo": completo,
+                }, "derived")
+            state.persona_sin_coincidencias = persona if not serialized else None
+        elif prefijo:
             # Con AND del servidor, el prefijo viaja junto con los demás
             # filtros en vez de traerse el universo entero y acotar aquí.
             registros = await self.estadistica.fetch_by_prefix(
@@ -2348,7 +2388,7 @@ class NormaPlusAgent:
         # linaje de filtros que pidió COFECE. En q09 "fideicomiso + COFECE"
         # devolvió expedientes de CFC presentados como si fueran de COFECE
         # porque esta ruta no pasaba por aquí.
-        if not prefijo and filters:
+        if not prefijo and filters and not persona:
             serialized = self._filtrar_local(serialized, args, state)
 
         # Verificación de multas. Desde sep-2026 el servidor ya intersecta con
@@ -3477,6 +3517,19 @@ class NormaPlusAgent:
                             "herramientas, campos ni tipos de búsqueda."
                         ),
                     }
+
+            # Que nadie nombre a la persona no prueba que no haya participado:
+            # quién resolvió no está capturado en todos los expedientes (41 de
+            # 51 judiciales al 18-oct-2026).
+            if (state is not None and tool_name == "buscar_expedientes"
+                    and not result and getattr(state, "persona_sin_coincidencias", None)):
+                payload["PERSONA_SIN_COINCIDENCIAS"] = (
+                    f"Ningún expediente nombra a '{state.persona_sin_coincidencias}' "
+                    "entre quienes resolvieron, votaron o recurrieron. Ese dato no "
+                    "está capturado en todos los expedientes, así que no prueba que "
+                    "no haya participado en ninguno: dilo así. Revisa también si el "
+                    "nombre está bien escrito."
+                )
 
             # Suficiencia: si lo recuperado no responde la pregunta, decirlo.
             # Una segunda búsqueda focalizada; si tampoco alcanza, abstenerse.
