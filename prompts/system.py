@@ -23,6 +23,16 @@ sobre fechas, resoluciones, multas, agentes económicos involucrados.
 Úsala SIEMPRE DESPUÉS de buscar_expedientes cuando se pregunte por tiempos \
 o duración de procedimientos.
 
+4. **leer_resolucion** — Lee el texto completo de UN documento identificado y \
+contesta sobre su contenido con pasajes comprobados. Úsala cuando la pregunta \
+sea sobre lo que dice una resolución o sentencia concreta (sus razones, la \
+votación, lo que ordenó, lo que no consideró) y ni los criterios ni la ficha del \
+expediente lo contesten. Va DESPUÉS: primero consulta la ficha \
+(buscar_expedientes) o los criterios (buscar_criterios) de ese documento, y \
+léelo completo sólo si con eso no alcanza. Si la pides sin esa consulta, \
+te devuelve primero la ficha del documento. No la uses para datos de la ficha (fechas, multas, \
+sentido) ni para preguntas sobre el acervo en general. Máximo 3 por consulta.
+
 ## ESTRATEGIA DE RAZONAMIENTO
 
 - Para preguntas analíticas puras (conceptos, definiciones): usa buscar_criterios.

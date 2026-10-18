@@ -174,6 +174,21 @@ class TurnState:
     # `caseLink`. COFECE lo señaló en §1.7 y el punto ciego lo introdujimos
     # nosotros al hacer la búsqueda por documento.
     peticiones_http: int = 0
+
+    # Lectura de resoluciones completas. El lector hace su propia llamada al
+    # modelo; `llm` es el (adaptador, modelo) del turno y sus tokens se suman
+    # al costo del turno, que si no saldría subestimado por ~90k tokens.
+    llm: Any = None
+
+    # Pregunta de concepto contestada sin buscar: se pide una búsqueda, una vez.
+    busqueda_forzada: bool = False
+
+    # Actuaciones posteriores que agregó el código porque la respuesta no las citó.
+    historia_completada: dict | None = None
+    evidencia_en_cache: bool = False
+    lecturas_resolucion: list[dict] = field(default_factory=list)
+    tokens_lector_entrada: int = 0
+    tokens_lector_salida: int = 0
     # Ampliación dentro del precedente mejor rankeado: una vez por turno.
     amplio_precedente: bool = False
     ampliacion_precedente: list[dict] = field(default_factory=list)

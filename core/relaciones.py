@@ -361,7 +361,8 @@ class MapaDeRelaciones:
         return {"documentos": len(self.registros), "enlaces": dict(c)}
 
 
-def resumen_historia_procesal(entradas: list[dict], texto: str, registry) -> dict | None:
+def resumen_historia_procesal(entradas: list[dict], texto: str, registry,
+                              agregadas_por_codigo: list[dict] | None = None) -> dict | None:
     """
     Para la traza: de los documentos que la respuesta usó, qué actuaciones
     posteriores tenía el modelo a la vista y cuáles no mencionó.
@@ -376,6 +377,11 @@ def resumen_historia_procesal(entradas: list[dict], texto: str, registry) -> dic
     if any(e.get("estado") == "no_consultada" for e in entradas):
         return {"estado": "no_consultada"}
     texto = texto or ""
+    # Lo que agregó `completar_historia_procesal` no cuenta como mencionado:
+    # el indicador mide lo que hizo el modelo.
+    for a in agregadas_por_codigo or []:
+        texto = texto.replace(f"[{a['ref']}]", "")
+        texto = re.sub(rf"(?<![\w-]){re.escape(a['actuacion'])}(?![\w-])", "", texto)
     citados = set(re.findall(r"\[([CE]\d+)\]", texto))
     citados_cl = {registry.case_link_of(m) for m in citados} if registry else set()
 
@@ -407,3 +413,62 @@ def resumen_historia_procesal(entradas: list[dict], texto: str, registry) -> dic
         "documentos_sin_aviso": sin_aviso,
         "posteriores_no_mencionados": no_mencionados,
     }
+
+
+_ENCABEZADO_FUENTES = __import__("re").compile(r"^\W*FUENTES\W*$", __import__("re").M | __import__("re").I)
+
+
+_MAX_RENGLONES_HISTORIA = 5
+
+
+def completar_historia_procesal(entradas: list[dict], texto: str, registry) -> tuple[str, list[dict]]:
+    """
+    Si la respuesta usa un documento con actuaciones posteriores y no cita
+    alguna, se agrega una nota con esas actuaciones y su marcador.
+
+    Por construcción y no por prompt: desde que existe la lectura de
+    resoluciones, la regla 9 se cumplía menos (H18 citó sus revisiones 7 de
+    15 veces, contra 8 de 9 antes; 17-oct). La nota sólo dice qué actuación
+    hay, de qué tipo y cuándo; no interpreta su efecto, que es justo lo que
+    la regla 9 le prohíbe afirmar al modelo sin respaldo.
+
+    Devuelve el texto y la lista de lo agregado, para la traza: el indicador
+    tiene que seguir midiendo lo que omitió el modelo, no lo que tapó el código.
+    """
+    resumen = resumen_historia_procesal(entradas, texto, registry) or {}
+    # Sólo el caso inequívoco: un documento usado cuya historia la respuesta
+    # no menciona en absoluto. Si ya advirtió alguna actuación, el resto puede
+    # no ser pertinente —un amparo negado no cambia la sanción— y agregarlo
+    # todo convierte la respuesta en un listado: H01 recibió 14 renglones en
+    # la primera versión (17-oct).
+    sin_aviso = set(resumen.get("documentos_sin_aviso") or [])
+    faltan = [f for f in resumen.get("posteriores_no_mencionados") or []
+              if f["documento"] in sin_aviso]
+    if not faltan:
+        return texto, []
+    detalle = {}
+    for e in entradas:
+        for p in e.get("posteriores") or []:
+            detalle.setdefault((e.get("documento"), p["expediente"]), p)
+    renglones, agregadas, vistos = [], [], set()
+    for f in faltan:
+        p = detalle.get((f["documento"], f["actuacion"]))
+        if not p or not p.get("ref") or p["expediente"] in vistos:
+            continue
+        vistos.add(p["expediente"])
+        partes = [x for x in (p.get("tipo"), p.get("fecha")) if x]
+        extra = f" ({', '.join(partes)})" if partes else ""
+        renglones.append(f"- {p['expediente']}{extra}, posterior a {f['documento']} [{p['ref']}]")
+        agregadas.append({"documento": f["documento"], "actuacion": p["expediente"], "ref": p["ref"]})
+    if not renglones:
+        return texto, []
+    if len(renglones) > _MAX_RENGLONES_HISTORIA:
+        resto = len(renglones) - _MAX_RENGLONES_HISTORIA
+        renglones = renglones[:_MAX_RENGLONES_HISTORIA] + [
+            f"- y {resto} actuación(es) más; pide la historia procesal completa si la necesitas"]
+    nota = ("**Actuaciones posteriores.** Estos documentos tienen actuaciones "
+            "posteriores que pueden modificar lo dicho:\n" + "\n".join(renglones))
+    m = _ENCABEZADO_FUENTES.search(texto)
+    if m:
+        return texto[:m.start()].rstrip() + "\n\n" + nota + "\n\n" + texto[m.start():], agregadas
+    return texto.rstrip() + "\n\n" + nota, agregadas

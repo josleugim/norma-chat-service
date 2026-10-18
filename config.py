@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     # Verificación semántica (I5), apagada por default: agrega una llamada
     # al modelo por turno y arranca en evaluación, sin bloquear nada.
     agent_verificacion_semantica: bool = False
+    # Lectura de la resolución completa (17-oct). Cada lectura es una llamada
+    # aparte al modelo con el documento entero (~90k tokens, ~0.18 USD con
+    # gpt-4.1 la primera vez y ~0.05 con caché), así que tiene tope por turno.
+    agent_leer_resolucion: bool = True
+    agent_max_lecturas_resolucion: int = 3
     # Catálogo de acuerdos de suspensión para los avisos del §8.
     avisos_path: str = "data/calendario"
     agent_default_temperature: float = 0.3

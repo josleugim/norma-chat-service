@@ -6,6 +6,7 @@ Cada tool call emite un evento SSE de razonamiento para el frontend.
 """
 import json
 import logging
+import re
 from typing import AsyncIterator, Optional
 
 from llm.registry import LLMRegistry
@@ -37,7 +38,7 @@ from core.validacion_salida import validar_borrador, normalizar_marcadores
 from core.enlaces_fuentes import enlazar_fuentes, retirar_centinelas
 from core.estructura_interna import expuestos as estructura_expuesta
 from core.fuga_instrucciones import reproduce_instrucciones, RESPUESTA_BLOQUEADA
-from core.relaciones import resumen_historia_procesal
+from core.relaciones import completar_historia_procesal, resumen_historia_procesal
 from core.aggregation import autoridad_de_la_pregunta
 from core.voz import clasificar_voz, etiqueta as etiqueta_voz, VOTO_PARTICULAR, NO_IDENTIFICADA
 from models.schemas import (
@@ -95,8 +96,14 @@ class NormaPlusAgent:
         trace_sink=None,
         manifest_store=None,
         settings=None,
+        resolucion_client=None,
+        max_lecturas_resolucion: int = 3,
     ):
         self.llm_registry = llm_registry
+        # Lectura de la resolución completa. Opcional: sin cliente, la
+        # herramienta responde que no está disponible en vez de fallar.
+        self.resoluciones = resolucion_client
+        self.max_lecturas_resolucion = max_lecturas_resolucion
         self.criterios = criterios_client
         self.estadistica = estadistica_client
         self.temporal = temporal_analyzer
@@ -141,6 +148,7 @@ class NormaPlusAgent:
             "contar_expedientes": self._exec_contar_expedientes,
             "agregar_expedientes": self._exec_agregar_expedientes,
             "calcular_plazos": self._exec_calcular_plazos,
+            "leer_resolucion": self._exec_leer_resolucion,
         }
 
     async def run(
@@ -206,6 +214,7 @@ class NormaPlusAgent:
         # pisarían.
         state = TurnState()
         state.anclas_criterio = self.evidence_cache.anclas(session_id)
+        state.llm = (adapter, model)
 
         # Routing: clasificar la consulta antes de buscar, para poder exigir
         # después que la estrategia haya correspondido al tipo de pregunta.
@@ -285,27 +294,46 @@ class NormaPlusAgent:
                 for tc in response.tool_calls:
                     tool_call_count += 1
 
+                    # Lectura pedida antes de consultar la ficha: en vez de
+                    # rechazarla y gastar otra llamada en que el modelo pida
+                    # la ficha, se trae la ficha en esta misma. Así llega con
+                    # su historia procesal y sus controles, y si no alcanza el
+                    # modelo vuelve a pedir la lectura. Banda del 17-oct: H18
+                    # gastaba 2 de sus 6 llamadas en rechazos y en una
+                    # repetición se quedó sin llamadas.
+                    nombre, argumentos, nota_ficha = tc.name, tc.arguments, None
+                    if nombre == "leer_resolucion":
+                        exp = str((tc.arguments or {}).get("expediente") or "").strip()
+                        if exp and self.resoluciones is not None and not self._consulto_documento(state, exp):
+                            nombre, argumentos = "buscar_expedientes", {"id_expediente": exp}
+                            nota_ficha = (
+                                f"Pediste leer {exp} completo; antes va su ficha, que es "
+                                "esta. Contesta con ella si alcanza. Si no alcanza, vuelve "
+                                f"a llamar leer_resolucion con expediente={exp}.")
+                            state.lecturas_resolucion.append(
+                                {"documento": exp, "leida": False, "motivo": "ficha_primero"})
+
                     # Emitir evento de razonamiento
                     yield StreamEvent(
                         type="thinking",
                         data={
-                            "tool": tc.name,
-                            "description": self._describe_tool_call(tc.name, tc.arguments),
+                            "tool": nombre,
+                            "description": self._describe_tool_call(nombre, argumentos),
                             "step": tool_call_count,
                         },
                     )
 
                     # Ejecutar herramienta
                     if collector is not None:
-                        collector.begin_step("tool_call", tool=tc.name,
-                                             arguments=tc.arguments)
+                        collector.begin_step("tool_call", tool=nombre,
+                                             arguments=argumentos)
                     try:
-                        result = await self.tool_executors[tc.name](
-                            tc.arguments, collector, state
+                        result = await self.tool_executors[nombre](
+                            argumentos, collector, state
                         )
                         # La historia procesal se pega al documento al
                         # serializarlo; el mapa tiene que estar listo antes.
-                        if state is not None and tc.name in (
+                        if state is not None and nombre in (
                             "buscar_criterios", "buscar_expedientes"
                         ):
                             state.mapa_relaciones = await self._relaciones()
@@ -318,29 +346,29 @@ class NormaPlusAgent:
                         # sirve para diagnosticar nada. Se registra siempre
                         # el tipo.
                         detalle = f"{type(e).__name__}: {e}".rstrip(": ")
-                        logger.error(f"Error ejecutando {tc.name}: {detalle}")
+                        logger.error(f"Error ejecutando {nombre}: {detalle}")
                         result = {"error": detalle}
                         if collector is not None:
                             collector.end_step("error", error=detalle)
-                            collector.add_error(f"tool:{tc.name}", detalle)
+                            collector.add_error(f"tool:{nombre}", detalle)
 
                     # Rastrear resultados para citation_builder
-                    if tc.name == "buscar_criterios":
+                    if nombre == "buscar_criterios":
                         all_criterios_results.append(
                             [r.__dict__ if hasattr(r, "__dict__") else r for r in result]
                             if isinstance(result, list) else []
                         )
-                    elif tc.name == "buscar_expedientes":
+                    elif nombre == "buscar_expedientes":
                         all_expedientes_results.append(
                             [r.model_dump() if hasattr(r, "model_dump") else r for r in result]
                             if isinstance(result, list) else []
                         )
 
                     # Agregar al historial del LLM (formato depende del proveedor)
-                    result_str = json.dumps(
-                        self._serialize_tool_result(tc.name, result, state),
-                        ensure_ascii=False, default=str,
-                    )
+                    serializado = self._serialize_tool_result(nombre, result, state)
+                    if nota_ficha and isinstance(serializado, dict):
+                        serializado = {"LECTURA_PENDIENTE": nota_ficha, **serializado}
+                    result_str = json.dumps(serializado, ensure_ascii=False, default=str)
                     if provider == "anthropic":
                         resultados_anthropic.append((tc, result_str))
                     else:
@@ -354,6 +382,27 @@ class NormaPlusAgent:
                     messages = self._append_turno_anthropic(
                         messages, response, resultados_anthropic)
             else:
+                # Una pregunta de concepto contestada sin buscar nada sale de la
+                # memoria del modelo, y ahí se le atribuye a la COFECE lo que
+                # no consta en el acervo ("la COFECE ha seguido este enfoque",
+                # 3 de 3 en master el 17-oct). Se le pide buscar una vez antes
+                # de contestar. No aplica si ya buscó, si tiene evidencia de
+                # turnos anteriores, ni a lo que el ruteo no ve como concepto
+                # ("hola", preguntas fuera del tema).
+                if (tool_call_count == 0 and not state.busqueda_forzada
+                        and state.query_type == "semantic_retrieval"
+                        and not state.evidencia_en_cache):
+                    state.busqueda_forzada = True
+                    if collector is not None:
+                        collector.set_decision("busqueda_forzada", True, "derived")
+                    messages = self._append_user_message(
+                        messages, provider=provider, text=
+                        "Antes de responder, busca en el acervo con "
+                        "buscar_criterios: la respuesta tiene que apoyarse en "
+                        "criterios de Norma+. Lo que agregues de conocimiento "
+                        "general márcalo como [CONOCIMIENTO GENERAL] y no lo "
+                        "atribuyas a la COFECE ni a otra autoridad.")
+                    continue
                 # El LLM tiene la respuesta final — hacer streaming
                 if response.content:
                     # Si ya generó texto sin tools, emitirlo
@@ -580,6 +629,10 @@ class NormaPlusAgent:
                 },
                 "derived")
             collector.set_decision(
+                "lecturas_resolucion", state.lecturas_resolucion, "derived")
+            collector.set_decision(
+                "historia_completada", state.historia_completada, "derived")
+            collector.set_decision(
                 "cobertura_por_documento", state.cobertura_por_documento, "derived")
             collector.set_decision(
                 "reparacion_salida", state.reparacion_salida, "derived")
@@ -594,7 +647,9 @@ class NormaPlusAgent:
                 "registros_resumidos", state.registros_resumidos, "derived")
             collector.set_decision(
                 "historia_procesal",
-                resumen_historia_procesal(state.historia_procesal, final_text, state.registry),
+                resumen_historia_procesal(
+                    state.historia_procesal, final_text, state.registry,
+                    agregadas_por_codigo=(state.historia_completada or {}).get("agregadas")),
                 "derived")
             # ¿Alguna ruta vino vacía y su complementaria nunca se ejerció?
             # Es objetivo y no depende de leer el texto: si la respuesta afirma
@@ -646,6 +701,11 @@ class NormaPlusAgent:
             except Exception as e:
                 logger.warning(f"Error generando título: {e}")
                 session_title = user_query[:60]
+
+        # El lector de resoluciones hace su propia llamada al modelo: sin esto
+        # el costo del turno saldría subestimado en ~90k tokens por lectura.
+        total_input_tokens += state.tokens_lector_entrada
+        total_output_tokens += state.tokens_lector_salida
 
         # ── Done ────────────────────────────────────────────
         # El trace_id viaja al frontend para que un reporte de "esta respuesta
@@ -770,6 +830,8 @@ class NormaPlusAgent:
         # Obtener evidencia cacheada relevante
         cached_criterios, cached_expedientes, used_cache = \
             self.evidence_cache.select(session_id, user_query)
+        if state is not None:
+            state.evidencia_en_cache = bool(used_cache)
 
         # Construir contexto del cache si hay evidencia
         cache_context = ""
@@ -1108,6 +1170,14 @@ class NormaPlusAgent:
         # la respuesta haya dicho.
         if state is not None:
             state.estructura_interna_expuesta = estructura_expuesta(revision["texto"])
+
+        # Actuaciones posteriores que la respuesta no citó: se agregan con su
+        # marcador. Antes de enlazar, para que la nota salga enlazada.
+        if state is not None and getattr(state, "historia_procesal", None):
+            revision["texto"], agregadas = completar_historia_procesal(
+                state.historia_procesal, revision["texto"], state.registry)
+            if agregadas:
+                state.historia_completada = {"ruta": ruta, "agregadas": agregadas}
 
         # Los enlaces van al final, sobre el texto ya reparado y verificado:
         # el revisor juzga lo que dice la respuesta, no sus URLs, y un
@@ -2346,6 +2416,136 @@ class NormaPlusAgent:
 
         return serialized
 
+    @staticmethod
+    def _consulto_documento(state, expediente: str) -> bool:
+        """¿Ya se consultó en el turno la ficha o los criterios de este documento?"""
+        if state is None:
+            return True
+        return any(
+            case_link_de(d) == expediente
+            and not str(d.get("id") or "").startswith("lectura:")
+            for d in state.evidencia_acumulada if isinstance(d, dict))
+
+    async def _exec_leer_resolucion(self, args: dict, collector=None, state=None) -> dict:
+        """
+        Lee una resolución completa con su propia llamada al modelo
+        (`core.lector_resolucion`) y devuelve la lectura con sus pasajes
+        verificados contra el texto.
+
+        Va como llamada aparte, no como texto en el contexto del agente: el
+        ciclo de herramientas reenvía todo el historial en cada vuelta, y
+        ~90k tokens de resolución multiplicados por las vueltas restantes
+        costarían varias veces la lectura.
+        """
+        from core.lector_resolucion import leer as leer_resolucion
+        from retrieval.resolucion_client import ResolucionDigital
+
+        expediente = str(args.get("expediente") or "").strip()
+        pregunta = str(args.get("pregunta") or "").strip() or (state.query if state else "")
+        lecturas = state.lecturas_resolucion if state is not None else []
+
+        def sin_lectura(motivo: str, detalle: str) -> dict:
+            lecturas.append({"documento": expediente, "leida": False, "motivo": motivo})
+            return {"expediente": expediente, "leida": False, "motivo": detalle}
+
+        if not expediente:
+            return sin_lectura("sin_expediente", "Falta el identificador del documento.")
+        if self.resoluciones is None:
+            return sin_lectura("no_configurado",
+                               "La lectura de resoluciones completas no está disponible.")
+        if sum(1 for x in lecturas if x.get("leida")) >= self.max_lecturas_resolucion:
+            return sin_lectura(
+                "tope", f"Ya se leyeron {self.max_lecturas_resolucion} documentos en esta "
+                        "consulta; contesta con lo que tienes y dilo.")
+        universo = getattr(self.estadistica, "universo", None)
+        if universo is not None and expediente not in universo.case_links:
+            return sin_lectura(
+                "fuera_del_universo",
+                f"{expediente} no está en el acervo consultable. Si es una errata, "
+                "busca el identificador exacto con buscar_expedientes.")
+
+        # Primero la ficha o los criterios; la lectura es para cuando no
+        # alcanzan (así lo pidió COFECE el 5-oct). Medido en la banda del
+        # 17-oct: sin este orden el agente saltaba directo a la lectura en
+        # 6-9 de 20 preguntas y perdía lo que sólo trae la ficha — la
+        # historia procesal (H05 dejó de advertir la revisión 353/2024 en
+        # 3 de 3) y los controles de requisitos.
+        if state is not None and not self._consulto_documento(state, expediente):
+            return sin_lectura(
+                "sin_consulta_previa",
+                f"Antes de leer {expediente} completo, consulta su ficha con "
+                f"buscar_expedientes (id_expediente={expediente}) o sus criterios "
+                f"con buscar_criterios (en_expedientes=[{expediente}]). Si con eso "
+                "no alcanza para contestar, vuelve a llamar esta herramienta.")
+
+        if state is not None:
+            state.peticiones_http += 1
+        resolucion = await self.resoluciones.obtener(expediente)
+        adapter, model = state.llm if state is not None and state.llm else (None, None)
+        lectura = await leer_resolucion(adapter, model, resolucion, pregunta)
+        if state is not None:
+            state.tokens_lector_entrada += lectura.tokens_entrada
+            state.tokens_lector_salida += lectura.tokens_salida
+
+        verificadas = [c for c in lectura.citas if c.get("verificada")]
+        paginas = {c["n"]: c.get("pagina_encontrada", c.get("pagina")) for c in verificadas}
+        # Las marcas [n] del lector se vuelven páginas: el agente cita con
+        # sus propios marcadores y dos numeraciones en el mismo texto
+        # terminarían cruzándose.
+        respuesta = re.sub(
+            r"\[(\d+)\]",
+            lambda m: f"(p. {paginas[int(m.group(1))]})" if int(m.group(1)) in paginas else "",
+            lectura.respuesta)
+
+        ref = ""
+        if state is not None and resolucion.disponible:
+            ref = state.registry.assign({"caseLink": expediente}, "E")
+            pasajes = "\n".join(f"p. {paginas[c['n']]}: {c['fragmento']}" for c in verificadas)
+            if ref and pasajes:
+                state.acumular_evidencia([{
+                    "caseLink": expediente, "id": f"lectura:{expediente}",
+                    "ref": ref, "content": pasajes}])
+
+        lecturas.append({
+            "documento": expediente, "leida": resolucion.disponible,
+            "motivo": None if resolucion.disponible else "no_disponible",
+            "pregunta": pregunta, "resolucion": resolucion.resumen(),
+            "citas_total": len(lectura.citas), "citas_verificadas": len(verificadas),
+            "oraciones_retiradas": lectura.retiradas, "no_consta": lectura.no_consta,
+            "tokens_entrada": lectura.tokens_entrada, "tokens_salida": lectura.tokens_salida,
+            "costo_usd": lectura.costo_usd, "segundos": lectura.segundos,
+            "error": lectura.error,
+        })
+
+        if not resolucion.disponible:
+            return {
+                "expediente": expediente, "leida": False,
+                "motivo": resolucion.motivo,
+                "instruccion": (
+                    "No digas que el documento no existe ni que no contiene "
+                    "algo: sólo que su texto no está disponible para leerlo."),
+            }
+        return {
+            "ref": ref,
+            "expediente": expediente,
+            "tipo_fuente": clasificar_fuente(expediente),
+            "leida": True,
+            "paginas": resolucion.numero_paginas,
+            "lectura": respuesta,
+            "pasajes_verificados": [
+                {"pagina": paginas[c["n"]], "texto": c["fragmento"]} for c in verificadas],
+            "no_consta": lectura.no_consta,
+            "partes_testadas": resolucion.testados > 0,
+            "instruccion": (
+                "Esta lectura se hizo sobre el texto completo del documento y "
+                "sus pasajes se comprobaron palabra por palabra. Cita el "
+                f"documento con su marcador y la página afuera del corchete: "
+                f"[{ref}] (p. 15). No agregues "
+                "afirmaciones sobre el documento que no estén en la lectura. "
+                "Si no_consta es true, di que el documento no lo contiene; no "
+                "lo completes con otras fuentes atribuyéndoselo."),
+        }
+
     async def _exec_calcular_plazos(self, args: dict, collector=None, state=None) -> dict:
         # ── Modo A: dos fechas sueltas ──────────────────────
         # Antes no existía: ante "¿cuántos días hábiles entre X e Y?" el modelo
@@ -3030,7 +3230,8 @@ class NormaPlusAgent:
                 "documento": cl,
                 "posteriores": [
                     {"expediente": p["expediente"], "ref": p.get("ref"),
-                     "enlace": p["enlace"]} for p in posteriores],
+                     "enlace": p["enlace"], "tipo": p.get("tipo"),
+                     "fecha": p.get("fecha_de_la_resolucion")} for p in posteriores],
                 "deriva_de": [a.get("origen") for a in h.get("deriva_de", [])],
                 "no_mostradas": h.get("actuaciones_no_mostradas", []),
             })
@@ -3479,6 +3680,8 @@ class NormaPlusAgent:
             return f"Buscando criterios sobre: {args.get('query', '')}"
         elif name == "buscar_expedientes":
             return self._describe_expedientes_search(args)
+        elif name == "leer_resolucion":
+            return f"Leyendo la resolución {args.get('expediente', '')} completa..."
         elif name == "contar_expedientes":
             prefijo = args.get("prefijo_expediente")
             return f"Contando expedientes{f' {prefijo}' if prefijo else ''}..."
