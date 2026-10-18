@@ -163,3 +163,12 @@ class TestRetiro:
                                       "se impone a GI NEXXUS una multa")["verificada"]
         assert not verificar_cita(r, 128, "se impone a CI NEXXUS una multa ... "
                                           "se impone a BANCO INVEX una multa")["verificada"]
+
+
+class TestParser:
+    def test_rango_de_paginas_y_no_consta_omitido(self, resolucion):
+        salida = ("RESPUESTA:\nSon distintos [1].\nCITAS:\n"
+                  "[1] p. 13-14 | \"los incrementos de capital son distintos\"")
+        lec = asyncio.run(leer(_Adaptador(salida), "gpt-4.1", resolucion, "¿?"))
+        assert lec.error is None and lec.citas_verificadas == 1
+        assert lec.respuesta == "Son distintos [1]." and not lec.no_consta

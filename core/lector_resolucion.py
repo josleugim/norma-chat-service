@@ -140,7 +140,10 @@ def verificar_cita(resolucion: ResolucionDigital, pagina, fragmento: str) -> dic
                     f"{', '.join(map(str, sorted(set(corregidas))))}"}
 
 
-_RE_CITA = re.compile(r"^\s*\[(\d+)\]\s*p(?:ág(?:ina)?)?\.?\s*(\d+)\s*\|\s*(.+?)\s*$", re.I)
+# "p. 14", "pág. 14" o un rango "p. 183-184" (se toma la primera; la
+# verificación ya mira las contiguas).
+_RE_CITA = re.compile(
+    r"^\s*\[(\d+)\]\s*p(?:ág(?:ina)?)?s?\.?\s*(\d+)(?:\s*[-–]\s*\d+)?\s*\|\s*(.+?)\s*$", re.I)
 
 
 def _separar(texto: str) -> dict:
@@ -159,7 +162,8 @@ def _separar(texto: str) -> dict:
         "respuesta": (m_resp.group(1) if m_resp else texto).strip(),
         "citas": citas,
         "no_consta": bool(m_nc and m_nc.group(1).lower().startswith("s")),
-        "formato_ok": bool(m_resp and m_nc),
+        # NO_CONSTA es opcional: el modelo a veces la omite cuando sí contestó.
+        "formato_ok": bool(m_resp and m_citas),
     }
 
 
