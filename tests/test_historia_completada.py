@@ -47,3 +47,27 @@ def test_el_indicador_sigue_midiendo_al_modelo():
     medido = resumen_historia_procesal(entradas, nuevo, reg, agregadas_por_codigo=agregadas)
     assert medido["posteriores_no_mencionados"] == [
         {"documento": "275_2023_1JD", "actuacion": "353_2024_1TCC"}]
+
+
+def test_si_ya_advirtio_alguna_no_completa_el_resto():
+    """Agregar toda la cadena convertía H01 en un listado de 14 renglones."""
+    reg, entradas, e1, e2 = _caso()
+    e3 = reg.assign({"caseLink": "999_2025_1TCC"}, "E")
+    entradas[0]["posteriores"].append(
+        {"expediente": "999_2025_1TCC", "ref": e3, "enlace": "resuelto", "tipo": "x", "fecha": "y"})
+    texto = f"14 días [{e1}]; revisado en [{e2}]."
+    assert completar_historia_procesal(entradas, texto, reg) == (texto, [])
+
+
+def test_tope_de_renglones():
+    reg = CitationRegistry()
+    e1 = reg.assign({"caseLink": "D"}, "E")
+    post = []
+    for i in range(8):
+        cl = f"{i}_2025_1TCC"
+        post.append({"expediente": cl, "ref": reg.assign({"caseLink": cl}, "E"),
+                     "enlace": "resuelto", "tipo": "t", "fecha": "f"})
+    nuevo, agregadas = completar_historia_procesal(
+        [{"documento": "D", "posteriores": post}], f"Algo [{e1}].", reg)
+    assert len(agregadas) == 8
+    assert nuevo.count("posterior a D") == 5 and "y 3 actuación(es) más" in nuevo

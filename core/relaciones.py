@@ -418,6 +418,9 @@ def resumen_historia_procesal(entradas: list[dict], texto: str, registry,
 _ENCABEZADO_FUENTES = __import__("re").compile(r"^\W*FUENTES\W*$", __import__("re").M | __import__("re").I)
 
 
+_MAX_RENGLONES_HISTORIA = 5
+
+
 def completar_historia_procesal(entradas: list[dict], texto: str, registry) -> tuple[str, list[dict]]:
     """
     Si la respuesta usa un documento con actuaciones posteriores y no cita
@@ -432,8 +435,15 @@ def completar_historia_procesal(entradas: list[dict], texto: str, registry) -> t
     Devuelve el texto y la lista de lo agregado, para la traza: el indicador
     tiene que seguir midiendo lo que omitió el modelo, no lo que tapó el código.
     """
-    resumen = resumen_historia_procesal(entradas, texto, registry)
-    faltan = (resumen or {}).get("posteriores_no_mencionados") or []
+    resumen = resumen_historia_procesal(entradas, texto, registry) or {}
+    # Sólo el caso inequívoco: un documento usado cuya historia la respuesta
+    # no menciona en absoluto. Si ya advirtió alguna actuación, el resto puede
+    # no ser pertinente —un amparo negado no cambia la sanción— y agregarlo
+    # todo convierte la respuesta en un listado: H01 recibió 14 renglones en
+    # la primera versión (17-oct).
+    sin_aviso = set(resumen.get("documentos_sin_aviso") or [])
+    faltan = [f for f in resumen.get("posteriores_no_mencionados") or []
+              if f["documento"] in sin_aviso]
     if not faltan:
         return texto, []
     detalle = {}
@@ -452,6 +462,10 @@ def completar_historia_procesal(entradas: list[dict], texto: str, registry) -> t
         agregadas.append({"documento": f["documento"], "actuacion": p["expediente"], "ref": p["ref"]})
     if not renglones:
         return texto, []
+    if len(renglones) > _MAX_RENGLONES_HISTORIA:
+        resto = len(renglones) - _MAX_RENGLONES_HISTORIA
+        renglones = renglones[:_MAX_RENGLONES_HISTORIA] + [
+            f"- y {resto} actuación(es) más; pide la historia procesal completa si la necesitas"]
     nota = ("**Actuaciones posteriores.** Estos documentos tienen actuaciones "
             "posteriores que pueden modificar lo dicho:\n" + "\n".join(renglones))
     m = _ENCABEZADO_FUENTES.search(texto)
