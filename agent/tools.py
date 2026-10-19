@@ -64,8 +64,9 @@ TOOLS = [
         "description": (
             "Busca expedientes de competencia económica por filtros "
             "estructurados (autoridad, tipo de procedimiento, sentido de "
-            "resolución, rango de fechas, multas) y/o por nombre de agente "
-            "económico o mercado relevante. Usa esta herramienta cuando el "
+            "resolución, rango de fechas, multas), por nombre de agente "
+            "económico o mercado relevante, o por la persona que resolvió, votó "
+            "o recurrió (juez, magistrado, comisionado). Usa esta herramienta cuando el "
             "usuario pregunte sobre datos procesales: fechas, resoluciones, "
             "multas, agentes involucrados, o cuando necesites datos para "
             "calcular plazos después."
@@ -76,6 +77,19 @@ TOOLS = [
                 "text_search": {
                     "type": "string",
                     "description": "Búsqueda libre en nombre del caso, agentes económicos, mercados relevantes y número de expediente simultáneamente (e.g. 'Scotiabank', 'telecomunicaciones', 'Cemex', 'CNT-095-2013')",
+                },
+                "persona": {
+                    "type": "string",
+                    "description": (
+                        "Nombre de una persona o institución que resolvió, votó o "
+                        "recurrió: jueces, magistrados, ministros, secretarios, "
+                        "comisionados con voto particular, recurrentes (e.g. "
+                        "'Gómez Fierro', 'Andrea Marván'). Úsalo para 'sentencias "
+                        "del juez X', 'resoluciones donde votó en contra Y'. Recorre "
+                        "todo el acervo; cada resultado dice con qué papel aparece "
+                        "(coincidencia_persona). No uses text_search para esto: "
+                        "text_search no busca en esos datos."
+                    ),
                 },
                 "autoridad": {
                     "type": "string",
@@ -168,6 +182,10 @@ TOOLS = [
                 },
                 "tipo_procedimiento": {"type": "string"},
                 "sentido_resolucion": {"type": "string"},
+                "persona": {
+                    "type": "string",
+                    "description": "Contar sólo los expedientes donde esta persona resolvió, votó o recurrió",
+                },
                 "text_search": {
                     "type": "string",
                     "description": "Búsqueda libre para acotar el conteo",

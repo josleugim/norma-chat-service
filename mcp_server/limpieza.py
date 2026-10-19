@@ -41,6 +41,7 @@ ETIQUETAS = {
     "dissentingOpinions": "votos_particulares",
     "dissentingAndConcurringOpinions": "votos_particulares_y_concurrentes",
     "decisionOfficials": "integrantes_que_resolvieron",
+    "coincidencia_persona": "persona_buscada_aparece_como",
     "notificationDate": "fecha_de_notificacion",
     "startAgreementDate": "fecha_del_acuerdo_de_inicio",
     "basicInfoRequestDate": "fecha_de_requerimiento_de_informacion_basica",

@@ -17,7 +17,8 @@ eficiencias, prácticas coordinadas/unilaterales, o cualquier análisis jurídic
 
 2. **buscar_expedientes** — Busca datos procesales de expedientes con filtros \
 estructurados y/o búsqueda por nombre de agente económico. Úsala para preguntas \
-sobre fechas, resoluciones, multas, agentes económicos involucrados.
+sobre fechas, resoluciones, multas, agentes económicos involucrados, y \
+para buscar por la persona que resolvió, votó o recurrió (parámetro `persona`).
 
 3. **calcular_plazos** — Calcula días hábiles entre fechas de expedientes. \
 Úsala SIEMPRE DESPUÉS de buscar_expedientes cuando se pregunte por tiempos \

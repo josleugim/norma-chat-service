@@ -166,7 +166,9 @@ async def buscar_criterios(consulta: str, expedientes: list[str] | None = None,
     name="buscar_expedientes",
     description=(
         "Busca expedientes del acervo por número, tipo, autoridad, sentido, "
-        "años o texto libre (nombre del caso, agentes económicos, mercados). "
+        "años, texto libre (nombre del caso, agentes económicos, mercados) o "
+        "por la persona que resolvió, votó o recurrió (juez, magistrado, "
+        "comisionado); cada resultado dice con qué papel aparece. "
         "Devuelve la ficha de cada expediente —fechas, agentes, multas, "
         "sentido, votos— con su URL y su historia procesal. "
         "Cada ficha abre con situacion_posterior cuando hubo amparos, "
@@ -178,6 +180,7 @@ async def buscar_criterios(consulta: str, expedientes: list[str] | None = None,
 )
 async def buscar_expedientes(
     texto: str | None = None,
+    persona: str | None = None,
     expediente: str | None = None,
     tipo_de_expediente: TipoExpediente | None = None,
     autoridad: Autoridad | None = None,
@@ -189,6 +192,7 @@ async def buscar_expedientes(
 ) -> dict:
     """
     texto: búsqueda libre.
+    persona: nombre de quien resolvió, votó o recurrió, p. ej. "Gómez Fierro".
     expediente: número exacto, p. ej. "VCN-004-2024".
     tipo_de_expediente: VCN, IO o CNT.
     con_multas: true sólo con multa; false sólo sin multa.
@@ -197,7 +201,7 @@ async def buscar_expedientes(
     ag = _agente_o_error()
     st = TurnState()
     args = {k: v for k, v in {
-        "text_search": texto, "id_expediente": expediente,
+        "text_search": texto, "persona": persona, "id_expediente": expediente,
         "prefijo_expediente": tipo_de_expediente, "autoridad": autoridad,
         "sentido_resolucion": sentido_de_la_resolucion, "has_multas": con_multas,
         "fecha_resolucion_desde": anio_desde, "fecha_resolucion_hasta": anio_hasta,
