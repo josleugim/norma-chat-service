@@ -79,8 +79,9 @@ class StreamEvent(BaseModel):
 class ChatRequest(BaseModel):
     session_id: str
     query: str
-    provider: str = "openai"  # "openai" | "anthropic"
-    model: str = "gpt-4.1"
+    # Sin valor, el router usa AGENT_DEFAULT_PROVIDER / AGENT_DEFAULT_MODEL.
+    provider: Optional[str] = None  # "openai" | "anthropic"
+    model: Optional[str] = None
     chat_history: list[dict] = Field(default_factory=list)
     is_first_message: bool = False
 

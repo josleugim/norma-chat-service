@@ -21,6 +21,15 @@ class Settings(BaseSettings):
     port: int = 8000
     cors_origins: list[str] = ["http://localhost:4200", "https://normaplus.ai"]
 
+    # --- Modelo ---
+    # El que se usa cuando la petición no trae `provider`/`model`. Con
+    # `AGENT_MODELO_FIJO=true` se usa siempre, aunque el cliente mande otro:
+    # es la forma de cambiar el modelo del sitio sin tocar el front ni el
+    # proxy (19-oct, Sonnet 5.5 a pedido de COFECE).
+    agent_default_provider: str = "openai"
+    agent_default_model: str = "gpt-4.1"
+    agent_modelo_fijo: bool = False
+
     # --- Agente ---
     agent_max_tool_calls: int = 6
     # Peticiones HTTP de recuperación por turno, que NO es lo mismo.
