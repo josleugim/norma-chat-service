@@ -265,11 +265,12 @@ class NormaPlusAgent:
         total_output_tokens = 0
         # Partes de la entrada servidas por / escritas en la caché del
         # proveedor; sólo cambian el costo, no los tokens procesados.
-        cache = {"lectura": 0, "escritura": 0}
+        cache = {"lectura": 0, "escritura": 0, "escritura_1h": 0}
 
         def sumar_cache(r):
             cache["lectura"] += getattr(r, "cache_lectura_tokens", 0) or 0
             cache["escritura"] += getattr(r, "cache_escritura_tokens", 0) or 0
+            cache["escritura_1h"] += getattr(r, "cache_escritura_1h_tokens", 0) or 0
 
         tool_call_count = 0
         final_text = ""
@@ -723,7 +724,8 @@ class NormaPlusAgent:
         cache["escritura"] += state.tokens_lector_cache_escritura
         costo = costo_estimado(model, total_input_tokens, total_output_tokens,
                                cache_lectura=cache["lectura"],
-                               cache_escritura=cache["escritura"])
+                               cache_escritura=cache["escritura"],
+                               cache_escritura_1h=cache["escritura_1h"])
 
         # ── Done ────────────────────────────────────────────
         # El trace_id viaja al frontend para que un reporte de "esta respuesta
@@ -752,6 +754,7 @@ class NormaPlusAgent:
                 "tokens_entrada": total_input_tokens,
                 "cache_lectura": cache["lectura"],
                 "cache_escritura": cache["escritura"],
+                "cache_escritura_1h": cache["escritura_1h"],
                 "costo_sin_cache_usd": costo_estimado(
                     model, total_input_tokens, total_output_tokens),
             }, "derived")

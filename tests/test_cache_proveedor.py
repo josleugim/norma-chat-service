@@ -86,3 +86,23 @@ def test_openai_reporta_lo_leido_de_cache():
     assert _cache_leido(uso) == 1_234
     assert _cache_leido(None) == 0
     assert _cache_leido(SimpleNamespace(prompt_tokens_details=None)) == 0
+
+
+def test_escritura_de_una_hora_cuesta_el_doble():
+    from core.costos import costo_estimado
+    assert costo_estimado("claude-sonnet-5-5", 1_000_000, 0, cache_escritura=1_000_000,
+                          cache_escritura_1h=1_000_000) == pytest.approx(4.00)
+
+
+def test_el_sistema_del_agente_dura_una_hora_y_el_del_lector_cinco_minutos():
+    ad = _adaptador()
+    asyncio.run(ad.completion_with_tools(
+        messages=[{"role": "system", "content": "SIS"}, {"role": "user", "content": "x"}],
+        model="claude-sonnet-5-5",
+        tools=[{"name": "t", "description": "d", "parameters": {"type": "object"}}]))
+    assert ad.client.messages.kwargs["system"][0]["cache_control"]["ttl"] == "1h"
+    ad = _adaptador()
+    asyncio.run(ad.completion_with_tools(
+        messages=[{"role": "system", "content": "SIS"}, {"role": "user", "content": "x"}],
+        model="claude-sonnet-5-5", tools=[], solo_texto=True))
+    assert "ttl" not in ad.client.messages.kwargs["system"][0]["cache_control"]
