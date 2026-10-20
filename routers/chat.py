@@ -22,10 +22,31 @@ def get_agent(settings: Settings = Depends(get_settings)) -> NormaPlusAgent:
     return app.state.agent
 
 
+def resolver_modelo(request: ChatRequest, settings: Settings) -> tuple[str, str]:
+    """
+    El modelo con que se contesta: el de la configuración si es fijo o si la
+    petición no trae uno; si no, el que pidió el cliente.
+
+    `provider` y `model` van juntos: tomar uno del cliente y otro de la
+    configuración armaría un par que no existe.
+    """
+    if settings.agent_modelo_fijo or not (request.provider and request.model):
+        if settings.agent_modelo_fijo and request.provider and (
+                (request.provider, request.model)
+                != (settings.agent_default_provider, settings.agent_default_model)):
+            logger.info(
+                "Modelo fijo: %s/%s en lugar de %s/%s",
+                settings.agent_default_provider, settings.agent_default_model,
+                request.provider, request.model)
+        return settings.agent_default_provider, settings.agent_default_model
+    return request.provider, request.model
+
+
 @router.post("/completions")
 async def chat_completions(
     request: ChatRequest,
     agent: NormaPlusAgent = Depends(get_agent),
+    settings: Settings = Depends(get_settings),
 ):
     """
     Endpoint SSE que ejecuta el agente y retorna eventos de streaming.
@@ -46,13 +67,15 @@ async def chat_completions(
         else len(request.chat_history) // 2
     )
 
+    provider, model = resolver_modelo(request, settings)
+
     async def event_generator() -> AsyncIterator[dict]:
         try:
             async for event in agent.run(
                 session_id=request.session_id,
                 user_query=request.query,
-                provider=request.provider,
-                model=request.model,
+                provider=provider,
+                model=model,
                 chat_history=request.chat_history,
                 is_first_message=request.is_first_message,
                 turn_index=turn_index,

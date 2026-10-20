@@ -46,6 +46,12 @@ async def lifespan(app: FastAPI):
 
     if not registry.providers:
         logger.warning("No hay adaptadores LLM registrados. Configura API keys en .env")
+    elif settings.agent_default_provider not in registry.providers:
+        # Sin esto, cada pregunta que no traiga modelo (o todas, con modelo
+        # fijo) fallaría con "proveedor no registrado". Mejor no arrancar.
+        raise RuntimeError(
+            f"AGENT_DEFAULT_PROVIDER={settings.agent_default_provider} no tiene "
+            f"llave configurada (registrados: {sorted(registry.providers)}).")
 
     # ── Retrieval Clients ───────────────────────────────────
     criterios_client = CriteriosSearchClient(
