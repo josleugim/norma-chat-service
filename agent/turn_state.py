@@ -190,6 +190,8 @@ class TurnState:
     lecturas_resolucion: list[dict] = field(default_factory=list)
     tokens_lector_entrada: int = 0
     tokens_lector_salida: int = 0
+    tokens_lector_cache_lectura: int = 0
+    tokens_lector_cache_escritura: int = 0
     # Ampliación dentro del precedente mejor rankeado: una vez por turno.
     amplio_precedente: bool = False
     ampliacion_precedente: list[dict] = field(default_factory=list)

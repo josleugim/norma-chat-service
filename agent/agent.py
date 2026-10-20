@@ -263,6 +263,14 @@ class NormaPlusAgent:
         all_expedientes_results: list[list] = []
         total_input_tokens = 0
         total_output_tokens = 0
+        # Partes de la entrada servidas por / escritas en la caché del
+        # proveedor; sólo cambian el costo, no los tokens procesados.
+        cache = {"lectura": 0, "escritura": 0}
+
+        def sumar_cache(r):
+            cache["lectura"] += getattr(r, "cache_lectura_tokens", 0) or 0
+            cache["escritura"] += getattr(r, "cache_escritura_tokens", 0) or 0
+
         tool_call_count = 0
         final_text = ""
 
@@ -278,6 +286,7 @@ class NormaPlusAgent:
             )
             total_input_tokens += response.input_tokens
             total_output_tokens += response.output_tokens
+            sumar_cache(response)
             if collector is not None:
                 collector.end_step(tokens={
                     "input": response.input_tokens,
@@ -437,6 +446,7 @@ class NormaPlusAgent:
                             final_parts.append(chunk.text)
                         if chunk.input_tokens:
                             total_input_tokens += chunk.input_tokens
+                            sumar_cache(chunk)
                         if chunk.output_tokens:
                             total_output_tokens += chunk.output_tokens
                     final_text = await self._emitir_validado(
@@ -490,6 +500,7 @@ class NormaPlusAgent:
                 )
                 total_input_tokens += fallback_response.input_tokens
                 total_output_tokens += fallback_response.output_tokens
+                sumar_cache(fallback_response)
 
                 if fallback_response.content:
                     final_text = await self._emitir_validado(
@@ -511,6 +522,7 @@ class NormaPlusAgent:
                             final_parts.append(chunk.text)
                         if chunk.input_tokens:
                             total_input_tokens += chunk.input_tokens
+                            sumar_cache(chunk)
                         if chunk.output_tokens:
                             total_output_tokens += chunk.output_tokens
                     final_text = await self._emitir_validado(
@@ -707,6 +719,11 @@ class NormaPlusAgent:
         # el costo del turno saldría subestimado en ~90k tokens por lectura.
         total_input_tokens += state.tokens_lector_entrada
         total_output_tokens += state.tokens_lector_salida
+        cache["lectura"] += state.tokens_lector_cache_lectura
+        cache["escritura"] += state.tokens_lector_cache_escritura
+        costo = costo_estimado(model, total_input_tokens, total_output_tokens,
+                               cache_lectura=cache["lectura"],
+                               cache_escritura=cache["escritura"])
 
         # ── Done ────────────────────────────────────────────
         # El trace_id viaja al frontend para que un reporte de "esta respuesta
@@ -724,19 +741,26 @@ class NormaPlusAgent:
                 # contestó y el costo estimado (cota superior, ver core/costos).
                 "provider": provider,
                 "model": model,
-                "costo_estimado_usd": costo_estimado(
-                    model, total_input_tokens, total_output_tokens),
+                "costo_estimado_usd": costo,
+                "tokens_cache_lectura": cache["lectura"],
+                "tokens_cache_escritura": cache["escritura"],
             },
         )
 
         if collector is not None:
+            collector.set_decision("cache_proveedor", {
+                "tokens_entrada": total_input_tokens,
+                "cache_lectura": cache["lectura"],
+                "cache_escritura": cache["escritura"],
+                "costo_sin_cache_usd": costo_estimado(
+                    model, total_input_tokens, total_output_tokens),
+            }, "derived")
             collector.pending_finish = {
                 "status": "ok",
                 "exhausted_tools": exhausted_tools,
                 "tokens_input": total_input_tokens,
                 "tokens_output": total_output_tokens,
-                "cost_usd": costo_estimado(
-                    model, total_input_tokens, total_output_tokens) or 0.0,
+                "cost_usd": costo or 0.0,
             }
 
     # ── Trazabilidad ────────────────────────────────────────
@@ -2526,6 +2550,8 @@ class NormaPlusAgent:
         if state is not None:
             state.tokens_lector_entrada += lectura.tokens_entrada
             state.tokens_lector_salida += lectura.tokens_salida
+            state.tokens_lector_cache_lectura += lectura.tokens_cache_lectura
+            state.tokens_lector_cache_escritura += lectura.tokens_cache_escritura
 
         verificadas = [c for c in lectura.citas if c.get("verificada")]
         paginas = {c["n"]: c.get("pagina_encontrada", c.get("pagina")) for c in verificadas}

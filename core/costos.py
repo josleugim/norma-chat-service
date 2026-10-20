@@ -6,10 +6,11 @@ licencia y poder ofrecer un modelo distinto según el plan. El proxy puede
 contar preguntas o dólares por usuario con el `costo_estimado_usd` del evento
 `done`.
 
-**Es una cota superior.** Los proveedores cobran menos por la parte del
-contexto que se repite (caché) y aquí no se descuenta, porque hoy no se
-registra cuánto entró como caché. Tampoco incluye los embeddings de las
-búsquedas, que van en la cuenta de José Miguel.
+Desde el 20-oct descuenta la caché: la parte del contexto que el proveedor
+leyó de caché se cobra a su precio, y la que escribió (Anthropic) también.
+Un modelo sin precio de caché en la tabla se cobra completo, que es la cota
+superior. No incluye los embeddings de las búsquedas, que van en la cuenta
+de José Miguel.
 """
 
 # USD por millón de tokens: (entrada, salida). Leídos el 6-oct-2026 en
@@ -23,10 +24,30 @@ PRECIOS = {
 }
 
 
-def costo_estimado(model: str, tokens_entrada: int, tokens_salida: int) -> float | None:
-    """None si el modelo no está en la tabla: mejor sin cifra que con una inventada."""
+# USD por millón de tokens de caché: (lectura, escritura). OpenAI no cobra la
+# escritura aparte (es entrada normal). Anthropic: lectura 0.1× y escritura
+# de 5 minutos 1.25× del precio de entrada.
+PRECIOS_CACHE = {
+    "gpt-4.1": (0.50, 2.00),
+    "gpt-4.1-mini": (0.10, 0.40),
+    "claude-sonnet-5-5": (0.20, 2.50),
+}
+
+
+def costo_estimado(model: str, tokens_entrada: int, tokens_salida: int,
+                   cache_lectura: int = 0, cache_escritura: int = 0) -> float | None:
+    """
+    None si el modelo no está en la tabla: mejor sin cifra que con una inventada.
+
+    `tokens_entrada` es el total procesado; `cache_lectura` y
+    `cache_escritura` son partes de él.
+    """
     precio = PRECIOS.get(model or "")
     if precio is None:
         return None
     entrada, salida = precio
-    return round(((tokens_entrada or 0) * entrada + (tokens_salida or 0) * salida) / 1e6, 6)
+    lectura_px, escritura_px = PRECIOS_CACHE.get(model or "", (entrada, entrada))
+    lectura, escritura = cache_lectura or 0, cache_escritura or 0
+    normal = max((tokens_entrada or 0) - lectura - escritura, 0)
+    return round((normal * entrada + lectura * lectura_px + escritura * escritura_px
+                  + (tokens_salida or 0) * salida) / 1e6, 6)
