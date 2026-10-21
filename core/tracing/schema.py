@@ -187,6 +187,7 @@ class Decisions(BaseModel):
     # Actuaciones posteriores agregadas por código (la respuesta no las citó).
     historia_completada: Optional[dict[str, Any]] = None
     busqueda_persona: Optional[dict[str, Any]] = None
+    cache_proveedor: Optional[dict[str, Any]] = None
     # I5: ¿el pasaje sostiene la afirmación? En evaluación, no bloquea.
     verificacion_semantica: Optional[dict[str, Any]] = None
     # El payload exacto de evidencia que recibió el modelo. Sin esto, una

@@ -181,6 +181,8 @@ class LecturaResolucion:
     no_consta: bool = False
     tokens_entrada: int = 0
     tokens_salida: int = 0
+    tokens_cache_lectura: int = 0
+    tokens_cache_escritura: int = 0
     costo_usd: float | None = None
     segundos: float = 0.0
     error: str | None = None
@@ -198,6 +200,8 @@ class LecturaResolucion:
             "no_consta": self.no_consta,
             "citas_total": len(self.citas), "citas_verificadas": self.citas_verificadas,
             "tokens_entrada": self.tokens_entrada, "tokens_salida": self.tokens_salida,
+            "tokens_cache_lectura": self.tokens_cache_lectura,
+            "tokens_cache_escritura": self.tokens_cache_escritura,
             "costo_usd": self.costo_usd, "segundos": self.segundos, "error": self.error,
             "retiradas": self.retiradas, "salida_cruda": self.salida_cruda,
         }
@@ -249,10 +253,15 @@ async def leer(adapter, model: str, resolucion: ResolucionDigital, pregunta: str
     aviso = ""
     if resolucion.posiblemente_incompleta:
         aviso = "ADVERTENCIA: el texto pudo llegar incompleto; dilo si afecta la respuesta.\n\n"
-    usuario = (f"{aviso}{_ficha_texto(ficha)}Resolución {resolucion.case_link}, "
-               f"texto completo:\n\n{resolucion.texto_con_paginas()}\n\n"
-               f"Pregunta: {pregunta}")
-    mensajes = [{"role": "system", "content": SISTEMA},
+    # El documento va en el mensaje de sistema y la pregunta aparte: así el
+    # prefijo (instrucciones + resolución) es idéntico entre preguntas sobre
+    # el mismo documento y la caché del proveedor lo reutiliza. En Claude la
+    # marca de caché va al final del sistema; si el documento viajara junto
+    # a la pregunta, cada pregunta nueva lo pagaría completo.
+    sistema = (f"{SISTEMA}\n\nResolución {resolucion.case_link}, texto completo:"
+               f"\n\n{resolucion.texto_con_paginas()}")
+    usuario = f"{aviso}{_ficha_texto(ficha)}Pregunta: {pregunta}"
+    mensajes = [{"role": "system", "content": sistema},
                 {"role": "user", "content": usuario}]
     inicio = time.monotonic()
     r = await adapter.completion_with_tools(
@@ -262,7 +271,11 @@ async def leer(adapter, model: str, resolucion: ResolucionDigital, pregunta: str
     lectura = LecturaResolucion(
         case_link=resolucion.case_link, pregunta=pregunta, respuesta="",
         tokens_entrada=r.input_tokens, tokens_salida=r.output_tokens,
-        costo_usd=costo_estimado(model, r.input_tokens, r.output_tokens),
+        tokens_cache_lectura=r.cache_lectura_tokens,
+        tokens_cache_escritura=r.cache_escritura_tokens,
+        costo_usd=costo_estimado(model, r.input_tokens, r.output_tokens,
+                                 cache_lectura=r.cache_lectura_tokens,
+                                 cache_escritura=r.cache_escritura_tokens),
         segundos=segundos)
     datos = _separar(r.content)
     if not datos["formato_ok"]:

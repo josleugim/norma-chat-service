@@ -123,8 +123,19 @@ class TestLeer:
     def test_el_documento_entra_completo_con_paginas(self, resolucion):
         ad = _Adaptador("RESPUESTA:\nx\nCITAS:\nNO_CONSTA: no")
         asyncio.run(leer(ad, "gpt-4.1", resolucion, "¿?"))
-        usuario = ad.mensajes[-1]["content"]
-        assert "<<<PÁGINA 13>>>" in usuario and "<<<PÁGINA 21>>>" in usuario
+        sistema = ad.mensajes[0]["content"]
+        assert "<<<PÁGINA 13>>>" in sistema and "<<<PÁGINA 21>>>" in sistema
+
+    def test_el_prefijo_cacheable_no_depende_de_la_pregunta(self, resolucion):
+        """El documento va en el sistema y la pregunta aparte, para que la caché lo reutilice."""
+        mensajes = []
+        for pregunta in ("¿Qué multa?", "¿Quién votó en contra?"):
+            ad = _Adaptador("RESPUESTA:\nx\nCITAS:\nNO_CONSTA: no")
+            asyncio.run(leer(ad, "gpt-4.1", resolucion, pregunta))
+            mensajes.append(ad.mensajes)
+        assert mensajes[0][0] == mensajes[1][0]
+        assert "PÁGINA" not in mensajes[0][1]["content"]
+        assert mensajes[0][1]["content"].endswith("¿Qué multa?")
 
     def test_no_disponible_no_llama_al_modelo(self):
         ad = _Adaptador("nunca")

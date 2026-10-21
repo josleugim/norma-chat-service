@@ -353,6 +353,11 @@ class LLMToolResponse(BaseModel):
     tool_calls: list[ToolCallRequest] = Field(default_factory=list)
     input_tokens: int = 0
     output_tokens: int = 0
+    # Parte de `input_tokens` que se escribió en / leyó de la caché del
+    # proveedor. `input_tokens` sigue siendo el total procesado.
+    cache_escritura_tokens: int = 0
+    cache_escritura_1h_tokens: int = 0  # parte de la escritura con duración de 1 hora
+    cache_lectura_tokens: int = 0
     # Anthropic: el contenido del turno tal cual lo produjo el modelo,
     # bloques de pensamiento incluidos, para devolverlo sin cambios.
     raw_content: Optional[list[dict]] = None
@@ -365,3 +370,6 @@ class LLMStreamChunk(BaseModel):
     finish_reason: Optional[str] = None
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_escritura_tokens: int = 0
+    cache_escritura_1h_tokens: int = 0  # parte de la escritura con duración de 1 hora
+    cache_lectura_tokens: int = 0

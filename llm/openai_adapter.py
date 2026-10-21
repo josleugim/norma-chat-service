@@ -92,6 +92,15 @@ def a_entrada_responses(messages: list[dict]) -> tuple[str, list[dict]]:
     return "\n\n".join(i for i in instrucciones if i), entrada
 
 
+
+def _cache_leido(usage) -> int:
+    """Tokens de entrada que OpenAI sirvió de su caché automática (ya incluidos en el total)."""
+    if usage is None:
+        return 0
+    det = (getattr(usage, "prompt_tokens_details", None)
+           or getattr(usage, "input_tokens_details", None))
+    return (getattr(det, "cached_tokens", 0) or 0) if det is not None else 0
+
 class OpenAIAdapter(BaseLLMAdapter):
 
     def __init__(self, api_key: str):
@@ -124,21 +133,24 @@ class OpenAIAdapter(BaseLLMAdapter):
             store=STORE,
         )
 
-        input_tokens = 0
-        output_tokens = 0
-
+        uso = None
         async for chunk in stream:
             if chunk.usage:
-                input_tokens = chunk.usage.prompt_tokens or 0
-                output_tokens = chunk.usage.completion_tokens or 0
-
+                uso = chunk.usage
             if chunk.choices and chunk.choices[0].delta.content:
                 yield LLMStreamChunk(
                     text=chunk.choices[0].delta.content,
                     finish_reason=chunk.choices[0].finish_reason,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
                 )
+        # El uso llega en el último fragmento, que no trae texto: antes se
+        # perdía y la síntesis por streaming contaba 0 tokens.
+        if uso is not None:
+            yield LLMStreamChunk(
+                text="",
+                input_tokens=uso.prompt_tokens or 0,
+                output_tokens=uso.completion_tokens or 0,
+                cache_lectura_tokens=_cache_leido(uso),
+            )
 
     # ── Tool calling ────────────────────────────────────────
 
@@ -199,6 +211,7 @@ class OpenAIAdapter(BaseLLMAdapter):
             tool_calls=tool_calls,
             input_tokens=response.usage.prompt_tokens if response.usage else 0,
             output_tokens=response.usage.completion_tokens if response.usage else 0,
+            cache_lectura_tokens=_cache_leido(response.usage),
         )
 
     async def _con_herramientas_responses(self, messages, model, tools,
@@ -243,6 +256,7 @@ class OpenAIAdapter(BaseLLMAdapter):
             tool_calls=tool_calls,
             input_tokens=usage.input_tokens if usage else 0,
             output_tokens=usage.output_tokens if usage else 0,
+            cache_lectura_tokens=_cache_leido(usage),
             raw_content=[i.model_dump(exclude_none=True) for i in response.output],
         )
 

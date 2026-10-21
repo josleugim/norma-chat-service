@@ -51,6 +51,48 @@ def _parametros(model: str, temperature: float, max_tokens: int) -> dict:
 
 
 # Retry config para 429 rate limiting
+# Caché de contexto (20-oct). Dos marcas:
+# - la del bloque de sistema, que cubre herramientas + sistema: es igual en
+#   todas las preguntas de todos los usuarios;
+# - la automática al final de la petición, que en el ciclo de herramientas
+#   deja escrito todo lo anterior para la siguiente vuelta.
+# Medido el 19-oct: la segunda llamada con el prompt del agente leyó 27,167
+# tokens de caché.
+#
+# El sistema del agente dura 1 hora en caché (escritura 2×, contra 1.25× de
+# 5 minutos): es idéntico para todos los usuarios, y con poco tráfico los
+# huecos de más de 5 minutos entre preguntas lo tirarían cada vez. El del
+# lector lleva la resolución, que rara vez se relee pasada la hora: 5 minutos.
+_CACHE = {"type": "ephemeral"}
+_CACHE_HORA = {"type": "ephemeral", "ttl": "1h"}
+
+
+def _sistema(system_msg: str, larga: bool = False):
+    if not system_msg:
+        return []
+    return [{"type": "text", "text": system_msg,
+             "cache_control": _CACHE_HORA if larga else _CACHE}]
+
+
+def _uso(usage) -> dict:
+    """
+    `input_tokens` de Anthropic excluye lo que entró por caché. Se devuelve el
+    total procesado, para que los conteos no cambien de significado al
+    activar la caché, y aparte cuánto se escribió y cuánto se leyó.
+    """
+    escritura = getattr(usage, "cache_creation_input_tokens", 0) or 0
+    lectura = getattr(usage, "cache_read_input_tokens", 0) or 0
+    detalle = getattr(usage, "cache_creation", None)
+    hora = getattr(detalle, "ephemeral_1h_input_tokens", 0) or 0
+    return {
+        "input_tokens": (usage.input_tokens or 0) + escritura + lectura,
+        "output_tokens": usage.output_tokens or 0,
+        "cache_escritura_tokens": escritura,
+        "cache_escritura_1h_tokens": hora,
+        "cache_lectura_tokens": lectura,
+    }
+
+
 MAX_RETRIES = 3
 INITIAL_BACKOFF = 5  # segundos
 BACKOFF_MULTIPLIER = 2
@@ -140,8 +182,9 @@ class AnthropicAdapter(BaseLLMAdapter):
             try:
                 async with self.client.messages.stream(
                     model=model,
-                    system=system_msg,
+                    system=_sistema(system_msg, larga=True),
                     messages=user_msgs,
+                    cache_control=_CACHE,
                     **_parametros(model, temperature, max_tokens),
                 ) as stream:
                     async for text in stream.text_stream:
@@ -150,11 +193,7 @@ class AnthropicAdapter(BaseLLMAdapter):
                     final_message = await stream.get_final_message()
                     usage = final_message.usage
                     yield LLMStreamChunk(
-                        text="",
-                        finish_reason="end_turn",
-                        input_tokens=usage.input_tokens,
-                        output_tokens=usage.output_tokens,
-                    )
+                        text="", finish_reason="end_turn", **_uso(usage))
                 return  # éxito, salir del retry loop
             except anthropic.RateLimitError:
                 if attempt == MAX_RETRIES:
@@ -189,10 +228,13 @@ class AnthropicAdapter(BaseLLMAdapter):
 
         anthropic_tools = self._convert_tools(tools) if tools else []
 
+        # Con herramientas es el ciclo del agente (sistema fijo, 1 hora); sin
+        # ellas, el lector (sistema con la resolución, 5 minutos).
         kwargs = dict(
             model=model,
-            system=system_msg,
+            system=_sistema(system_msg, larga=bool(anthropic_tools)),
             messages=api_msgs,
+            cache_control=_CACHE,
             **_parametros(model, temperature, max_tokens),
         )
         if anthropic_tools:
@@ -219,8 +261,7 @@ class AnthropicAdapter(BaseLLMAdapter):
             return LLMToolResponse(
                 content=("No puedo responder esta consulta. Reformúlala o "
                          "intenta con otra pregunta."),
-                input_tokens=response.usage.input_tokens,
-                output_tokens=response.usage.output_tokens,
+                **_uso(response.usage),
                 rechazo=str(detalle or "refusal"),
             )
 
@@ -240,8 +281,7 @@ class AnthropicAdapter(BaseLLMAdapter):
         return LLMToolResponse(
             content="".join(textos) or None,
             tool_calls=tool_calls,
-            input_tokens=response.usage.input_tokens,
-            output_tokens=response.usage.output_tokens,
+            **_uso(response.usage),
             # El turno tal cual lo produjo el modelo, pensamiento incluido,
             # para devolverlo sin cambios.
             raw_content=[b.model_dump(exclude_none=True) for b in response.content],
