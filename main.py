@@ -89,6 +89,8 @@ async def lifespan(app: FastAPI):
         prev_turn_top_k=5,
         max_cached_criterios=10,
         max_cached_expedientes=15,
+        ttl_segundos=settings.evidence_cache_ttl_seconds,
+        max_sesiones=settings.evidence_cache_max_sessions,
     )
     logger.info("Evidence cache inicializado")
 

@@ -51,6 +51,12 @@ class Settings(BaseSettings):
     # gpt-4.1 la primera vez y ~0.05 con caché), así que tiene tope por turno.
     agent_leer_resolucion: bool = True
     agent_max_lecturas_resolucion: int = 3
+
+    # --- Caché de evidencia por sesión ---
+    # Sin límite crecía con cada conversación hasta que ECS mataba la tarea
+    # por memoria (reporte de JM, 21-oct).
+    evidence_cache_ttl_seconds: float = 4 * 3600
+    evidence_cache_max_sessions: int = 500
     # Catálogo de acuerdos de suspensión para los avisos del §8.
     avisos_path: str = "data/calendario"
     agent_default_temperature: float = 0.3
