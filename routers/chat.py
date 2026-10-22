@@ -1,11 +1,12 @@
 """
 Router del chat — endpoint SSE que el NestJS consume como proxy.
 """
+import asyncio
 import json
 import logging
 from typing import AsyncIterator
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from sse_starlette.sse import EventSourceResponse
 
 from agent.agent import NormaPlusAgent
@@ -70,6 +71,9 @@ async def chat_completions(
     provider, model = resolver_modelo(request, settings)
 
     async def event_generator() -> AsyncIterator[dict]:
+        # Último evento emitido: si el cliente se desconecta, dice en qué
+        # paso iba el turno (el `thinking` trae la herramienta).
+        ultimo = "inicio"
         try:
             async for event in agent.run(
                 session_id=request.session_id,
@@ -84,10 +88,22 @@ async def chat_completions(
                 usuario_ref=request.usuario_ref,
                 plan=request.plan,
             ):
+                if event.type == "thinking":
+                    ultimo = f"thinking:{event.data.get('tool') or ''}"
+                elif event.type != ultimo:
+                    ultimo = event.type
                 yield {
                     "event": event.type,
                     "data": json.dumps(event.data, ensure_ascii=False),
                 }
+        except asyncio.CancelledError:
+            # El cliente cerró la conexión (NestJS abortó el fetch). La
+            # cancelación llega al `await` en curso del agente: no se sigue
+            # buscando ni generando, y el caché no se escribe. Se registra y se
+            # vuelve a lanzar: tragarla dejaría el turno corriendo.
+            logger.info("Cliente desconectado: turno detenido (sesión %s, último paso %s)",
+                        request.session_id, ultimo)
+            raise
         except ValueError as e:
             # Proveedor no registrado, modelo inválido, etc.
             yield {
@@ -130,3 +146,20 @@ async def run_info(
         "traces_dir": settings.traces_dir,
         "manifest": manifest.model_dump(mode="json") if manifest else None,
     }
+
+
+@router.delete("/sessions/{session_id}/cache", status_code=204, include_in_schema=False)
+async def borrar_cache_de_sesion(
+    session_id: str,
+    agent: NormaPlusAgent = Depends(get_agent),
+) -> Response:
+    """
+    Borra la evidencia en caché de una sesión. Lo llama la API de NestJS
+    después de eliminar el chat; la verificación de propiedad se hace allá.
+
+    Interno (Cloud Map), fuera del esquema público. Idempotente: 204 aunque
+    la sesión ya no esté (expiró, se desalojó o se perdió en un reinicio).
+    """
+    agent.evidence_cache.clear_session(session_id)
+    logger.info("Caché de sesión borrado a petición de la API (sesión %s)", session_id)
+    return Response(status_code=204)

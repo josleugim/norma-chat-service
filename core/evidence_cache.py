@@ -10,9 +10,11 @@ criterios. En el turno 2 el usuario dice "y en ese mismo caso, ¿qué multas hub
 — el cache permite inyectar los expedientes del turno anterior como contexto.
 """
 import re
+import time
 import logging
+import threading
 from datetime import datetime, timezone
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 
 logger = logging.getLogger(__name__)
 
@@ -97,8 +99,20 @@ class EvidenceCache:
         prev_turn_top_k: int = 5,
         max_cached_criterios: int = 10,
         max_cached_expedientes: int = 15,
+        ttl_segundos: float = 4 * 3600,
+        max_sesiones: int = 500,
+        reloj=time.monotonic,
     ):
         self.max_turns = max_turns
+        # Desalojo (21-oct, reporte de JM): sin él, cada session_id nuevo se
+        # quedaba en memoria hasta reiniciar el proceso. Se desaloja de forma
+        # perezosa al entrar a cada método público: primero lo inactivo más
+        # del TTL, luego lo menos usado si se pasa del máximo.
+        self.ttl_segundos = ttl_segundos
+        self.max_sesiones = max_sesiones
+        self._reloj = reloj
+        self._acceso: OrderedDict[str, float] = OrderedDict()
+        self._lock = threading.RLock()
         self.prev_turn_top_k = prev_turn_top_k
         self.max_cached_criterios = max_cached_criterios
         self.max_cached_expedientes = max_cached_expedientes
@@ -111,12 +125,52 @@ class EvidenceCache:
         # necesita el `anchor`, que no viaja en el documento cacheado.
         self._anclas: dict[str, dict[str, str]] = {}
 
+    # ── Desalojo ────────────────────────────────────────────
+
+    def _drop(self, session_id: str) -> None:
+        self._sessions.pop(session_id, None)
+        self._anclas.pop(session_id, None)
+        self._acceso.pop(session_id, None)
+
+    def _desalojar(self) -> None:
+        ahora = self._reloj()
+        vencidas = [s for s, t in self._acceso.items() if ahora - t > self.ttl_segundos]
+        for s in vencidas:
+            self._drop(s)
+        excedentes = []
+        while len(self._acceso) > self.max_sesiones:
+            s, _ = self._acceso.popitem(last=False)
+            self._drop(s)
+            excedentes.append(s)
+        if vencidas or excedentes:
+            logger.info(
+                "EvidenceCache: desalojadas %d por inactividad y %d por tope; "
+                "quedan %d sesiones", len(vencidas), len(excedentes), len(self._acceso))
+
+    def _tocar(self, session_id: str) -> None:
+        """Marca uso de una sesión que existe (o que se está creando)."""
+        self._acceso[session_id] = self._reloj()
+        self._acceso.move_to_end(session_id)
+
+    def _entrar(self, session_id: str, escribe: bool = False) -> None:
+        self._desalojar()
+        if escribe or session_id in self._sessions or session_id in self._anclas:
+            self._tocar(session_id)
+        self._desalojar()
+
+    # ── API pública ─────────────────────────────────────────
+
     def recordar_anclas(self, session_id: str, anclas: dict[str, str]) -> None:
-        if anclas:
+        if not anclas:
+            return
+        with self._lock:
+            self._entrar(session_id, escribe=True)
             self._anclas.setdefault(session_id, {}).update(anclas)
 
     def anclas(self, session_id: str) -> dict[str, str]:
-        return dict(self._anclas.get(session_id, {}))
+        with self._lock:
+            self._entrar(session_id)
+            return dict(self._anclas.get(session_id, {}))
 
     def _ensure_session(self, session_id: str) -> dict:
         if session_id not in self._sessions:
@@ -126,7 +180,7 @@ class EvidenceCache:
             }
         return self._sessions[session_id]
 
-    def update(
+    def _update(
         self,
         session_id: str,
         query: str,
@@ -188,7 +242,7 @@ class EvidenceCache:
             f"ids: {used_ids}"
         )
 
-    def select(
+    def _select(
         self,
         session_id: str,
         user_query: str,
@@ -250,7 +304,7 @@ class EvidenceCache:
             True,
         )
 
-    def contexto_para_turno(
+    def _contexto_para_turno(
         self, session_id: str, registry, limite: int = 12,
     ) -> str:
         """
@@ -316,7 +370,7 @@ class EvidenceCache:
             + "\n".join(lineas)
         )
 
-    def get_context_summary(self, session_id: str) -> str:
+    def _get_context_summary(self, session_id: str) -> str:
         """
         Genera un resumen de la evidencia cacheada para inyectar
         en el contexto del agente. Formato compacto.
@@ -352,10 +406,35 @@ class EvidenceCache:
         lines.append("=== FIN CACHE ===\n")
         return "\n".join(lines)
 
-    def clear_session(self, session_id: str):
-        """Limpia el cache de una sesión."""
-        if session_id in self._sessions:
-            del self._sessions[session_id]
+
+    def update(self, session_id: str, query: str, criterios: list[dict],
+               expedientes: list[dict]):
+        with self._lock:
+            self._entrar(session_id, escribe=True)
+            return self._update(session_id=session_id, query=query,
+                                criterios=criterios, expedientes=expedientes)
+
+    def select(self, session_id: str, user_query: str):
+        with self._lock:
+            self._entrar(session_id)
+            return self._select(session_id, user_query)
+
+    def contexto_para_turno(self, session_id: str, registry, limite: int = 12) -> str:
+        with self._lock:
+            self._entrar(session_id)
+            return self._contexto_para_turno(session_id, registry, limite=limite)
+
+    def get_context_summary(self, session_id: str) -> str:
+        with self._lock:
+            self._entrar(session_id)
+            return self._get_context_summary(session_id)
+
+    def clear_session(self, session_id: str) -> None:
+        """Borra todo lo de una sesión (evidencia y anclas). Idempotente."""
+        with self._lock:
+            self._drop(session_id)
 
     def session_count(self) -> int:
-        return len(self._sessions)
+        with self._lock:
+            self._desalojar()
+            return len(self._sessions)
