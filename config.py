@@ -83,6 +83,9 @@ class Settings(BaseSettings):
     # Hosts que el conector acepta (protección contra DNS rebinding). En
     # producción: mcp.normaplus.ai.
     mcp_allowed_hosts: str = "localhost:*,127.0.0.1:*"
+    # Llave de las herramientas internas (/internal/tools), que usa el servidor
+    # MCP del repo aparte. Vacía = rutas sin montar.
+    internal_tools_key: str = ""
     # Base de las URLs que devuelve el conector (fichas y párrafos).
     norma_web_url: str = "https://normaplus.ai"
     trace_s3_bucket: str = ""

@@ -223,11 +223,13 @@ async def lifespan(app: FastAPI):
 
     logger.info("Chat Agent Service inicializado correctamente")
     async with AsyncExitStack() as pila:
-        if _MCP_ACTIVO:
+        if _MCP_ACTIVO or _HERRAMIENTAS_INTERNAS:
             # El conector "@norma" usa el mismo agente: comparte clientes,
             # calendario y mapa de relaciones con el chat.
-            from mcp_server.servidor import servidor, configurar
+            from mcp_server.servidor import configurar
             configurar(agent, settings.norma_web_url)
+        if _MCP_ACTIVO:
+            from mcp_server.servidor import servidor
             await pila.enter_async_context(servidor.session_manager.run())
             logger.info("Conector MCP activo en /mcp (sin login: fase 1)")
         yield
@@ -258,6 +260,12 @@ app.add_middleware(
 
 # Routers
 app.include_router(chat_router, prefix="/api")
+
+# Herramientas del conector para el servidor MCP del repo aparte. Sólo con llave.
+_HERRAMIENTAS_INTERNAS = bool(settings.internal_tools_key)
+if _HERRAMIENTAS_INTERNAS:
+    from routers.herramientas_internas import router as _herramientas_router
+    app.include_router(_herramientas_router)
 
 # Conector MCP ("@norma" en Claude y ChatGPT). Apagado por omisión: en la fase
 # 1 no tiene login, así que no puede quedar expuesto hasta que exista el OAuth.
