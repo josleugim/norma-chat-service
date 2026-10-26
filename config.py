@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
 
     # --- Endpoints de José Miguel ---
-    search_api_base_url: str = "https://api-staging.normaplus.ai"
+    search_api_base_url: str = "https://api.normaplus.ai"
     search_api_key: str = ""  # formato: {chatbot_id}.{key}
     search_api_timeout: float = 10.0
 
