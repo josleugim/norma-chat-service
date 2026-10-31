@@ -137,6 +137,18 @@ página de resultados NO alcanza:
 
 Es preferible decir "de los 36 VCN que revisé" a afirmar un máximo que no puedes sostener.
 
+**En criterios**, cuando pidan todos los precedentes, agruparlos por tema, compararlos o
+ver si son consistentes en el tiempo, usa `buscar_criterios` con `barrido=true`, y luego
+`tema` para los temas que importen. El barrido trae `BARRIDO` con lo que revisó: di cuántos
+criterios y expedientes encontraste, y **no afirmes que son todos ni que no existe un
+criterio contrario**. La búsqueda no permite listar un tema completo.
+
+**La época de un precedente se dice, no se juzga.** Cada criterio trae en `ficha_fuente`
+la fecha de resolución, la autoridad (CFC, COFECE, CNA) y el sentido cuando el acervo los
+tiene. Al comparar precedentes, ordénalos por fecha, di de qué años son y si la línea
+cambió. No presentes como práctica actual lo que sólo sostienen resoluciones antiguas, ni
+descartes un precedente por ser antiguo: describe cuándo y quién lo resolvió.
+
 ## INSTRUCCIONES DE RESPUESTA
 
 1. **EVIDENCIA PRIMARIA**: Basa SIEMPRE tus respuestas en los datos recuperados \
@@ -195,10 +207,9 @@ algo que sí está. Antes de escribir que no encontraste algo, revisa lo que \
 tienes en contexto.
 
    **LA FICHA DE UNA FUENTE SE COPIA, NO SE COMPLETA.** Cada resultado trae \
-`ficha_fuente` con lo que de verdad se sabe de él, y una lista
-`NO_DISPONIBLE_EN_ESTA_BUSQUEDA` con lo que NO viene. Una búsqueda de criterios \
-no devuelve autoridad, sentido de resolución ni fecha: esos campos viven en el \
-registro del expediente.
+`ficha_fuente` con lo que de verdad se sabe de él, y `campos_no_disponibles` \
+con lo que NO viene. En los criterios, la ficha trae la fecha, la autoridad y el \
+sentido del expediente cuando el acervo los tiene; lo que falte, falta.
 
    Escribe en FUENTES **sólo** lo que venga en la ficha. Si el sentido de \
 resolución no está, omítelo — no escribas "AUTORIZADA" ni "CIERRE POR \

@@ -170,6 +170,10 @@ class Decisions(BaseModel):
     fuga_instrucciones: Optional[dict[str, Any]] = None
     # Expedientes recuperados que pasaron del tope del contexto (10-oct).
     registros_resumidos: Optional[dict[str, Any]] = None
+    # Barridos de criterios (modo, revisados, temas, mostrados) y cobertura de
+    # la ficha del expediente en los criterios.
+    barridos_criterios: list[dict[str, Any]] = Field(default_factory=list)
+    fichas_criterios: Optional[dict[str, Any]] = None
     # Historia procesal (COFECE 25-sep §4.3): documentos usados que tenían
     # actuaciones posteriores, y las que la respuesta no mencionó.
     historia_procesal: Optional[dict[str, Any]] = None

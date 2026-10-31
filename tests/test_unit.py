@@ -1274,7 +1274,8 @@ class TestValidacionAntesDeEmitir:
         r = validar_borrador("El voto lo emitió la magistrada X [C14].",
                              self._Reg(["C1"]))
         # Se retira, no se anota: un aviso pegado no deshace una aseveración.
-        assert "AFIRMACIÓN RETIRADA" in r["texto"]
+        assert "se omitió 1 afirmación" in r["texto"]
+        assert "AFIRMACIÓN RETIRADA" not in r["texto"]
         assert "magistrada X" not in r["texto"]
         # Y sigue disponible para auditar.
         assert any("magistrada X" in f for f in r["frases_sin_respaldo"])
@@ -2392,7 +2393,7 @@ class TestUnaAfirmacionSinCitaSeRetiraNoSeAnota:
     def test_la_afirmacion_desaparece_del_texto(self):
         r = self._v("La COFECE impuso una multa de 40 millones [C9].")
         assert "40 millones" not in r["texto"]
-        assert "AFIRMACIÓN RETIRADA" in r["texto"]
+        assert "se omitió 1 afirmación" in r["texto"]
 
     def test_pero_queda_en_la_traza(self):
         """Retirarla del texto no es borrarla del expediente."""
