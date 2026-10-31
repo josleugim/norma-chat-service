@@ -132,7 +132,14 @@ CAMPOS_TEXTO = frozenset({
 })
 
 # El universo completo cabe en una petición; este es el techo por defecto.
-LIMIT_UNIVERSO = 5000
+#
+# Era 5,000 y el acervo lo rebasó: el 31-oct tiene 5,108 expedientes, y con
+# 5,000 quedaban fuera 108 (4 VCN, 31 IO, 73 DE) del mapa de historia procesal,
+# de los conteos y agregaciones sin prefijo y del censo. Se declaraba como
+# universo incompleto, pero se perdían. El techo va con holgura para que el
+# crecimiento normal del acervo no lo vuelva a alcanzar sin aviso; si lo
+# alcanza, `completo=False` lo sigue diciendo.
+LIMIT_UNIVERSO = 20000
 
 # A partir de este tope, la petición trae el acervo entero y necesita otro
 # timeout. No es un detalle de afinación: cuando José Miguel repuso los seis
