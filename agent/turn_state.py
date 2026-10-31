@@ -138,6 +138,13 @@ class TurnState:
     fuga_instrucciones: dict | None = None
     # Búsqueda de expedientes que pasó del tope y entró resumida.
     registros_resumidos: dict | None = None
+    # Barridos de criterios del turno (core/barrido.py). `barrido_pendiente`
+    # lo lee el serializador para pegarle al resultado el índice y la
+    # advertencia; `barridos` va a la traza.
+    barrido_pendiente: dict | None = None
+    barridos: list[dict] = field(default_factory=list)
+    # Criterios a los que se les unió la ficha del expediente, y a cuántos no.
+    fichas_criterios: dict | None = None
 
     # Historia procesal (COFECE 25-sep §4.3): el mapa vigente y, por documento
     # recuperado, qué actuaciones relacionadas se le mostraron al modelo.

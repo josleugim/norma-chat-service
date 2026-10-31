@@ -28,6 +28,30 @@ TOOLS = [
                     "description": "Número máximo de resultados (5-30). Usa 8 para preguntas simples, 15 para medias, 25 para complejas.",
                     "default": 15,
                 },
+                "barrido": {
+                    "type": "boolean",
+                    "description": (
+                        "Revisa los 300 criterios más cercanos en vez de los "
+                        "primeros 15 y devuelve un pasaje por expediente y "
+                        "tema, más un índice de temas con cuántos criterios y "
+                        "expedientes trae cada uno y sus años. ÚSALO cuando la "
+                        "pregunta pida todos los precedentes, agruparlos por "
+                        "tema, compararlos o ver si son consistentes en el "
+                        "tiempo: con 15 resultados se pierden expedientes del "
+                        "tema. No es una lista completa: dilo así."
+                    ),
+                    "default": False,
+                },
+                "tema": {
+                    "type": "string",
+                    "description": (
+                        "Nombre de un tema del índice de un barrido previo "
+                        "(p. ej. \"Dimensión temporal\"). Devuelve todos los "
+                        "criterios de ese tema dentro del barrido, ordenados "
+                        "por fecha de resolución. Usa la misma `query` del "
+                        "barrido."
+                    ),
+                },
                 # C01 del diagnóstico de COFECE (21-sep-2026). El cliente ya
                 # sabía serializar este filtro; la herramienta no lo exponía,
                 # así que el alcance documental quedaba en manos de escribir el

@@ -40,6 +40,8 @@ _CLAVES_DEL_PAYLOAD = {
     "universo_recuperado", "universo_tras_filtros",
     "fuera_de_cobertura_del_calendario", "text_len_in_context",
     "NO_DISPONIBLE_EN_ESTA_BUSQUEDA", "AUSENCIA_NO_CONCLUYENTE",
+    "BARRIDO", "indice_de_temas", "expedientes_en_el_barrido",
+    "criterios_del_tema", "agrupados_por_expediente_y_tema",
     "ACUERDOS_DE_SUSPENSION_COINCIDENTES", "ADVERTENCIA_COBERTURA",
     "ADVERTENCIA_COBERTURA_PARCIAL", "ADVERTENCIA_CONFIDENCIALES",
     "ADVERTENCIA_VALORES_AMBIGUOS", "ALCANCE_DE_LA_CIFRA",

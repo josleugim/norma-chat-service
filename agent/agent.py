@@ -40,6 +40,8 @@ from core.estructura_interna import expuestos as estructura_expuesta
 from core.fuga_instrucciones import reproduce_instrucciones, RESPUESTA_BLOQUEADA
 from core.personas import CAMPOS_PERSONA, filtrar_por_persona
 from core.relaciones import completar_historia_procesal, resumen_historia_procesal
+from core import barrido as barrido_criterios
+from core.fichas import IndiceDeFichas, faltantes as campos_sin_ficha
 from core.aggregation import autoridad_de_la_pregunta
 from core.voz import clasificar_voz, etiqueta as etiqueta_voz, VOTO_PARTICULAR, NO_IDENTIFICADA
 from models.schemas import (
@@ -659,6 +661,10 @@ class NormaPlusAgent:
                 "fuga_instrucciones", state.fuga_instrucciones, "derived")
             collector.set_decision(
                 "registros_resumidos", state.registros_resumidos, "derived")
+            collector.set_decision(
+                "barridos_criterios", state.barridos, "derived")
+            collector.set_decision(
+                "fichas_criterios", state.fichas_criterios, "derived")
             collector.set_decision(
                 "historia_procesal",
                 resumen_historia_procesal(
@@ -1580,10 +1586,26 @@ class NormaPlusAgent:
             str(e).strip() for e in (args.get("en_expedientes") or [])
             if str(e or "").strip()
         ]
+        fichas = await self._fichas()
+        tema = str(args.get("tema") or "").strip() or None
         if expedientes:
             results = await self._buscar_criterios_por_documento(
                 args["query"], expedientes, args.get("top_k", 15), collector, state
             )
+        elif args.get("barrido") or tema:
+            # Preguntas de "todos", agrupar por tema o evolución en el tiempo:
+            # el top-15 no alcanza (core/barrido.py).
+            candidatos = await self.criterios.search(
+                query=args["query"],
+                top_k=barrido_criterios.PROFUNDIDAD,
+                collector=collector,
+            )
+            results, info = barrido_criterios.condensar(candidatos, tema, fichas)
+            if state is not None:
+                state.barrido_pendiente = info
+                state.barridos.append({
+                    k: v for k, v in info.items() if k not in ("advertencia", "siguiente_paso")
+                } | {"query": args["query"]})
         else:
             results = await self.criterios.search(
                 query=args["query"],
@@ -1656,12 +1678,27 @@ class NormaPlusAgent:
             _emisor = _univ.emisor_de(case_link_de(d)) if _univ else None
             if _emisor:
                 d["emisor"] = _emisor
+            # La ficha del expediente (fecha, autoridad, sentido) sí existe en
+            # el acervo, aunque la búsqueda no la traiga: se une por caseLink.
+            # Sin ella el modelo no podía ver la época de un precedente
+            # (no competencia, 30-oct; core/fichas.py).
+            _ficha = fichas.get(case_link_de(d)) if fichas is not None else None
+            if _ficha:
+                d["ficha_fuente"] = _ficha
             d["campos_no_disponibles"] = [
-                c for c in ("autoridad", "sentido_resolucion",
-                            "fecha_resolucion")
+                c for c in campos_sin_ficha(_ficha)
                 if not (c == "autoridad" and _emisor)
             ]
             serialized.append(d)
+
+        if state is not None:
+            con_ficha = sum(1 for d in serialized if d.get("ficha_fuente"))
+            previo = state.fichas_criterios or {"con_ficha": 0, "sin_ficha": 0}
+            state.fichas_criterios = {
+                "con_ficha": previo["con_ficha"] + con_ficha,
+                "sin_ficha": previo["sin_ficha"] + len(serialized) - con_ficha,
+                "indice_cargado": fichas is not None,
+            }
 
         # ── Control de suficiencia ──────────────────────────
         # ¿Esta evidencia responde exactamente lo preguntado, o solo se le
@@ -3214,12 +3251,15 @@ class NormaPlusAgent:
         if getattr(self, "_mapa_lock", None) is None:
             self._mapa_lock = asyncio.Lock()
         async with self._mapa_lock:
-            mapa = self._mapa_relaciones
+            mapa = getattr(self, "_mapa_relaciones", None)
             if mapa is not None and time.time() - mapa.construido_en < self._TTL_RELACIONES:
                 return mapa
             try:
                 registros, _, completo = await self.estadistica.fetch_universe()
                 nuevo = MapaDeRelaciones.desde_registros(registros)
+                # La ficha de cada expediente sale del mismo universo: fecha,
+                # autoridad y sentido para los criterios (core/fichas.py).
+                self._indice_fichas = IndiceDeFichas.desde_registros(registros)
                 if not completo:
                     logger.warning(
                         "Mapa de relaciones sobre un universo incompleto: "
@@ -3234,7 +3274,20 @@ class NormaPlusAgent:
                     f"No se pudo construir el mapa de relaciones: "
                     f"{type(e).__name__}: {e}")
                 # Si hay uno anterior, mejor viejo que ninguno; se registra.
-                return self._mapa_relaciones
+                return getattr(self, "_mapa_relaciones", None)
+
+    async def _fichas(self):
+        """
+        Índice de fichas por `caseLink`, o None si el universo no cargó.
+
+        Nunca rompe la búsqueda de criterios: sin ficha, cada criterio declara
+        los campos que no trae, como antes de existir el índice.
+        """
+        try:
+            await self._relaciones()
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Fichas no disponibles: {type(e).__name__}: {e}")
+        return getattr(self, "_indice_fichas", None)
 
     def _historia_procesal(self, docs: list[dict], state) -> dict | None:
         """
@@ -3388,6 +3441,13 @@ class NormaPlusAgent:
                 if state is not None:
                     state.registros_resumidos = {
                         "recuperados": len(result), "mostrados": len(payload["results"])}
+
+            # El barrido viaja con su índice y su advertencia: es una muestra
+            # grande, no la lista completa del tema.
+            if (tool_name == "buscar_criterios" and state is not None
+                    and state.barrido_pendiente):
+                payload["BARRIDO"] = state.barrido_pendiente
+                state.barrido_pendiente = None
 
             # Composición de la evidencia, explícita para el modelo y para la
             # traza: una respuesta que mezcla resoluciones con sentencias no
