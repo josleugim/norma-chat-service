@@ -26,7 +26,8 @@ y, cuando una afirmación entera dependía de uno, la **retira**.
 Antes la conservaba con un aviso pegado. COFECE lo rechazó en I8 de su revisión
 del 23-sep: *"Si se retira una cita inválida, no debe conservarse una afirmación
 categórica que dependía exclusivamente de ella."* Tenían razón — el lector se
-queda con la frase, no con la nota. El texto retirado sigue en la traza.
+queda con la frase, no con la nota. El texto retirado sigue en la traza, y el
+cuerpo cierra con una nota que dice cuántas se omitieron.
 
 **No pretende verificar que el fragmento sostenga la afirmación.** Eso exige un
 verificador semántico, y el diagnóstico es explícito en que no debe presentarse
@@ -137,13 +138,23 @@ def validar_borrador(texto: str, registry) -> dict:
             # Se retira. El texto retirado viaja en `frases_sin_respaldo` para
             # la traza, así que no se pierde para auditar — sólo deja de
             # afirmarse ante quien lee.
+            #
+            # Sin aviso en el lugar de la frase (31-oct): un corchete a mitad
+            # del texto se lee como falla del sistema. La retirada se declara
+            # una vez, al final del cuerpo, y la frase queda en la traza.
             sin_respaldo.append(limpia)
-            salida.append(
-                "[AFIRMACIÓN RETIRADA: su única cita no correspondía a "
-                "ninguna fuente de esta respuesta]"
-            )
 
     nuevo = " ".join(s for s in salida if s)
+    # Un renglón que se quedó en una viñeta vacía tras retirar su frase.
+    nuevo = re.sub(r"(?m)^[ \t]*(?:[-*•]|\d+\.)[ \t]*$\n?", "", nuevo)
+    if sin_respaldo:
+        n = len(sin_respaldo)
+        nuevo = nuevo.rstrip() + (
+            f"\n\n_Nota: se omitió {n} afirmación porque su cita no "
+            "correspondía a ninguna fuente de esta respuesta._"
+            if n == 1 else
+            f"\n\n_Nota: se omitieron {n} afirmaciones porque sus citas no "
+            "correspondían a ninguna fuente de esta respuesta._")
     if fuentes:
         renglones = [
             ln for ln in fuentes.splitlines()

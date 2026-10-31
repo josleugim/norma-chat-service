@@ -40,7 +40,7 @@ class CitationRegistry:
         self._by_key: dict[str, str] = {}
         self._counters = {"C": 0, "E": 0}
 
-    def assign(self, doc: dict, kind: str) -> str:
+    def assign(self, doc: dict, kind: str, preferido: str | None = None) -> str:
         """
         Registra un documento y devuelve su marcador ('C3', 'E7'), o cadena
         vacía si el documento no tiene identidad.
@@ -66,8 +66,23 @@ class CitationRegistry:
         if key in self._by_key:
             return self._by_key[key]
 
+        # Un documento que ya tuvo marcador en un turno anterior conserva ese
+        # mismo marcador si está libre: la respuesta previa, que el modelo lee
+        # en el historial, lo citó así. Renumerar haría que `[C2]` del
+        # historial apuntara a otro documento.
+        pref = (preferido or "").strip().upper()
+        if (pref.startswith(kind) and pref[len(kind):].isdigit()
+                and pref not in self._docs):
+            self._counters[kind] = max(self._counters[kind], int(pref[len(kind):]))
+            self._by_key[key] = pref
+            self._docs[pref] = doc
+            return pref
+
         self._counters[kind] += 1
         marker = f"{kind}{self._counters[kind]}"
+        while marker in self._docs:  # un preferido pudo ocupar el siguiente
+            self._counters[kind] += 1
+            marker = f"{kind}{self._counters[kind]}"
         self._by_key[key] = marker
         self._docs[marker] = doc
         return marker

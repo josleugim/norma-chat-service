@@ -41,6 +41,7 @@ from core.fuga_instrucciones import reproduce_instrucciones, RESPUESTA_BLOQUEADA
 from core.personas import CAMPOS_PERSONA, filtrar_por_persona
 from core.relaciones import completar_historia_procesal, resumen_historia_procesal
 from core import barrido as barrido_criterios
+from core.validacion_salida import MARCADOR as MARCADOR_CITA
 from core.fichas import IndiceDeFichas, faltantes as campos_sin_ficha
 from core.aggregation import autoridad_de_la_pregunta
 from core.voz import clasificar_voz, etiqueta as etiqueta_voz, VOTO_PARTICULAR, NO_IDENTIFICADA
@@ -549,11 +550,25 @@ class NormaPlusAgent:
         flat_expedientes = [item for sublist in all_expedientes_results for item in sublist]
         self.evidence_cache.recordar_anclas(session_id, state.anclas_criterio)
         if flat_criterios or flat_expedientes:
+            # El marcador de cada criterio y cuáles citó la respuesta: el turno
+            # siguiente los reusa tal cual, para que una cita del historial
+            # siga resolviendo al mismo documento (31-oct, t03).
+            marcadores_criterios: dict[str, str] = {}
+            registro = getattr(state, "registry", None) if state else None
+            if registro is not None:
+                for _m in registro.markers():
+                    _d = registro.resolve(_m)
+                    if _m.startswith("C") and isinstance(_d, dict) and _d.get("id"):
+                        marcadores_criterios[str(_d["id"])] = _m
+            citados = sorted({m for m in MARCADOR_CITA.findall(final_text or "")
+                              if m.startswith("C")})
             self.evidence_cache.update(
                 session_id=session_id,
                 query=user_query,
                 criterios=flat_criterios,
                 expedientes=flat_expedientes,
+                marcadores=marcadores_criterios,
+                citados=citados,
             )
 
         # ── Resolver citas contra el registro del turno ─────

@@ -49,6 +49,11 @@ MATERIAL_SENSIBLE_RE = re.compile(
 )
 
 
+# Criterios citados en la respuesta anterior que se traen siempre al turno
+# siguiente, aunque pasen del límite general.
+MAX_CITADOS_PREVIOS = 30
+
+
 def recortar_sin_borrar_en_silencio(texto: str, limite: int = 700) -> str:
     """
     Recorta un fragmento largo **declarando** lo que quedó fuera.
@@ -186,9 +191,15 @@ class EvidenceCache:
         query: str,
         criterios: list[dict],
         expedientes: list[dict],
+        marcadores: dict | None = None,
+        citados: list[str] | None = None,
     ):
         """
         Guarda los resultados de herramientas de este turno en el cache.
+
+        `marcadores` (id de criterio → marcador) y `citados` (marcadores que
+        usó la respuesta) permiten que el turno siguiente registre esos mismos
+        documentos con el mismo marcador.
         Llamar al final de cada turno del agente.
         """
         session = self._ensure_session(session_id)
@@ -230,6 +241,8 @@ class EvidenceCache:
             "criterios": criterios,
             "expedientes": expedientes,
             "used_ids": sorted(list(used_ids)),
+            "marcadores": dict(marcadores or {}),
+            "citados": list(citados or []),
         })
 
         # Recortar historial de turnos
@@ -334,12 +347,26 @@ class EvidenceCache:
 
         lineas: list[str] = []
         vistos: set[str] = set()
+        # Lo que la respuesta anterior CITÓ entra siempre, aunque pase del
+        # límite, y con su mismo marcador: es lo que un seguimiento ("¿estás
+        # seguro?", "amplía el punto 3") va a volver a citar. El 31-oct, en un
+        # seguimiento, `[C14]` quedó fuera de los 12 y su frase se retiró.
+        ultimo = session["turns"][-1]
+        citados = set(ultimo.get("citados") or [])
+        limite = max(limite, min(len(citados), MAX_CITADOS_PREVIOS))
+
+        def _orden(turn, c):
+            m = (turn.get("marcadores") or {}).get(str(c.get("id")))
+            return (0 if (turn is ultimo and m in citados) else 1)
+
         # De los turnos más recientes hacia atrás: lo último pesa más.
         for turn in reversed(session["turns"][-3:]):
-            for c in (turn.get("criterios") or []):
+            criterios = turn.get("criterios") or []
+            for c in sorted(criterios, key=lambda c: _orden(turn, c)):
                 if len(vistos) >= limite:
                     break
-                marker = registry.assign(c, "C")
+                previo = (turn.get("marcadores") or {}).get(str(c.get("id")))
+                marker = registry.assign(c, "C", preferido=previo)
                 if not marker or marker in vistos:
                     continue
                 vistos.add(marker)
@@ -408,11 +435,13 @@ class EvidenceCache:
 
 
     def update(self, session_id: str, query: str, criterios: list[dict],
-               expedientes: list[dict]):
+               expedientes: list[dict], marcadores: dict | None = None,
+               citados: list[str] | None = None):
         with self._lock:
             self._entrar(session_id, escribe=True)
             return self._update(session_id=session_id, query=query,
-                                criterios=criterios, expedientes=expedientes)
+                                criterios=criterios, expedientes=expedientes,
+                                marcadores=marcadores, citados=citados)
 
     def select(self, session_id: str, user_query: str):
         with self._lock:
